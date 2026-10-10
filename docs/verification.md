@@ -72,4 +72,13 @@ This needs `hjson` and `mako` in the Python that runs ChipLeap: `pip install "ch
 - explorer determinism, Pareto non-dominance and the example specs;
 - the MCP server end to end over an in-process client, and a run-log replay.
 
-Tests that need Verilator are marked `rtl` and skip themselves when it is missing.
+Tests that need Verilator are marked `rtl` and skip themselves when it is missing; tests
+that need a commercial simulator or synthesis tool on the path are marked `commercial`.
+
+## Commercial tools
+
+The simulation and synthesis steps also run on Cadence Xcelium, Synopsys VCS or Siemens
+Questa and on Cadence Genus or Synopsys Design Compiler, on this machine or on a design
+server over ssh (`--sim-tool`, `--synth-tool`, `--remote`), and a foundry PDK can be added
+from its liberty files with `chipleap tech add`. [commercial-tools.md](commercial-tools.md)
+explains each.

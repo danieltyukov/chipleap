@@ -59,7 +59,7 @@ jobs:
           unzip -q sv2v.zip && sudo install sv2v-Linux/sv2v /usr/local/bin/sv2v
       - run: pip install -e ".[dev,xheep]"
       - name: RTL tests
-        run: pytest tests/test_rtl.py tests/test_gen.py -v
+        run: pytest tests/test_rtl.py tests/test_gen.py tests/test_commercial.py -v
       - name: Generate, lint, simulate and check a design with X-HEEP
         run: |
           chipleap explore examples/llama-3.2-1b-decode.yaml --samples 300 -o out

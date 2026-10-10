@@ -108,6 +108,23 @@ def all_tools() -> list[Tool]:
     return [verilator(), cxx(), yosys(), openroad(), sta(), librelane(), riscv_gcc()]
 
 
+# Commercial tools the backends drive (chipleap.verify.backends). They are only looked up
+# on the path, never started here, so listing them checks out no licence.
+COMMERCIAL = (
+    ("xrun", "simulation (Cadence Xcelium)"),
+    ("vcs", "simulation (Synopsys VCS)"),
+    ("vsim", "simulation (Siemens Questa)"),
+    ("genus", "synthesis (Cadence Genus)"),
+    ("dc_shell", "synthesis (Synopsys Design Compiler)"),
+    ("lc_shell", "liberty to .db for Design Compiler (Synopsys Library Compiler)"),
+    ("innovus", "place and route scripts (Cadence Innovus)"),
+)
+
+
+def commercial() -> list[Tool]:
+    return [Tool(n, shutil.which(n), "", purpose) for n, purpose in COMMERCIAL]
+
+
 def ihp_liberty() -> Path | None:
     """The IHP SG13G2 typical-corner standard-cell library, if a PDK is installed."""
     candidates = []

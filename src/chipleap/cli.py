@@ -293,9 +293,11 @@ def _print_steps(results: list[Any]) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
+    from chipleap.verify.remote import Remote
     from chipleap.verify.run import verify_bundle
 
     steps = tuple(s.strip() for s in args.steps.split(",") if s.strip())
+    remote = Remote.from_env(getattr(args, "remote", None), getattr(args, "remote_setup", None))
     results = verify_bundle(
         Path(args.bundle),
         steps=steps,
@@ -303,6 +305,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
         fetch_xheep=args.fetch_xheep,
         cases=args.cases,
         seed=args.seed,
+        sim_tool=getattr(args, "sim_tool", "verilator"),
+        synth_tool=getattr(args, "synth_tool", "yosys"),
+        synth_tech=getattr(args, "synth_tech", "ihp-sg13g2"),
+        remote=remote,
     )
     code = _print_steps(results)
     print(f"\nWrote {args.bundle}/verify/VERIFY.md and verify.json")
@@ -352,7 +358,69 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             str(co) if co else "checkout for config checks (chipleap verify --fetch-xheep)",
         ]
     )
+    from chipleap.verify.remote import Remote, RemoteError
+    from chipleap.verify.tools import commercial
+
+    rows += [[t.name, "yes" if t.found else "no", "", t.purpose] for t in commercial()]
+    remote = Remote.from_env(getattr(args, "remote", None), getattr(args, "remote_setup", None))
+    if remote is not None:
+        tools = commercial()
+        try:
+            found = remote.which([t.name for t in tools])
+        except RemoteError as exc:
+            print(table(["tool", "found", "version", "used for"], rows))
+            print(f"\n{exc}", file=sys.stderr)
+            return 1
+        rows += [
+            [f"{t.name} @ {remote.host}", "yes" if t.name in found else "no", "", t.purpose]
+            for t in tools
+        ]
     print(table(["tool", "found", "version", "used for"], rows))
+    return 0
+
+
+def cmd_tech(args: argparse.Namespace) -> int:
+    from chipleap.hw import techlib
+    from chipleap.hw.tech import user_tech_dir
+
+    if args.tech_cmd == "list":
+        rows = [
+            [
+                k,
+                t.name,
+                f"{t.node_nm}",
+                "yours" if t.user else ("measured" if t.measured else "scaled"),
+                t.host or "",
+            ]
+            for k, t in TECHNOLOGIES.items()
+        ]
+        print(table(["key", "name", "nm", "source", "files on"], rows))
+        print(f"\nYour technologies live in {user_tech_dir() or '(turned off)'}")
+        return 0
+    if args.tech_cmd == "remove":
+        print(f"Removed {techlib.remove(args.name)}")
+        return 0
+    tech, basis = techlib.measure(
+        args.name,
+        args.liberty,
+        args.node,
+        sram=args.sram_liberty,
+        vdd=args.vdd,
+        max_mhz=args.max_mhz,
+        max_io_mts=args.max_io_mts,
+        lef=tuple(args.lef),
+        db=args.db,
+        host=args.remote,
+        name=args.display_name,
+    )
+    path = techlib.save(tech, force=args.force)
+    print(f"Added technology {tech.key!r} ({tech.node_nm} nm, {tech.vdd:g} V) in {path}")
+    for what, how in basis.items():
+        print(f"  {what}: {how}")
+    print(
+        f"Explore with it: constraints: {{tech: [{tech.key}]}} in a spec, or "
+        f"chipleap verify DIR --synth-tool genus --synth-tech {tech.key}"
+    )
     return 0
 
 
@@ -457,10 +525,58 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fetch-xheep", action="store_true", help="clone the tested X-HEEP commit")
     s.add_argument("--cases", type=int, default=0, help="limit the number of simulation cases")
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument(
+        "--sim-tool",
+        default="verilator",
+        choices=["verilator", "xcelium", "vcs", "questa", "verilator-sv"],
+        help="simulator: Verilator (default), Cadence Xcelium, Synopsys VCS, Siemens Questa",
+    )
+    s.add_argument(
+        "--synth-tool",
+        default="yosys",
+        choices=["yosys", "genus", "dc"],
+        help="synthesis: Yosys (default), Cadence Genus or Synopsys Design Compiler",
+    )
+    s.add_argument(
+        "--synth-tech",
+        default="ihp-sg13g2",
+        help="technology whose liberty Genus or Design Compiler maps to (chipleap tech add)",
+    )
+    s.add_argument("--remote", help="run the simulator and synthesis on this ssh host")
+    s.add_argument(
+        "--remote-setup",
+        help="shell snippet that puts the tools on the path there (CHIPLEAP_REMOTE_SETUP)",
+    )
     s.set_defaults(func=cmd_verify)
 
-    s = sub.add_parser("doctor", help="which open-source tools ChipLeap can use here")
+    s = sub.add_parser("doctor", help="which tools ChipLeap can use here or on a server")
+    s.add_argument("--remote", help="also list the commercial tools on this ssh host")
+    s.add_argument("--remote-setup", help="shell snippet that puts the tools on the path there")
     s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("tech", help="technologies of your own, measured from liberty files")
+    tsub = s.add_subparsers(dest="tech_cmd", required=True)
+    t = tsub.add_parser("add", help="measure a PDK's liberty files and add it as a technology")
+    t.add_argument("name", help="key for the technology, for example tsmc40lp")
+    t.add_argument("--liberty", required=True, help="standard-cell liberty (typical corner)")
+    t.add_argument("--node", type=int, required=True, help="process node in nm")
+    t.add_argument(
+        "--sram-liberty", action="append", default=[], help="SRAM macro .lib file or directory"
+    )
+    t.add_argument("--vdd", type=float, default=0.0, help="supply (default: the library's)")
+    t.add_argument("--max-mhz", type=float, default=0.0, help="practical clock")
+    t.add_argument("--max-io-mts", type=int, default=0, help="fastest external memory rate")
+    t.add_argument("--lef", action="append", default=[], help="technology LEF, then cell LEFs")
+    t.add_argument("--db", default="", help="compiled .db for Design Compiler")
+    t.add_argument("--remote", default="", help="the files are on this ssh host")
+    t.add_argument("--display-name", default="", help="longer name for reports")
+    t.add_argument("--force", action="store_true", help="replace an existing file")
+    t.set_defaults(func=cmd_tech)
+    t = tsub.add_parser("list", help="list technologies, built in and your own")
+    t.set_defaults(func=cmd_tech)
+    t = tsub.add_parser("remove", help="remove a technology of your own")
+    t.add_argument("name")
+    t.set_defaults(func=cmd_tech)
 
     s = sub.add_parser("init", help="write an example spec")
     s.add_argument("path", nargs="?", default="chipleap.yaml")

@@ -62,6 +62,7 @@ markers = [
   "rtl: needs Verilator (skipped when it is not installed)",
   "synth: needs Yosys (skipped when it is not installed)",
   "xheep: needs an X-HEEP checkout in CHIPLEAP_XHEEP_DIR",
+  "commercial: needs a commercial simulator or synthesis tool on the path",
 ]
 
 [tool.ruff]

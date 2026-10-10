@@ -333,26 +333,43 @@ def generate_soc(
 
 
 def verify_soc(
-    out_dir: str, steps: str = "consistency,lint,sim,synth,xheep", fetch_xheep: bool = False
+    out_dir: str,
+    steps: str = "consistency,lint,sim,synth,xheep",
+    fetch_xheep: bool = False,
+    sim_tool: str = "verilator",
+    synth_tool: str = "yosys",
+    synth_tech: str = "ihp-sg13g2",
+    remote: str = "",
+    remote_setup: str = "",
 ) -> dict[str, Any]:
+    from chipleap.verify.backends import SIM_TOOLS, SYNTH_TOOLS
+    from chipleap.verify.remote import Remote
     from chipleap.verify.run import verify_bundle
 
+    if sim_tool not in SIM_TOOLS:
+        raise ToolError(f"sim_tool must be one of {', '.join(SIM_TOOLS)}")
+    if synth_tool not in SYNTH_TOOLS:
+        raise ToolError(f"synth_tool must be one of {', '.join(SYNTH_TOOLS)}")
     res = verify_bundle(
         Path(out_dir).expanduser(),
         steps=tuple(x.strip() for x in steps.split(",") if x.strip()),
         fetch_xheep=fetch_xheep,
+        sim_tool=sim_tool,
+        synth_tool=synth_tool,
+        synth_tech=synth_tech,
+        remote=Remote.from_env(remote or None, remote_setup or None),
     )
     return {"steps": [{"step": r.name, "status": r.status, "summary": r.summary} for r in res]}
 
 
 def check_tools() -> dict[str, Any]:
-    from chipleap.verify.tools import all_tools, ihp_liberty
+    from chipleap.verify.tools import all_tools, commercial, ihp_liberty
 
     lib = ihp_liberty()
     return {
         "tools": [
             {"name": t.name, "found": t.found, "version": t.version, "used_for": t.purpose}
-            for t in all_tools()
+            for t in all_tools() + commercial()
         ],
         "ihp_sg13g2_liberty": str(lib) if lib else None,
     }
@@ -511,20 +528,38 @@ def build_server(log_dir: str | None = None) -> Any:
         )
 
     @server.tool(
-        description="Verify a bundle with open tools: Verilator lint, randomized "
-        "simulation against a golden model with a cycle cross-check, Yosys synthesis "
-        "on IHP SG13G2, X-HEEP config validation. Steps: consistency,lint,sim,synth,xheep."
+        description="Verify a bundle: Verilator lint, randomized simulation against a "
+        "golden model with a cycle cross-check, synthesis, X-HEEP config validation. Steps: "
+        "consistency,lint,sim,synth,xheep. sim_tool: verilator (default), xcelium, vcs or "
+        "questa; synth_tool: yosys (default), genus or dc; synth_tech: the technology to "
+        "map to; remote: an ssh host where the commercial tools run, with remote_setup the "
+        "shell snippet that puts them on the path there."
     )
     def verify_soc(
-        out_dir: str, steps: str = "consistency,lint,sim,synth,xheep", fetch_xheep: bool = False
+        out_dir: str,
+        steps: str = "consistency,lint,sim,synth,xheep",
+        fetch_xheep: bool = False,
+        sim_tool: str = "verilator",
+        synth_tool: str = "yosys",
+        synth_tech: str = "ihp-sg13g2",
+        remote: str = "",
+        remote_setup: str = "",
     ) -> dict[str, Any]:
         return logged("verify_soc", TOOLS["verify_soc"])(
-            out_dir=out_dir, steps=steps, fetch_xheep=fetch_xheep
+            out_dir=out_dir,
+            steps=steps,
+            fetch_xheep=fetch_xheep,
+            sim_tool=sim_tool,
+            synth_tool=synth_tool,
+            synth_tech=synth_tech,
+            remote=remote,
+            remote_setup=remote_setup,
         )
 
     @server.tool(
-        description="Which open-source tools (Verilator, Yosys, OpenROAD, sv2v, the IHP "
-        "PDK) are available on this machine."
+        description="Which tools are available on this machine: the open ones (Verilator, "
+        "Yosys, OpenROAD, LibreLane, sv2v, the IHP PDK) and commercial simulators and "
+        "synthesis tools on the path (Xcelium, VCS, Questa, Genus, Design Compiler, Innovus)."
     )
     def check_tools() -> dict[str, Any]:
         return logged("check_tools", TOOLS["check_tools"])()
