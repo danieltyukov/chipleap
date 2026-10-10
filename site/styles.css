@@ -24,6 +24,8 @@
   --fp-phy: #4a4f6e;
   --display: "Space Grotesk", "IBM Plex Sans", system-ui, sans-serif;
   --sans: "IBM Plex Sans", -apple-system, "Segoe UI", system-ui, sans-serif;
+  /* Figures: Plex has plain, even numerals; Space Grotesk's flagged 1 reads oddly in data. */
+  --num: "IBM Plex Sans", -apple-system, "Segoe UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
   --shell: 1180px;
   --radius: 10px;
@@ -121,7 +123,7 @@ section { padding: 104px 0; }
 .panel-card { position: sticky; top: 92px; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 22px 22px 18px; }
 .panel-top { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
 .panel-top .k { display: block; font-size: 12.5px; color: var(--faint); }
-.panel-top .v { display: block; font: 600 17px var(--display); letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-top .v { display: block; font: 600 17px var(--num); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fp { width: 100%; height: auto; display: block; background: radial-gradient(circle at 50% 45%, #fff 0, var(--paper) 70%); border-radius: 8px; }
 .fp .die { fill: #1d2622; }
 .fp .core { fill: #26302b; }
@@ -131,7 +133,7 @@ section { padding: 104px 0; }
 .fp .scale { font: 12px var(--sans); fill: var(--faint); }
 .fp .scale-line { stroke: var(--faint); stroke-width: 1; }
 .panel-meter { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-top: 14px; }
-.meter-num span { display: block; font: 600 46px/1 var(--display); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.meter-num span { display: block; font: 600 46px/1 var(--num); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .meter-num small { display: block; font-size: 13px; color: var(--faint); margin-top: 6px; }
 .spark { width: 240px; max-width: 55%; height: auto; }
 .spark .target { stroke: var(--copper); stroke-dasharray: 4 4; stroke-width: 1.2; }
@@ -162,7 +164,8 @@ section { padding: 104px 0; }
 .dark p code { background: rgba(255, 255, 255, 0.08); }
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--dark-line); border: 1px solid var(--dark-line); border-radius: var(--radius); overflow: hidden; margin-bottom: 40px; }
 .stat { background: var(--dark); padding: 26px 24px; }
-.stat .num { display: block; font: 600 44px/1 var(--display); letter-spacing: -0.03em; color: #fff; font-variant-numeric: tabular-nums; }
+.stat .num { display: block; font: 600 44px/1 var(--num); letter-spacing: -0.02em; color: #fff; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat .num small { font-size: 0.45em; font-weight: 500; letter-spacing: 0; color: var(--dark-muted); margin-left: 6px; }
 .stat .num em { font-style: normal; color: #5fd39b; }
 .stat .lab { display: block; font-size: 14.5px; color: var(--dark-muted); margin-top: 12px; }
 .vt { width: 100%; border-collapse: collapse; font-size: 15.5px; }
@@ -195,7 +198,7 @@ section { padding: 104px 0; }
 .calc label { display: block; font-size: 13px; color: var(--muted); margin: 0 0 6px; }
 .calc select { width: 100%; font: 15.5px var(--sans); color: var(--ink); background: var(--white); border: 1px solid #ccd3cf; border-radius: 8px; padding: 9px 10px; }
 .calc .result { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 14px; border-top: 1px solid var(--line); padding-top: 18px; }
-.calc output { font: 600 54px/1 var(--display); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.calc output { font: 600 54px/1 var(--num); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .calc .unit { font-size: 16px; color: var(--muted); }
 .calc .verdict { grid-column: 1 / -1; margin: 0; font-size: 15.5px; color: var(--muted); }
 .calc .verdict.bad { color: var(--copper); }
@@ -271,6 +274,9 @@ details p { color: var(--muted); margin: 12px 0 0; }
   .calc .result { order: 6; } .calc .verdict { order: 7; }
   .calc > div:nth-child(2), .calc > div:nth-child(4) { grid-column: auto; }
   .calc output { font-size: 46px; }
+  .stat { padding: 20px 18px; }
+  .stat .num { font-size: 36px; }
+  .stat .lab { font-size: 14px; }
   .console-body { min-height: 0; }
   .callout svg, .callout .tag { display: none; }
   .callout .dot { width: 20px; height: 20px; margin: -10px 0 0 -10px; box-shadow: 0 0 0 2px var(--green), 0 2px 8px rgba(14, 19, 17, 0.25); display: grid; place-items: center; }

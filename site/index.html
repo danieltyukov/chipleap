@@ -25,7 +25,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=9f6df636b8">
+  <link rel="stylesheet" href="styles.css?v=bc8774b329">
 </head>
 <body>
   <header class="nav">
@@ -157,7 +157,7 @@
           <p>The accelerator model is the tile schedule the generated hardware runs, so the two can be compared cycle for cycle. These results come from <code>chipleap verify</code> and the test suite on this release.</p>
         </div>
         <!-- stats:start -->
-<div class="stats"><div class="stat"><span class="num" data-to="21.0" data-dec="0" data-suffix="">21</span><span class="lab">randomized jobs bit-exact against a golden model</span></div><div class="stat"><span class="num" data-to="0.0" data-dec="1" data-suffix="%">0.0%</span><span class="lab">cycle error between the model and the RTL without memory stalls</span></div><div class="stat"><span class="num" data-to="27.0" data-dec="0" data-suffix="">27</span><span class="lab">X-HEEP templates rendered for the generated configuration</span></div><div class="stat"><span class="num" data-to="152.3" data-dec="0" data-suffix=" MHz">152 MHz</span><span class="lab">clock the synthesized accelerator logic reaches on IHP SG13G2, estimated</span></div></div>
+<div class="stats"><div class="stat"><span class="num" data-to="21.0" data-dec="0" data-suffix="">21</span><span class="lab">random jobs, bit-exact against a golden model</span></div><div class="stat"><span class="num" data-to="0.0" data-dec="1" data-suffix="%">0.0%</span><span class="lab">cycle error, model against RTL, without memory stalls</span></div><div class="stat"><span class="num" data-to="27.0" data-dec="0" data-suffix="">27</span><span class="lab">X-HEEP templates rendered for the configuration</span></div><div class="stat"><span class="num" data-to="152.3" data-dec="0" data-suffix="">152<small>MHz</small></span><span class="lab">clock the accelerator logic reaches on IHP SG13G2</span></div></div>
 <!-- stats:end -->
         <!-- verify:start -->
 <div class="table-scroll"><table class="vt"><tbody><tr><th scope="row">Consistency</th><td><span class="ok">Pass</span> design.yaml, RTL wrappers, driver, register map and X-HEEP configuration agree.</td></tr><tr><th scope="row">Lint</th><td><span class="ok">Pass</span> Verilator -Wall reports no warnings.</td></tr><tr><th scope="row">Simulation</th><td><span class="ok">Pass</span> 21 randomized jobs bit-exact; cycle model error 0.0% max without stalls, 3.5% mean with random stalls.</td></tr><tr><th scope="row">Synthesis</th><td><span class="ok">Pass</span> Logic cell area 0.3144 mm² on IHP SG13G2 (model 0.3217 mm², +2%), critical path 6.12 ns, about 152 MHz.</td></tr><tr><th scope="row">X-HEEP</th><td><span class="ok">Pass</span> X-HEEP validated the configuration (1 bank, 0 interleaved) and rendered 27 templates.</td></tr><tr><th scope="row">Model inputs</th><td><span class="ok">Tested</span> Parameter counts of all twelve LLM presets within 2% of their model cards. IHP SG13G2 SRAM area within 2% of the liberty data for every macro size. Accelerator logic area within 4% on average of synthesis across 11 configurations. The C driver plans the same tiles as the model on 6,000 random shapes.</td></tr></tbody></table></div>

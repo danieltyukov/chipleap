@@ -387,19 +387,22 @@ def stats_html(rows: list[dict[str, Any]]) -> str:
     sim = next((r for r in rows if r["step"] == "sim"), {})
     synth = next((r for r in rows if r["step"] == "synth"), {})
     xh = next((r for r in rows if r["step"] == "xheep"), {})
+    # (value, decimals, suffix counted with the value, unit set small after it, label)
     items = [
-        (float(sim.get("cases", 0)), 0, "", "randomized jobs bit-exact against a golden model"),
+        (float(sim.get("cases", 0)), 0, "", "", "random jobs, bit-exact against a golden model"),
         (
             float(sim.get("cycle_error_no_stall_max") or 0) * 100,
             1,
             "%",
-            "cycle error between the model and the RTL without memory stalls",
+            "",
+            "cycle error, model against RTL, without memory stalls",
         ),
         (
             float((xh.get("render") or {}).get("rendered", 0)),
             0,
             "",
-            "X-HEEP templates rendered for the generated configuration",
+            "",
+            "X-HEEP templates rendered for the configuration",
         ),
     ]
     if synth.get("fmax_mhz_estimate"):
@@ -407,14 +410,16 @@ def stats_html(rows: list[dict[str, Any]]) -> str:
             (
                 float(synth["fmax_mhz_estimate"]),
                 0,
-                " MHz",
-                "clock the synthesized accelerator logic reaches on IHP SG13G2, estimated",
+                "",
+                "MHz",
+                "clock the accelerator logic reaches on IHP SG13G2",
             )
         )
     cells = "".join(
         f'<div class="stat"><span class="num" data-to="{v}" data-dec="{dec}" data-suffix="{suf}">'
-        f'{v:.{dec}f}{suf}</span><span class="lab">{html.escape(lab)}</span></div>'
-        for v, dec, suf, lab in items
+        f'{v:.{dec}f}{suf}{f"<small>{unit}</small>" if unit else ""}</span>'
+        f'<span class="lab">{html.escape(lab)}</span></div>'
+        for v, dec, suf, unit, lab in items
     )
     return f'<div class="stats">{cells}</div>'
 

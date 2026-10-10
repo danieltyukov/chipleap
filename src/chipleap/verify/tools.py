@@ -75,6 +75,16 @@ def sta() -> Tool:
     return find("sta", ["-version"], r"(\S+)", "static timing (standalone OpenSTA)", "CHIPLEAP_STA")
 
 
+def librelane() -> Tool:
+    return find(
+        "librelane",
+        ["--version"],
+        r"LibreLane v?(\S+)",
+        "placement, routing, DRC and LVS (LibreLane with OpenROAD, KLayout, Magic, Netgen)",
+        "CHIPLEAP_LIBRELANE",
+    )
+
+
 def riscv_gcc() -> Tool:
     for name in (
         "riscv32-unknown-elf-gcc",
@@ -95,7 +105,7 @@ def cxx() -> Tool:
 
 
 def all_tools() -> list[Tool]:
-    return [verilator(), cxx(), yosys(), openroad(), sta(), riscv_gcc()]
+    return [verilator(), cxx(), yosys(), openroad(), sta(), librelane(), riscv_gcc()]
 
 
 def ihp_liberty() -> Path | None:
@@ -119,4 +129,15 @@ def ihp_liberty() -> Path | None:
         candidates += list(Path(root).rglob(name))
         if candidates:
             break
-    return sorted(candidates)[-1] if candidates else None
+    # Several copies are common (a PDK checkout plus the one LibreLane pins); take the
+    # newest library revision, so the choice does not depend on directory names.
+    return max(candidates, key=lambda c: (_lib_revision(c), str(c))) if candidates else None
+
+
+def _lib_revision(path: Path) -> tuple[int, ...]:
+    try:
+        head = path.open(errors="replace").read(4000)
+    except OSError:
+        return ()
+    m = re.search(r"revision\s*:\s*\"\$Revision:\s*([\d.]+)", head)
+    return tuple(int(x) for x in m.group(1).split(".")) if m else ()
