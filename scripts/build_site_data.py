@@ -623,7 +623,10 @@ def main() -> None:
 
     page = SITE / "index.html"
     t = trace()
-    data: dict[str, Any] = {"version": __version__, "trace": t, "calculator": calculator()}
+    # The run time is shown rounded in the intro; leaving it out of data.json keeps rebuilds
+    # from changing the file for timing noise.
+    shown = {k: v for k, v in t.items() if k != "seconds"}
+    data: dict[str, Any] = {"version": __version__, "trace": shown, "calculator": calculator()}
     inject(page, "story-intro", story_intro(t))
     inject(page, "steps", steps_html(t))
     lines, hero_design = console()

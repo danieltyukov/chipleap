@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `chipleap require` now sizes external memory per process node at the rate that node's I/O allows, as the evaluator does. It no longer rules out serial memories that run below their rated speed on the IHP 130 nm pads, such as two octal PSRAM channels for SmolLM2 135M at 2 tokens per second; `required_resources` reports `channels_by_node`.
+
 ## [0.1.0] - 2026-10-10
 
 First release.

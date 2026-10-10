@@ -8,7 +8,7 @@ tokens per second, at any clock), which is often the most useful thing to know f
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from chipleap.hw.cpu import CPUS
 from chipleap.hw.memory import MEMORIES
@@ -19,8 +19,27 @@ from chipleap.workload.ops import Workload
 @dataclass(frozen=True)
 class MemoryOption:
     key: str
-    channels: int  # channels needed for bandwidth and capacity, 0 if more than 4
-    nodes: tuple[str, ...]  # technologies whose I/O can drive it at full rate
+    # Channels needed for bandwidth and capacity at each technology whose PHY and I/O can
+    # run this memory, at the rate that I/O allows (as the evaluator derates it). Nodes
+    # that would need more than four channels are left out.
+    channels_by_node: dict[str, int] = field(default_factory=dict)
+    read_only: bool = False
+
+    @property
+    def channels(self) -> int:
+        """The fewest channels that work at any node, 0 if none does."""
+        return min(self.channels_by_node.values(), default=0)
+
+    @property
+    def nodes(self) -> tuple[str, ...]:
+        return tuple(self.channels_by_node)
+
+    def describe(self) -> str:
+        groups: dict[int, list[str]] = {}
+        for node, ch in self.channels_by_node.items():
+            groups.setdefault(ch, []).append(node)
+        where = "; ".join(f"x{ch} at {', '.join(nodes)}" for ch, nodes in sorted(groups.items()))
+        return f"{self.key}{', read only' if self.read_only else ''} ({where})"
 
 
 @dataclass(frozen=True)
@@ -58,10 +77,7 @@ class Requirements:
         if ok:
             out.append(
                 "External memories that can deliver it: "
-                + "; ".join(
-                    f"{m.key} x{m.channels} (I/O fast enough at {', '.join(m.nodes) or 'no listed node'})"
-                    for m in ok
-                )
+                + "; ".join(m.describe() for m in ok)
                 + "."
             )
         else:
@@ -84,15 +100,16 @@ def requirements(workload: Workload, throughput: float) -> Requirements:
     per_cycle = {k: mac_rate / (t.max_freq_mhz * 1e6) for k, t in TECHNOLOGIES.items()}
     mems = []
     for key, m in MEMORIES.items():
-        channels = 0
-        for ch in (1, 2, 4):
-            if m.sustained_bps * ch >= bw and m.capacity_mib * 2**20 * ch >= cap:
-                channels = ch
-                break
-        nodes = tuple(
-            k for k, t in TECHNOLOGIES.items() if m.phy_exists(t.node_nm) and t.max_io_mts >= m.mts
-        )
-        mems.append(MemoryOption(key, channels, nodes))
+        by_node: dict[str, int] = {}
+        for k, t in TECHNOLOGIES.items():
+            if not m.available(t.node_nm, t.max_io_mts):
+                continue
+            bps = m.sustained_bps_at(t.max_io_mts)
+            for ch in (1, 2, 4):
+                if bps * ch >= bw and m.capacity_mib * 2**20 * ch >= cap:
+                    by_node[k] = ch
+                    break
+        mems.append(MemoryOption(key, by_node, m.read_only))
     return Requirements(
         workload, throughput, steps, stream, bw, mac_rate, cap, cpu, per_cycle, mems
     )

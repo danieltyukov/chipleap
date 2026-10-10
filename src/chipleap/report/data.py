@@ -104,7 +104,12 @@ def requirements_dict(req: Requirements) -> dict[str, Any]:
         "macs_per_cycle_at_max_clock": {k: round(v, 3) for k, v in req.macs_per_cycle.items()},
         "cpu_mcycles_per_s": {k: round(v / 1e6, 3) for k, v in req.cpu_cycles_per_s.items()},
         "memories": [
-            {"memory": m.key, "channels_needed": m.channels or None, "nodes": list(m.nodes)}
+            {
+                "memory": m.key,
+                "channels_needed": m.channels or None,
+                "channels_by_node": m.channels_by_node,
+                "read_only": m.read_only,
+            }
             for m in req.memories
         ],
         "summary": req.lines(),

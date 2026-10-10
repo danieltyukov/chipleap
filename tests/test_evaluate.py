@@ -101,3 +101,14 @@ def test_requirements_match_hand_arithmetic(llama):
     assert 6.0e9 < req.ext_bandwidth < 7.5e9
     ok = {m.key for m in req.memories if m.channels}
     assert "hyperram" not in ok and "lpddr4x-x32" in ok
+
+
+def test_requirements_derate_serial_memories_like_the_evaluator():
+    # SmolLM2 135M at 2 token/s needs about 0.17 GB/s. At 130 nm the pads run octal PSRAM
+    # below its rated speed, and two channels still deliver it, as the explorer finds.
+    req = requirements(build_llm(LLMWorkloadSpec("smollm2-135m", weights="int4")), 2)
+    psram = next(m for m in req.memories if m.key == "octal-psram")
+    assert psram.channels_by_node.get("ihp-sg13g2") == 2
+    assert not next(m for m in req.memories if m.key == "lpddr4-x16").channels_by_node.get(
+        "ihp-sg13g2"
+    )
