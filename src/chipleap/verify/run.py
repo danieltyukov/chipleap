@@ -23,7 +23,8 @@ from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_logic_kge, get_tech
-from chipleap.verify import pnr, sim, synth, xheep
+from chipleap.verify import backends, pnr, sim, synth, xheep
+from chipleap.verify.remote import Remote
 from chipleap.verify.tools import verilator
 
 
@@ -92,10 +93,16 @@ def simulate(design: Design, cases: int = 0, seed: int = 0) -> StepResult:
         results = sim.run(design.accel, todo, platform=design.platform)
     except sim.SimError as exc:
         return StepResult("sim", "fail", str(exc).splitlines()[0], {"error": str(exc)})
+    via = " through the AXI4 wrapper" if design.platform == "standalone" else ""
+    return sim_step(results, via=via)
+
+
+def sim_step(results: list[sim.CaseResult], simulator: str = "", via: str = "") -> StepResult:
+    """The simulation step's verdict from case results, whichever simulator ran them."""
     fails = [r for r in results if not r.ok]
     clean = [abs(r.error) for r in results if r.case.stall_pct == 0]
     stalled = [abs(r.error) for r in results if r.case.stall_pct]
-    data = {
+    data: dict[str, Any] = {
         "cases": len(results),
         "failures": len(fails),
         "cycle_error_no_stall_max": max(clean) if clean else None,
@@ -117,11 +124,13 @@ def simulate(design: Design, cases: int = 0, seed: int = 0) -> StepResult:
             for r in results
         ],
     }
+    who = f"{simulator}: " if simulator else ""
+    if simulator:
+        data["simulator"] = simulator
     if fails:
-        return StepResult("sim", "fail", f"{len(fails)} of {len(results)} cases wrong", data)
-    via = " through the AXI4 wrapper" if design.platform == "standalone" else ""
+        return StepResult("sim", "fail", f"{who}{len(fails)} of {len(results)} cases wrong", data)
     msg = (
-        f"{len(results)} randomized jobs bit-exact{via}; cycle model error "
+        f"{who}{len(results)} randomized jobs bit-exact{via}; cycle model error "
         f"{(max(clean) if clean else 0) * 100:.1f}% max without stalls, "
         f"{(statistics.mean(stalled) if stalled else 0) * 100:.1f}% mean with random stalls"
     )
@@ -280,6 +289,40 @@ def _regenerated_xheep(bundle: Path, design: Design) -> tuple[str, bool]:
     return text, code(text) == code(old)
 
 
+def _simulate_on(
+    design: Design, tool: str, bundle: Path, remote: Remote | None, cases: int, seed: int
+) -> StepResult:
+    """Simulation on a commercial simulator (``chipleap.verify.backends``)."""
+    try:
+        results, name = backends.simulate_with(
+            design, tool, bundle / "verify" / tool, remote, cases, seed
+        )
+    except sim.SimError as exc:
+        return StepResult("sim", "fail", str(exc).splitlines()[0], {"error": str(exc)})
+    if results is None:
+        return StepResult("sim", "skipped", name)
+    return sim_step(results, name)
+
+
+def _synthesize_on(
+    design: Design, tool: str, tech: str, bundle: Path, remote: Remote | None
+) -> StepResult:
+    """Synthesis with Genus or Design Compiler (``chipleap.verify.backends``)."""
+    try:
+        data = backends.synthesize_with(design, tool, bundle / "verify" / tool, remote, tech)
+    except synth.SynthError as exc:
+        msg = str(exc).splitlines()[0]
+        status = "skipped" if "not on the path" in msg or "no accelerator" in msg else "fail"
+        return StepResult("synth", status, msg, {"error": str(exc)})
+    msg = (
+        f"{data['tool']}: logic cell area {data['logic_mm2']:.4f} mm2 on {tech} (model "
+        f"{data['model_logic_mm2']:.4f} mm2, {float(str(data['model_error'])) * 100:+.0f}%), "
+        f"critical path {data['critical_path_ns']:.2f} ns at a {data['clock_mhz']:g} MHz "
+        "target"
+    )
+    return StepResult("synth", "pass", msg, data)
+
+
 def verify_bundle(
     bundle: Path,
     *,
@@ -288,6 +331,10 @@ def verify_bundle(
     fetch_xheep: bool = False,
     cases: int = 0,
     seed: int = 0,
+    sim_tool: str = "verilator",
+    synth_tool: str = "yosys",
+    synth_tech: str = "ihp-sg13g2",
+    remote: Remote | None = None,
 ) -> list[StepResult]:
     from chipleap.gen.bundle import load_design
 
@@ -298,8 +345,12 @@ def verify_bundle(
             results.append(consistency(design, bundle))
         elif step == "lint":
             results.append(lint(design, bundle))
+        elif step == "sim" and sim_tool != "verilator":
+            results.append(_simulate_on(design, sim_tool, bundle, remote, cases, seed))
         elif step == "sim":
             results.append(simulate(design, cases, seed))
+        elif step == "synth" and synth_tool != "yosys":
+            results.append(_synthesize_on(design, synth_tool, synth_tech, bundle, remote))
         elif step == "synth":
             results.append(synthesize(design, bundle / "verify" / "synth"))
         elif step == "xheep":

@@ -11,12 +11,20 @@ The ``generic-*`` presets are scaled estimates for commercial nodes. Logic and M
 energies follow Horowitz, "Computing's energy problem" (ISSCC 2014, 45 nm, 0.9 V), scaled
 linearly with feature size and with supply squared; SRAM arrays use typical 6T bit-cell
 sizes. docs/model.md lists each number with its origin.
+
+Technologies of your own, measured from a PDK's liberty files with ``chipleap tech add``,
+live as YAML files in ``~/.config/chipleap/tech`` (``CHIPLEAP_TECH_DIR`` moves it; an
+empty value turns them off) and load next to these. They stay on your machine.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import os
+import sys
+from dataclasses import dataclass, fields
+from pathlib import Path
+from typing import Any
 
 # Logic of the generated accelerator in kGE (thousands of NAND2 equivalents), fitted to
 # Yosys and ABC (mapped, buffered and sized) on SG13G2 across 11 configurations: all three
@@ -76,6 +84,14 @@ class Technology:
     max_io_mts: int  # fastest external memory interface practical at this node
     measured: bool = False
     note: str = ""
+    # Files the synthesis and layout backends use, for technologies added with
+    # ``chipleap tech add``. Paths are on ``host`` when it is set (a design server), so a
+    # foundry library never has to leave the machine it is licensed on.
+    liberty: str = ""
+    db: str = ""  # compiled liberty for Design Compiler
+    lef: tuple[str, ...] = ()  # technology LEF first, then the cell LEFs
+    host: str = ""
+    user: bool = False  # added by the user, not shipped with ChipLeap
 
     def logic_mm2(self, kge: float) -> float:
         return kge * 1000 * self.ge_um2 / self.logic_util / 1e6
@@ -197,6 +213,59 @@ TECHNOLOGIES: dict[str, Technology] = {
         ),
     )
 }
+
+
+BUILTIN = tuple(TECHNOLOGIES)
+
+
+def user_tech_dir() -> Path | None:
+    """Where technologies added with ``chipleap tech add`` live, None when turned off."""
+    env = os.environ.get("CHIPLEAP_TECH_DIR")
+    if env is not None:
+        return Path(env).expanduser() if env else None
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "chipleap" / "tech"
+
+
+def tech_from_dict(data: dict[str, Any]) -> Technology:
+    names = {f.name for f in fields(Technology)}
+    unknown = set(data) - names
+    if unknown:
+        raise ValueError(f"unknown technology fields: {', '.join(sorted(unknown))}")
+    values = dict(data)
+    values["lef"] = tuple(values.get("lef") or ())
+    values["user"] = True
+    return Technology(**values)
+
+
+def tech_to_dict(t: Technology) -> dict[str, Any]:
+    out = {f.name: getattr(t, f.name) for f in fields(Technology) if f.name != "user"}
+    out["lef"] = list(t.lef)
+    return out
+
+
+def load_user_techs(directory: Path | None = None) -> dict[str, Technology]:
+    """Technologies from YAML files; a file that does not load is reported and skipped."""
+    import yaml
+
+    d = directory if directory is not None else user_tech_dir()
+    found: dict[str, Technology] = {}
+    if d is None or not d.is_dir():
+        return found
+    for path in sorted(d.glob("*.yaml")):
+        try:
+            t = tech_from_dict(yaml.safe_load(path.read_text()) or {})
+        except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
+            print(f"chipleap: skipping technology {path}: {exc}", file=sys.stderr)
+            continue
+        if t.key in BUILTIN:
+            print(f"chipleap: skipping {path}: {t.key!r} is built in", file=sys.stderr)
+            continue
+        found[t.key] = t
+    return found
+
+
+TECHNOLOGIES.update(load_user_techs())
 
 
 def get_tech(key: str) -> Technology:
