@@ -23,7 +23,7 @@ from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_logic_kge, get_tech
-from chipleap.verify import sim, synth, xheep
+from chipleap.verify import pnr, sim, synth, xheep
 from chipleap.verify.tools import verilator
 
 
@@ -161,6 +161,56 @@ def synthesize(design: Design, workdir: Path | None = None) -> StepResult:
     return StepResult("synth", "pass", msg, data)
 
 
+def place_route(design: Design, workdir: Path) -> StepResult:
+    """LibreLane on IHP SG13G2 at the design's clock (capped at what the node allows)."""
+    if design.accel is None:
+        return StepResult("pnr", "skipped", "no accelerator in this design")
+    ihp = get_tech("ihp-sg13g2")
+    clock = min(design.freq_mhz, ihp.max_freq_mhz) if design.tech == ihp.key else ihp.max_freq_mhz
+    try:
+        r = pnr.place_and_route(design.accel, clock, workdir)
+    except pnr.PnrError as exc:
+        msg = str(exc).splitlines()[0]
+        return StepResult(
+            "pnr", "skipped" if "not installed" in msg else "fail", msg, {"error": str(exc)}
+        )
+    a = design.accel
+    model_cell = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports) * 1000 * ihp.ge_um2
+    data = {
+        "clock_mhz": clock,
+        "die_um2": round(r.die_um2),
+        "core_um2": round(r.core_um2),
+        "cell_um2": round(r.cell_um2),
+        "utilisation": round(r.utilisation, 3),
+        "cells": r.cells,
+        "setup_slack_typ_ns": round(r.setup_slack_typ_ns, 3),
+        "setup_slack_ns": round(r.setup_slack_ns, 3),
+        "hold_slack_ns": round(r.hold_slack_ns, 3),
+        "fmax_mhz": round(r.fmax_mhz, 1),
+        "fmax_worst_mhz": round(r.fmax_worst_mhz, 1),
+        "drc_errors": r.drc_errors,
+        "lvs_errors": r.lvs_errors,
+        "antenna_nets": r.antenna_nets,
+        "power_mw": round(r.power_mw, 3),
+        "model_cell_um2": round(model_cell),
+        "buffer_words": pnr.PNR_WORDS,
+        "gds": str(r.gds) if r.gds else None,
+    }
+    # Like the model's clock limit for the node, timing is judged at the typical corner; the
+    # slow corner (1.08 V, 125 C) is reported beside it.
+    met = r.setup_slack_typ_ns >= 0 and r.hold_slack_ns >= 0
+    checks = "DRC and LVS clean" if r.clean else f"{r.drc_errors} DRC and {r.lvs_errors} LVS errors"
+    if r.antenna_nets:
+        checks += f", {r.antenna_nets} antenna violations"
+    msg = (
+        f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "
+        f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
+        f"{'met' if met else 'missed'} at the typical corner (about {r.fmax_mhz:.0f} MHz), "
+        f"about {r.fmax_worst_mhz:.0f} MHz at the slow corner; {checks}"
+    )
+    return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)
+
+
 def _count(n: object, noun: str) -> str:
     return f"{n} {noun}" + ("" if n == 1 else "s")
 
@@ -254,6 +304,8 @@ def verify_bundle(
             results.append(synthesize(design, bundle / "verify" / "synth"))
         elif step == "xheep":
             results.append(check_xheep(bundle, design, xheep_dir, fetch_xheep))
+        elif step == "pnr":
+            results.append(place_route(design, bundle / "verify" / "pnr"))
         else:
             raise ValueError(f"unknown verification step {step!r}")
     out = bundle / "verify"

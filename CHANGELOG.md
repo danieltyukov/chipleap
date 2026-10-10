@@ -6,8 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Place and route: `chipleap verify --steps pnr` (or `--steps all`) runs the accelerator through LibreLane on IHP SG13G2, with timing at every corner, KLayout DRC with IHP's rule deck, LVS and antenna repair, and keeps the GDS. The open-PDK example's 1 x 8 GEMV engine routes to a 0.81 mm2 core with clean DRC and LVS, about 120 MHz at the typical corner and 77 MHz at the slow corner. `scripts/render_gds.py` draws a GDS in the PDK's colours.
+- A `standalone` platform: the accelerator as AXI4 IP for any host (an Arm, RISC-V or FPGA SoC), with an AXI4-Lite register port, AXI4 read and write masters, a plain C driver and a protocol-checking AXI testbench. Set `platform: standalone` in a spec or pass `--platform standalone`; reports give the IP's area apart from the assumed host system.
+- README images: the die render, an animation of the agent's decisions with every floorplan to scale, the report, and the routed layout (`scripts/make_readme_visuals.py`).
+
 ### Fixed
 
+- Synthesis failed for bundles given by a relative path.
+- The hero callouts drifted off their blocks on phones while scrolling, and figures on phones used a display face whose 1 read oddly.
 - `chipleap require` now sizes external memory per process node at the rate that node's I/O allows, as the evaluator does. It no longer rules out serial memories that run below their rated speed on the IHP 130 nm pads, such as two octal PSRAM channels for SmolLM2 135M at 2 tokens per second; `required_resources` reports `channels_by_node`.
 
 ## [0.1.0] - 2026-10-10

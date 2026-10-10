@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ChipLeap: design the chip your model needs</title>
-  <meta name="description" content="ChipLeap explores hardware architecture from a workload such as Llama 3.2 1B: memory, external memory, dataflow, compute and process node, each decision explained. It generates a RISC-V SoC on X-HEEP and verifies it with open tools. Open source.">
+  <meta name="description" content="ChipLeap explores hardware architecture from a workload such as Llama 3.2 1B: memory, external memory, dataflow, compute and process node, each decision explained. It generates an X-HEEP RISC-V SoC or AXI4 IP for any host, and checks it with simulation, synthesis and place and route.">
   <meta name="color-scheme" content="light">
   <link rel="canonical" href="https://danieltyukov.github.io/chipleap/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="ChipLeap">
   <meta property="og:title" content="ChipLeap: design the chip your model needs">
-  <meta property="og:description" content="Architecture exploration from workload to RISC-V SoC, every decision explained, verified on open tools. Open source.">
+  <meta property="og:description" content="Architecture exploration from workload to verified hardware, every decision explained, down to a routed layout. Open source.">
   <meta property="og:url" content="https://danieltyukov.github.io/chipleap/">
   <meta property="og:image" content="https://danieltyukov.github.io/chipleap/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,14 +18,14 @@
   <meta property="og:image:alt" content="A rendered die designed by ChipLeap next to the line: design the chip your model needs.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="ChipLeap: design the chip your model needs">
-  <meta name="twitter:description" content="Architecture exploration from workload to RISC-V SoC, every decision explained, verified on open tools.">
+  <meta name="twitter:description" content="Architecture exploration from workload to verified hardware, every decision explained, down to a routed layout.">
   <meta name="twitter:image" content="https://danieltyukov.github.io/chipleap/og.png">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=170199d3cc">
+  <link rel="stylesheet" href="styles.css?v=411bdbf3e6">
 </head>
 <body>
   <header class="nav">
@@ -50,7 +50,7 @@
         <div class="hero-copy">
           <a class="pill" href="https://github.com/danieltyukov/chipleap">Open source, MIT licensed</a>
           <h1>Design the chip your model needs.</h1>
-          <p class="lead">ChipLeap explores the architecture before anyone writes RTL: memory system, external memory, dataflow, compute and process node, each choice explained. Then it generates a RISC-V SoC on <span class="nb">X-HEEP</span> and checks it with open tools.</p>
+          <p class="lead">ChipLeap explores the architecture before anyone writes RTL: memory system, external memory, dataflow, compute and process node, each choice explained. Then it generates the hardware, a RISC-V SoC on <span class="nb">X-HEEP</span> or AXI4 IP for any host, and checks it down to a routed layout.</p>
           <div class="hero-actions">
             <a class="btn btn-primary" href="#start">Get started</a>
             <a class="btn btn-ghost" href="#design">Watch it decide</a>
@@ -85,7 +85,7 @@
       <div class="shell works">
         <span>Generates and checks with</span>
         <ul>
-          <li>X-HEEP</li><li>IHP SG13G2</li><li>Verilator</li><li>Yosys</li><li>sv2v</li><li>Model Context Protocol</li>
+          <li>X-HEEP</li><li>AXI4</li><li>IHP SG13G2</li><li>Verilator</li><li>Yosys</li><li>LibreLane</li><li>Model Context Protocol</li>
         </ul>
       </div>
     </section>
@@ -157,10 +157,13 @@
           <p>The accelerator model is the tile schedule the generated hardware runs, so the two can be compared cycle for cycle. These results come from <code>chipleap verify</code> and the test suite on this release.</p>
         </div>
         <!-- stats:start -->
-<div class="stats"><div class="stat"><span class="num" data-to="21.0" data-dec="0" data-suffix="">21</span><span class="lab">random jobs, bit-exact against a golden model</span></div><div class="stat"><span class="num" data-to="0.0" data-dec="1" data-suffix="%">0.0%</span><span class="lab">cycle error, model against RTL, without memory stalls</span></div><div class="stat"><span class="num" data-to="27.0" data-dec="0" data-suffix="">27</span><span class="lab">X-HEEP templates rendered for the configuration</span></div><div class="stat"><span class="num" data-to="152.3" data-dec="0" data-suffix="">152<small>MHz</small></span><span class="lab">clock the accelerator logic reaches on IHP SG13G2</span></div></div>
+<div class="stats"><div class="stat"><span class="num" data-to="21.0" data-dec="0" data-suffix="">21</span><span class="lab">random jobs, bit-exact against a golden model</span></div><div class="stat"><span class="num" data-to="0.0" data-dec="1" data-suffix="%">0.0%</span><span class="lab">cycle error, model against RTL, without memory stalls</span></div><div class="stat"><span class="num" data-to="27.0" data-dec="0" data-suffix="">27</span><span class="lab">X-HEEP templates rendered for the configuration</span></div><div class="stat"><span class="num" data-to="120.3" data-dec="0" data-suffix="">120<small>MHz</small></span><span class="lab">clock the routed accelerator reaches on IHP SG13G2</span></div></div>
 <!-- stats:end -->
+        <!-- layout:start -->
+<div class="layout"><picture><source type="image/webp" srcset="img/layout-1200.webp"><img src="img/layout-1200.jpg" width="1000" height="1000" loading="lazy" alt="The routed layout of the 1 x 8 GEMV engine on IHP SG13G2: signal wires on four metal layers under the power grid"></picture><div><h3>And then it is placed and routed</h3><p>The same accelerator, through LibreLane on IHP SG13G2: placement, clock tree, routing, timing at every corner, DRC and LVS clean. This is the GDS it wrote, drawn in the PDK's layer colours. Its buffers are SRAM macros in silicon, cut to 16 words here.</p><dl><div><dt>Standard cells</dt><dd>31,092</dd></div><div><dt>Core area</dt><dd>0.81<small>mm²</small></dd></div><div><dt>Typical corner</dt><dd>120<small>MHz</small></dd></div><div><dt>Slow corner, 125 °C</dt><dd>77<small>MHz</small></dd></div></dl></div></div>
+<!-- layout:end -->
         <!-- verify:start -->
-<div class="table-scroll"><table class="vt"><tbody><tr><th scope="row">Consistency</th><td><span class="ok">Pass</span> design.yaml, RTL wrappers, driver, register map and X-HEEP configuration agree.</td></tr><tr><th scope="row">Lint</th><td><span class="ok">Pass</span> Verilator -Wall reports no warnings.</td></tr><tr><th scope="row">Simulation</th><td><span class="ok">Pass</span> 21 randomized jobs bit-exact; cycle model error 0.0% max without stalls, 3.5% mean with random stalls.</td></tr><tr><th scope="row">Synthesis</th><td><span class="ok">Pass</span> Logic cell area 0.3144 mm² on IHP SG13G2 (model 0.3217 mm², +2%), critical path 6.12 ns, about 152 MHz.</td></tr><tr><th scope="row">X-HEEP</th><td><span class="ok">Pass</span> X-HEEP validated the configuration (1 bank, 0 interleaved) and rendered 27 templates.</td></tr><tr><th scope="row">Model inputs</th><td><span class="ok">Tested</span> Parameter counts of all twelve LLM presets within 2% of their model cards. IHP SG13G2 SRAM area within 2% of the liberty data for every macro size. Accelerator logic area within 4% on average of synthesis across 11 configurations. The C driver plans the same tiles as the model on 6,000 random shapes.</td></tr></tbody></table></div>
+<div class="table-scroll"><table class="vt"><tbody><tr><th scope="row">Consistency</th><td><span class="ok">Pass</span> design.yaml, RTL wrappers, driver, register map and X-HEEP configuration agree.</td></tr><tr><th scope="row">Lint</th><td><span class="ok">Pass</span> Verilator -Wall reports no warnings.</td></tr><tr><th scope="row">Simulation</th><td><span class="ok">Pass</span> 21 randomized jobs bit-exact; cycle model error 0.0% max without stalls, 3.5% mean with random stalls.</td></tr><tr><th scope="row">Synthesis</th><td><span class="ok">Pass</span> Logic cell area 0.3144 mm² on IHP SG13G2 (model 0.3217 mm², +2%), critical path 6.12 ns, about 152 MHz.</td></tr><tr><th scope="row">X-HEEP</th><td><span class="ok">Pass</span> X-HEEP validated the configuration (1 bank, 0 interleaved) and rendered 27 templates.</td></tr><tr><th scope="row">Place and route</th><td><span class="ok">Pass</span> Placed and routed on IHP SG13G2: 0.809 mm² core at 63% utilisation, 31092 cells; 100 MHz met at the typical corner (about 120 MHz), about 77 MHz at the slow corner; DRC and LVS clean.</td></tr><tr><th scope="row">Model inputs</th><td><span class="ok">Tested</span> Parameter counts of all twelve LLM presets within 2% of their model cards. IHP SG13G2 SRAM area within 2% of the liberty data for every macro size. Accelerator logic area within 4% on average of synthesis across 11 configurations. The C driver plans the same tiles as the model on 6,000 random shapes.</td></tr></tbody></table></div>
 <!-- verify:end -->
       </div>
     </section>
@@ -217,7 +220,7 @@
               <tr><th scope="row">Starts from the workload and its targets</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="n">Spec or RTL</td><td data-label="Workload-to-chip services" class="y">Yes</td><td data-label="Academic DSE tools" class="y">Yes</td></tr>
               <tr><th scope="row">Chooses the external memory and checks it can be built at the node</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="n">No</td><td data-label="Workload-to-chip services" class="p">Fixed by the spec</td><td data-label="Academic DSE tools" class="n">Bandwidth only</td></tr>
               <tr><th scope="row">Explains every decision in a log you can diff</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="p">Review steps</td><td data-label="Workload-to-chip services" class="n">Not published</td><td data-label="Academic DSE tools" class="p">Some</td></tr>
-              <tr><th scope="row">Generates an SoC configuration and RTL</th><td data-label="ChipLeap" class="us y">X-HEEP and accelerator</td><td data-label="Agentic EDA suites" class="y">RTL</td><td data-label="Workload-to-chip services" class="y">Yes</td><td data-label="Academic DSE tools" class="n">No</td></tr>
+              <tr><th scope="row">Generates an SoC configuration and RTL</th><td data-label="ChipLeap" class="us y">X-HEEP SoC or AXI4 IP</td><td data-label="Agentic EDA suites" class="y">RTL</td><td data-label="Workload-to-chip services" class="y">Yes</td><td data-label="Academic DSE tools" class="n">No</td></tr>
               <tr><th scope="row">Checks its model against that RTL, cycle for cycle</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="n">Not applicable</td><td data-label="Workload-to-chip services" class="p">Not published</td><td data-label="Academic DSE tools" class="n">No</td></tr>
               <tr><th scope="row">Runs locally and free, on open tools and an open PDK</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="n">Licensed</td><td data-label="Workload-to-chip services" class="n">Service</td><td data-label="Academic DSE tools" class="y">Yes</td></tr>
               <tr><th scope="row">Works from any MCP assistant</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="p">Some</td><td data-label="Workload-to-chip services" class="n">No</td><td data-label="Academic DSE tools" class="n">Rarely</td></tr>
@@ -256,9 +259,9 @@ chipleap verify out</code></pre>
         <h2 id="faq-h">Questions</h2>
         <details><summary>Does it need a commercial EDA licence?</summary><p>No. Simulation and lint use Verilator, synthesis uses Yosys with sv2v, the technology data comes from the IHP SG13G2 open PDK, and X-HEEP's own generator checks the configuration. The model, the explorer and the generators need none of them.</p></details>
         <details><summary>How accurate is the model?</summary><p>For the accelerator, the model predicts the generated RTL's cycle count exactly in simulation without memory stalls, and within a few percent with random stalls. Its logic area is within 4% on average of Yosys synthesis on IHP SG13G2, and the synthesized logic runs faster than the clock the model allows there. Memories, CPU and energy rest on technology data that is measured for IHP SG13G2 and scaled from published figures for the other nodes, and reports say which is which. <a href="https://github.com/danieltyukov/chipleap/blob/main/docs/model.md">docs/model.md</a> lists every number and its source.</p></details>
-        <details><summary>Why X-HEEP?</summary><p>It is an open, configurable RISC-V microcontroller from EPFL with a Python configuration API, an accelerator interface and several chips taped out. Its generator validates what ChipLeap writes.</p></details>
+        <details><summary>Do I have to use RISC-V or X-HEEP?</summary><p>No. X-HEEP is the default because it is an open, configurable RISC-V microcontroller from EPFL with a Python configuration API and several chips taped out, and its generator validates what ChipLeap writes. With <code>platform: standalone</code> ChipLeap generates the accelerator alone as AXI4 IP, with a plain C driver, for an Arm, RISC-V or FPGA SoC; its AXI interfaces are simulated bit-exact like the rest.</p></details>
         <details><summary>Can I use my own model or network?</summary><p>Yes. Any decoder-only transformer can be described by its shape, and other networks as convolutions, depthwise convolutions, matrix multiplies and element-wise operators.</p></details>
-        <details><summary>What does the generated accelerator not do yet?</summary><p>It computes int8 activations against int8, int4 or int2 weights with int32 results. Requantization, activation functions and int4 group scales run on the CPU, and the model counts them there. It has not been taped out.</p></details>
+        <details><summary>What does the generated accelerator not do yet?</summary><p>It computes int8 activations against int8, int4 or int2 weights with int32 results. Requantization, activation functions and int4 group scales run on the CPU, and the model counts them there. It has been placed and routed on IHP SG13G2 with clean DRC and LVS, but not taped out.</p></details>
         <details><summary>Is it affiliated with EPFL, IHP or any company named here?</summary><p>No. ChipLeap is an independent open-source project.</p></details>
       </div>
     </section>

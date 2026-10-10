@@ -169,6 +169,14 @@ section { padding: 104px 0; }
 .stat .num small { font-size: 0.45em; font-weight: 500; letter-spacing: 0; color: var(--dark-muted); margin-left: 6px; }
 .stat .num em { font-style: normal; color: #5fd39b; }
 .stat .lab { display: block; font-size: 14.5px; color: var(--dark-muted); margin-top: 12px; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 48px; align-items: center; margin: 0 0 56px; }
+.layout img { width: 100%; height: auto; display: block; border-radius: 10px; border: 1px solid var(--dark-line); }
+.layout h3 { font: 600 26px/1.2 var(--display); letter-spacing: -0.02em; color: #fff; margin: 0 0 12px; }
+.layout p { color: var(--dark-muted); margin: 0 0 22px; }
+.layout dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; margin: 0; }
+.layout dt { font-size: 13.5px; color: var(--dark-muted); }
+.layout dd { margin: 3px 0 0; font: 600 21px/1.2 var(--num); font-variant-numeric: tabular-nums; color: #fff; }
+.layout dd small { font: 500 13px var(--sans); color: var(--dark-muted); margin-left: 4px; }
 .vt { width: 100%; border-collapse: collapse; font-size: 15.5px; }
 .vt th, .vt td { text-align: left; padding: 14px 16px 14px 0; border-bottom: 1px solid var(--dark-line); vertical-align: top; }
 .vt th { color: #fff; font-weight: 500; width: 22%; }
@@ -261,6 +269,7 @@ details p { color: var(--muted); margin: 12px 0 0; }
   .flow-line ol { grid-template-columns: 1fr; }
   .flow-track { display: none; }
   .flow-line li { padding: 0 0 0 44px; }
+  .layout { grid-template-columns: 1fr; gap: 28px; }
   section { padding: 76px 0; }
 }
 @media (max-width: 640px) {

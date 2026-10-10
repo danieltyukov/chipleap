@@ -62,6 +62,7 @@ markers = [
   "rtl: needs Verilator (skipped when it is not installed)",
   "synth: needs Yosys (skipped when it is not installed)",
   "xheep: needs an X-HEEP checkout in CHIPLEAP_XHEEP_DIR",
+  "pnr: needs LibreLane and CHIPLEAP_RUN_PNR=1 (runs for many minutes)",
 ]
 
 [tool.ruff]

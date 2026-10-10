@@ -11,7 +11,7 @@ synth   PASS     logic cell area ... mm2 on IHP SG13G2 (model ... mm2), critical
 xheep   PASS     X-HEEP validated the configuration (... banks, ... interleaved) and rendered 27 templates
 ```
 
-Results go to `DIR/verify/verify.json` and `DIR/verify/VERIFY.md`. Choose steps with `--steps consistency,lint,sim,synth,xheep`.
+Results go to `DIR/verify/verify.json` and `DIR/verify/VERIFY.md`. Choose steps with `--steps consistency,lint,sim,synth,xheep`; place and route (`pnr`) takes many minutes, so it runs only when named, or with `--steps all`.
 
 ## Consistency
 
@@ -49,6 +49,12 @@ The accelerator's logic is synthesized with Yosys against the IHP SG13G2 standar
 The step reports the measured logic cell area next to the model's estimate for the same design on SG13G2, so the model's error is visible every time. The Yosys in Ubuntu 24.04 (0.33) cannot read every SystemVerilog construct the RTL uses, so the source goes through [sv2v](https://github.com/zachjs/sv2v) when it is installed.
 
 The liberty file is found under `PDK_ROOT`, `~/.volare`, `~/.ciel` or `~/.local/share/pdk`; `CHIPLEAP_LIBERTY` points at it directly.
+
+## Place and route
+
+`--steps pnr` hands the accelerator to [LibreLane](https://github.com/librelane/librelane), the open flow behind the Tiny Tapeout IHP shuttles: Yosys, OpenROAD for floorplan, placement, clock tree, routing and timing repair, OpenSTA at every corner, KLayout with IHP's own rule deck for design rules, and Netgen for layout versus schematic. The clock is the design's own on IHP SG13G2, or the node's 100 MHz limit for designs on other nodes. As in synthesis, the buffers are cut to 16 words, because in silicon they are SRAM macros whose area comes from the macro liberty files.
+
+The step passes when setup and hold timing are met at every corner and DRC and LVS are clean. It reports the core area, the utilisation, the cell count, the worst setup slack and the clock it implies, power, and the model's cell-area estimate for comparison, and keeps the GDS in `DIR/verify/pnr/runs/chipleap/final/gds/`. `scripts/render_gds.py` draws it with KLayout in the PDK's colours. `CHIPLEAP_LIBRELANE` points at the `librelane` command and `CHIPLEAP_PNR_TIMEOUT` (seconds, default 5400) bounds the run.
 
 ## X-HEEP
 

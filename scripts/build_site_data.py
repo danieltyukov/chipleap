@@ -535,6 +535,46 @@ def callouts_html(pos: dict[str, list[float]], design: dict[str, Any]) -> tuple[
     return "\n".join(out), key_html
 
 
+def layout_html(rows: list[dict[str, Any]]) -> str:
+    """The routed layout beside the numbers LibreLane reported for it."""
+    pr = next((r for r in rows if r["step"] == "pnr"), None)
+    if pr is None or pr["status"] != "pass":
+        return ""
+    checks = "DRC and LVS clean" if not pr["drc_errors"] and not pr["lvs_errors"] else "see report"
+    facts = [
+        ("Standard cells", f"{pr['cells']:,}", ""),
+        ("Core area", f"{pr['core_um2'] / 1e6:.2f}", "mm²"),
+        ("Typical corner", f"{pr['fmax_mhz']:.0f}", "MHz"),
+        ("Slow corner, 125 °C", f"{pr['fmax_worst_mhz']:.0f}", "MHz"),
+    ]
+    dl = "".join(
+        f"<div><dt>{k}</dt><dd>{v}{f'<small>{u}</small>' if u else ''}</dd></div>"
+        for k, v, u in facts
+    )
+    return (
+        '<div class="layout"><picture><source type="image/webp" srcset="img/layout-1200.webp">'
+        '<img src="img/layout-1200.jpg" width="1000" height="1000" loading="lazy" '
+        'alt="The routed layout of the 1 x 8 GEMV engine on IHP SG13G2: signal wires on four '
+        'metal layers under the power grid"></picture>'
+        "<div><h3>And then it is placed and routed</h3>"
+        "<p>The same accelerator, through LibreLane on IHP SG13G2: placement, clock tree, "
+        f"routing, timing at every corner, {checks}. This is the GDS it wrote, drawn in the "
+        "PDK's layer colours. Its buffers are SRAM macros in silicon, cut to 16 words here."
+        f"</p><dl>{dl}</dl></div></div>"
+    )
+
+
+def layout_images(src: Path) -> None:
+    from PIL import Image
+
+    im = Image.open(src).convert("RGB")
+    # Shown at about 560 px; a layout is all fine detail, so 1000 px at moderate quality
+    # keeps it sharp on high-density screens without a heavy download.
+    im = im.resize((1000, round(im.height * 1000 / im.width)), Image.LANCZOS)
+    im.save(SITE / "img" / "layout-1200.webp", quality=70, method=6)
+    im.save(SITE / "img" / "layout-1200.jpg", quality=76, optimize=True, progressive=True)
+
+
 def stamp_assets(page: Path) -> None:
     """Version the stylesheet and script by content, so a cached copy is never stale."""
     text = page.read_text()
@@ -612,7 +652,7 @@ def og_card() -> None:
 <text x="134" y="108" font-family="{font}" font-weight="600" font-size="36" fill="#0e1311">ChipLeap</text>
 <text x="72" y="290" font-family="{font}" font-weight="600" font-size="62" fill="#0e1311" letter-spacing="-2">Design the chip</text>
 <text x="72" y="360" font-family="{font}" font-weight="600" font-size="62" fill="#0e1311" letter-spacing="-2">your model needs.</text>
-<text x="72" y="430" font-family="{body}" font-size="24" fill="#57605b">Explore, generate RISC-V, verify on open tools.</text>
+<text x="72" y="430" font-family="{body}" font-size="24" fill="#57605b">Explore, generate, verify, down to the layout.</text>
 <text x="72" y="556" font-family="{body}" font-size="21" fill="#0b6340">Open source, MIT licensed</text>
 </svg>"""
     tmp = SITE / "og.svg"
@@ -630,6 +670,7 @@ def main() -> None:
     ap.add_argument("--hero", help="Blender render of the hero die (PNG with alpha)")
     ap.add_argument("--callouts", help="block positions from render_die.py ... project")
     ap.add_argument("--hero-floorplan", help="the floorplan JSON the hero was rendered from")
+    ap.add_argument("--layout", help="KLayout render of the routed GDS (scripts/render_gds.py)")
     ap.add_argument(
         "--write-hero-floorplan", help="write the floorplan to render for the hero, then exit"
     )
@@ -658,6 +699,10 @@ def main() -> None:
         ]
         inject(page, "stats", stats_html(rows))
         inject(page, "verify", verify_table(rows))
+        if args.layout:
+            layout_images(Path(args.layout))
+        if (SITE / "img" / "layout-1200.jpg").exists():
+            inject(page, "layout", layout_html(rows))
         sim = next((r for r in rows if r["step"] == "sim"), None)
         if all(r["status"] == "pass" for r in rows) and sim:
             verify_line = (

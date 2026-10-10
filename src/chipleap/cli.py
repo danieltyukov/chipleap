@@ -306,6 +306,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
     from chipleap.verify.run import verify_bundle
 
     steps = tuple(s.strip() for s in args.steps.split(",") if s.strip())
+    if "all" in steps:
+        # Place and route takes many minutes, so it runs only when asked for.
+        steps = ("consistency", "lint", "sim", "synth", "xheep", "pnr")
     results = verify_bundle(
         Path(args.bundle),
         steps=steps,
@@ -472,7 +475,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("verify", help="lint, simulate, synthesize and X-HEEP-check a bundle")
     s.add_argument("bundle")
-    s.add_argument("--steps", default="consistency,lint,sim,synth,xheep")
+    s.add_argument(
+        "--steps",
+        default="consistency,lint,sim,synth,xheep",
+        help="comma-separated steps; pnr (LibreLane place and route) is opt-in, and all "
+        "runs every step",
+    )
     s.add_argument("--xheep", help="X-HEEP checkout (default: CHIPLEAP_XHEEP_DIR or the cache)")
     s.add_argument("--fetch-xheep", action="store_true", help="clone the tested X-HEEP commit")
     s.add_argument("--cases", type=int, default=0, help="limit the number of simulation cases")
