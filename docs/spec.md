@@ -8,7 +8,7 @@ example. Errors name the key that is wrong, for example
 ## Spec
 
 ```yaml
-name: llama-1b-edge                 # identifier, also the design name
+name: llama-1b-edge                 # letters, digits, _ . -; also the design and file name
 description: optional sentence
 workload:
   llm:                              # or graph: (see below)

@@ -11,7 +11,9 @@ from chipleap.gen.datasheet import REGISTERS, datasheet, reggen_hjson
 from chipleap.gen.rtl import driver_header, rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw import Accel, Design
+from chipleap.hw.design import DesignError
 from chipleap.model.accel import TilingError, plan_tiles
+from chipleap.verify.run import _regenerated_xheep
 
 DESIGN = Design(
     name="demo",
@@ -201,3 +203,21 @@ def test_rtl_params():
     p = rtl_params(DESIGN.accel)
     assert p.abuf_words == 16 * 256 and p.dataflow == 0
     assert "-GPORTS=4" in p.verilator_args()
+
+
+@pytest.mark.parametrize("name", ["../escape", "a/b", "line\nbreak", "two words", "-lead", ""])
+def test_unsafe_design_names_are_refused(name, tmp_path):
+    with pytest.raises(DesignError):
+        Design(name=name).validate()
+    with pytest.raises(DesignError):
+        write_bundle(tmp_path, Design(name=name))
+
+
+def test_xheep_step_never_runs_the_bundle_copy(tmp_path):
+    write_bundle(tmp_path, DESIGN)
+    text, same = _regenerated_xheep(tmp_path, DESIGN)
+    assert same and text == xheep_config(DESIGN)
+    own = tmp_path / "xheep" / "demo.py"
+    own.write_text(own.read_text() + "\nimport os; os.system('touch pwned')\n")
+    text, same = _regenerated_xheep(tmp_path, DESIGN)
+    assert not same and "pwned" not in text

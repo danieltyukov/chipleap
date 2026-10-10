@@ -468,11 +468,13 @@ def steps_html(t: dict[str, Any]) -> str:
 
 
 def story_intro(t: dict[str, Any]) -> str:
+    # An upper bound in steps of five seconds, so timing noise does not change the page.
+    took = f"under {5 * (int(float(t['seconds']) // 5) + 1)} seconds"
     return (
         f"<p>Llama 3.2 1B decoding at {t['target']:g} tokens per second, within 8 mm² and "
         "400 mW. The agent starts from a bare microcontroller, names what limits it, tries "
         "every single change, keeps the best and says why. The floorplan is drawn to scale at "
-        f"every step. This run evaluated {t['evaluated']:,} designs in {t['seconds']:.1f} s.</p>"
+        f"every step. This run evaluated {t['evaluated']:,} designs in {took}.</p>"
     )
 
 

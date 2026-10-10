@@ -11,13 +11,16 @@ Every step is optional and skipped with a reason when its tool is missing:
 from __future__ import annotations
 
 import json
+import re
 import statistics
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from chipleap.gen.rtl import rtl_params
+from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_logic_kge, get_tech
 from chipleap.verify import sim, synth, xheep
@@ -171,26 +174,54 @@ def check_xheep(bundle: Path, design: Design, checkout: Path | None, fetch: bool
             "skipped",
             "no X-HEEP checkout (pass --xheep DIR, set CHIPLEAP_XHEEP_DIR, or use --fetch-xheep)",
         )
-    cfg = bundle / "xheep" / f"{design.name}.py"
-    v = xheep.validate(cfg, co)
-    if not v.ok:
-        errors = [ln for ln in v.log.splitlines() if "Error" in ln.split(":")[0]]
-        reason = errors[-1].split("ERROR:")[-1].split(":", 1)[-1].strip() if errors else ""
-        msg = "X-HEEP rejected the configuration" + (f": {reason}" if reason else "")
-        return StepResult("xheep", "fail", msg, {"log": v.log})
-    r = xheep.render(cfg, co)
-    data = {"checkout": str(co), "validate": v.summary, "render": r.summary}
+    # An X-HEEP configuration is Python, and X-HEEP's generator executes it. So this step
+    # checks the configuration ChipLeap generates from design.yaml, never the bundle's own
+    # file, which could have come from anywhere. The consistency step reports drift.
+    text, same = _regenerated_xheep(bundle, design)
+    with tempfile.TemporaryDirectory(prefix="chipleap-xheep-cfg-") as tmp:
+        cfg = Path(tmp) / f"{design.name}.py"
+        cfg.write_text(text)
+        v = xheep.validate(cfg, co)
+        if not v.ok:
+            errors = [ln for ln in v.log.splitlines() if "Error" in ln.split(":")[0]]
+            reason = errors[-1].split("ERROR:")[-1].split(":", 1)[-1].strip() if errors else ""
+            msg = "X-HEEP rejected the configuration" + (f": {reason}" if reason else "")
+            return StepResult("xheep", "fail", msg, {"log": v.log})
+        r = xheep.render(cfg, co)
+    data = {
+        "checkout": str(co),
+        "validate": v.summary,
+        "render": r.summary,
+        "bundle_copy_matches": same,
+    }
     if not r.ok:
         return StepResult(
             "xheep", "fail", "X-HEEP could not render its templates", {**data, "log": r.log}
         )
+    note = "" if same else "; the bundle's own copy differs from design.yaml"
     return StepResult(
         "xheep",
         "pass",
         f"X-HEEP validated the configuration ({_count(v.summary.get('banks'), 'bank')}, "
-        f"{v.summary.get('banks_il')} interleaved) and rendered {r.summary['rendered']} templates",
+        f"{v.summary.get('banks_il')} interleaved) and rendered {r.summary['rendered']} "
+        f"templates{note}",
         data,
     )
+
+
+def _regenerated_xheep(bundle: Path, design: Design) -> tuple[str, bool]:
+    """The X-HEEP configuration for design.yaml, and whether the bundle's copy matches it
+    (comments aside). Only the external window is read from the bundle's copy, as text."""
+    own = bundle / "xheep" / f"{design.name}.py"
+    old = own.read_text() if own.is_file() else ""
+    m = re.search(r'"ext_slaves", start_address=(0x[0-9a-fA-F]+)', old)
+    large = m is not None and int(m.group(1), 16) == EXT_LARGE[0]
+    text = xheep_config(design, float(EXT_LARGE[1]) if large else 0.0)
+
+    def code(t: str) -> list[str]:
+        return [ln for ln in t.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+
+    return text, code(text) == code(old)
 
 
 def verify_bundle(

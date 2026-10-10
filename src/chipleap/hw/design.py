@@ -7,6 +7,7 @@ external memory sets the address window and the integration notes.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
@@ -27,6 +28,24 @@ MAX_BANKS = 16
 
 class DesignError(ValueError):
     pass
+
+
+# Names become file names in a bundle and appear in generated RTL, C and YAML, so they are
+# restricted to characters that are safe in all of them. Spec names are shorter so that
+# derived design names ("<spec>-baseline") still fit.
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+SPEC_NAME_MAX = 64
+DESIGN_NAME_MAX = 96
+
+
+def is_safe_name(name: str, limit: int = DESIGN_NAME_MAX) -> bool:
+    return len(name) <= limit and NAME_RE.fullmatch(name) is not None
+
+
+def safe_name(text: str, fallback: str = "design") -> str:
+    """``text`` with every unsafe character replaced, for names derived from file names."""
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip("-.")[:SPEC_NAME_MAX]
+    return s if s and is_safe_name(s) else fallback
 
 
 def _pow2(x: int) -> bool:
@@ -95,6 +114,11 @@ class Design:
         return self.banks * self.bank_kib + self.il_banks * self.il_bank_kib
 
     def validate(self) -> None:
+        if not is_safe_name(self.name):
+            raise DesignError(
+                f"name {self.name!r} must be 1 to {DESIGN_NAME_MAX} letters, digits, '_', '.' or '-', "
+                "starting with a letter or digit"
+            )
         if self.tech not in TECHNOLOGIES:
             raise DesignError(f"tech must be one of {', '.join(TECHNOLOGIES)}")
         if self.cpu not in CPUS:

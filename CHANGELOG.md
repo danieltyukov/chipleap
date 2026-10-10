@@ -17,7 +17,7 @@ First release.
 - Analytical evaluator with placement, bandwidth, per-operator timing and bottleneck attribution, energy, area and feasibility checks; `chipleap require` for inverse sizing.
 - Explorer: an explainable agent that names the bottleneck, evaluates every single change and records its reasoning, plus seeded global sampling and a Pareto front; precision as a decision.
 - Generator: X-HEEP Python configuration, accelerator SystemVerilog (GEMV, weight-stationary and output-stationary cores, multi-port DMA, double buffering), X-HEEP adapter, FuseSoC core, reggen register description, C driver with the model's tile planner, Verilator testbench, datasheet.
-- Verification: bundle consistency, Verilator lint, randomized simulation against a golden model with a cycle cross-check (exact without memory stalls), Yosys synthesis on IHP SG13G2 through sv2v with buffered static timing (the accelerator area model is fitted to it), X-HEEP validation and template rendering.
+- Verification: bundle consistency, Verilator lint, randomized simulation against a golden model with a cycle cross-check (exact without memory stalls), Yosys synthesis on IHP SG13G2 through sv2v with buffered static timing (the accelerator area model is fitted to it), X-HEEP validation and template rendering of the configuration regenerated from `design.yaml` (a bundle's own Python is never executed).
 - Reports in text, Markdown, JSON and self-contained HTML with the decision log, the Pareto front and breakdowns; a to-scale floorplan sketch.
 - MCP server with ten tools, a `design_chip` prompt and a spec reference, run logs and `chipleap replay`.
 - Website with a Blender render of a generated die and the agent's decisions animated to scale.

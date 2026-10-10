@@ -117,6 +117,7 @@ def write_bundle(
     result: ExploreResult | None = None,
 ) -> list[Path]:
     """Write a design bundle. Returns the files written."""
+    design.validate()  # among other things, the name becomes a file name here
     out.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 

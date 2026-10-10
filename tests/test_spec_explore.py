@@ -108,3 +108,11 @@ def test_infeasible_spec_says_why():
     r = explore(s, samples=100)
     assert not r.best.assessment.meets
     assert r.best.assessment.misses
+
+
+def test_spec_names_are_safe(tmp_path):
+    with pytest.raises(SpecError, match="name"):
+        parse_spec({"name": "../x", "workload": {"llm": {"model": "smollm2-135m"}}})
+    path = tmp_path / "my spec (v2).yaml"
+    path.write_text("workload:\n  llm:\n    model: smollm2-135m\n")
+    assert load_spec(path).name == "my-spec-v2"

@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 
 from chipleap.hw.cpu import CPUS
-from chipleap.hw.design import Design, DesignError
+from chipleap.hw.design import SPEC_NAME_MAX, Design, DesignError, is_safe_name, safe_name
 from chipleap.hw.memory import MEMORIES, NONE_KEY
 from chipleap.hw.tech import TECHNOLOGIES
 from chipleap.model.evaluate import DEFAULT_FIRMWARE_KIB
@@ -140,6 +140,18 @@ def _number(section: dict[str, Any], key: str, where: str) -> float:
     return float(v)
 
 
+def _name(given: Any, fallback: str) -> str:
+    """The spec name, which becomes the design's name and a file name in its bundle."""
+    if given is None:
+        return safe_name(fallback, "spec")
+    if not is_safe_name(str(given), SPEC_NAME_MAX):
+        raise SpecError(
+            f"name {given!r} must be 1 to {SPEC_NAME_MAX} letters, digits, '_', '.' or '-', "
+            "starting with a letter or digit"
+        )
+    return str(given)
+
+
 def parse_spec(data: Any, *, name: str = "spec") -> Spec:
     if not isinstance(data, dict):
         raise SpecError("a spec must be a YAML mapping")
@@ -204,7 +216,7 @@ def parse_spec(data: Any, *, name: str = "spec") -> Spec:
             raise SpecError(f"start: {exc}") from exc
 
     spec = Spec(
-        name=str(data.get("name", name)),
+        name=_name(data.get("name"), name),
         description=str(data.get("description", "")),
         workload_cfg=wl,
         throughput=_number(targets, "throughput", "targets"),

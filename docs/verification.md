@@ -57,6 +57,8 @@ Given an X-HEEP checkout (`--xheep DIR`, `CHIPLEAP_XHEEP_DIR`, or `--fetch-xheep
 1. loads the generated configuration with X-HEEP's own `load_config`, then runs `build()` and `validate()`, the checks `make mcu-gen` runs;
 2. renders all of X-HEEP's Mako templates for it (RTL packages, bus, memory subsystem, linker scripts, headers) into a scratch copy, so the checkout is never modified, and reads back the bank counts from the generated `core_v_mini_mcu_pkg.sv`.
 
+X-HEEP configurations are Python, and X-HEEP's generator executes them. So this step checks the configuration ChipLeap generates from the bundle's `design.yaml`, in a temporary directory, and never runs the bundle's own `xheep/<name>.py`; it says so when that copy differs, and the consistency step reports how. Bundles from elsewhere can be verified without running their code. Design and spec names are limited to letters, digits, `_`, `.` and `-`, because they become file names and appear in the generated RTL, C and YAML.
+
 This needs `hjson` and `mako` in the Python that runs ChipLeap: `pip install "chipleap[xheep]"`.
 
 ## The test suite
