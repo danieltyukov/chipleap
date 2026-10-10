@@ -79,8 +79,9 @@ p code, li code, td code, span code { background: rgba(14, 19, 17, 0.06); paddin
 
 .hero-art { margin: 0 -60px 0 0; position: relative; }
 @media (max-width: 1240px) { .hero-art { margin-right: 0; } }
-.art-frame { position: relative; }
-.art-frame img { width: 100%; transform: translateY(var(--lift, 0px)); transition: transform 0.2s linear; }
+/* The whole frame drifts, so the callouts stay on the blocks they point at. */
+.art-frame { position: relative; transform: translateY(var(--lift, 0px)); transition: transform 0.2s linear; }
+.art-frame img { width: 100%; display: block; }
 .hero-art figcaption { font-size: 13.5px; color: var(--faint); margin: 4px 0 0 8%; }
 .callout { position: absolute; left: var(--x); top: var(--y); transform: translate(-50%, -50%); pointer-events: none; }
 .callout .dot { position: absolute; left: 0; top: 0; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px var(--green); }
@@ -279,11 +280,11 @@ details p { color: var(--muted); margin: 12px 0 0; }
   .stat .lab { font-size: 14px; }
   .console-body { min-height: 0; }
   .callout svg, .callout .tag { display: none; }
-  .callout .dot { width: 20px; height: 20px; margin: -10px 0 0 -10px; box-shadow: 0 0 0 2px var(--green), 0 2px 8px rgba(14, 19, 17, 0.25); display: grid; place-items: center; }
-  .callout .dot i { display: block; font: 600 11.5px/1 var(--sans); font-style: normal; color: var(--green-ink); }
+  .callout .dot { width: 22px; height: 22px; margin: -11px 0 0 -11px; box-shadow: 0 0 0 2px var(--green), 0 2px 8px rgba(14, 19, 17, 0.25); }
+  .callout .dot i { display: block; width: 22px; font: 600 12px/22px var(--num); font-style: normal; font-variant-numeric: tabular-nums; text-align: center; color: var(--green-ink); }
   .callout-key { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; list-style: none; counter-reset: key; margin: 4px 0 14px; padding: 0; font-size: 13.5px; color: var(--muted); }
   .callout-key li { counter-increment: key; position: relative; padding-left: 26px; line-height: 1.35; }
-  .callout-key li::before { content: counter(key); position: absolute; left: 0; top: 0; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--green); color: var(--green-ink); font: 600 11px/15px var(--sans); text-align: center; }
+  .callout-key li::before { content: counter(key); position: absolute; left: 0; top: 0; width: 18px; height: 18px; box-sizing: border-box; border-radius: 50%; border: 1.5px solid var(--green); color: var(--green-ink); font: 600 11px/15px var(--num); font-variant-numeric: tabular-nums; text-align: center; }
   .callout-key b { display: block; font-weight: 600; color: var(--ink-2); }
   .hero-art figcaption { margin-left: 0; }
   .terminal { font-size: 12.5px; padding: 20px 18px; }

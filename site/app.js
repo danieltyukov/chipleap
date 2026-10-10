@@ -28,7 +28,7 @@
   // Hero: callouts appear one by one, once; the render rises slightly as the page scrolls.
   const callouts = $$('.callout');
   callouts.forEach((c, i) => setTimeout(() => c.classList.add('on'), reduce ? 0 : 700 + i * 380));
-  const art = $('.art-frame img');
+  const art = $('.art-frame');
   if (art && !reduce) {
     window.addEventListener('scroll', () => {
       const y = Math.min(window.scrollY, 600);

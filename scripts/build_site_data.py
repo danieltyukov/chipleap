@@ -132,7 +132,9 @@ def labelled(fp: dict[str, Any], c: Candidate) -> dict[str, Any]:
         elif b["kind"] == "accel" and d.accel:
             b["label"] = f"{DF[d.accel.dataflow]} {d.accel.rows} x {d.accel.cols}"
         elif b["kind"] == "soc":
-            b["label"] = "bus and peripherals"
+            b["label"] = "Bus and peripherals"
+        elif b["kind"] == "buffer":
+            b["label"] = "Buffers"
         b["short"] = SHORT[b["kind"]]
     return fp
 
@@ -405,7 +407,18 @@ def stats_html(rows: list[dict[str, Any]]) -> str:
             "X-HEEP templates rendered for the configuration",
         ),
     ]
-    if synth.get("fmax_mhz_estimate"):
+    pr = next((r for r in rows if r["step"] == "pnr" and r["status"] == "pass"), {})
+    if pr.get("fmax_mhz"):
+        items.append(
+            (
+                float(pr["fmax_mhz"]),
+                0,
+                "",
+                "MHz",
+                "clock the routed accelerator reaches on IHP SG13G2",
+            )
+        )
+    elif synth.get("fmax_mhz_estimate"):
         items.append(
             (
                 float(synth["fmax_mhz_estimate"]),
@@ -417,7 +430,7 @@ def stats_html(rows: list[dict[str, Any]]) -> str:
         )
     cells = "".join(
         f'<div class="stat"><span class="num" data-to="{v}" data-dec="{dec}" data-suffix="{suf}">'
-        f'{v:.{dec}f}{suf}{f"<small>{unit}</small>" if unit else ""}</span>'
+        f"{v:.{dec}f}{suf}{f'<small>{unit}</small>' if unit else ''}</span>"
         f'<span class="lab">{html.escape(lab)}</span></div>'
         for v, dec, suf, unit, lab in items
     )
@@ -431,6 +444,7 @@ def verify_table(rows: list[dict[str, Any]]) -> str:
         "sim": "Simulation",
         "synth": "Synthesis",
         "xheep": "X-HEEP",
+        "pnr": "Place and route",
     }
     body = []
     for r in rows:
