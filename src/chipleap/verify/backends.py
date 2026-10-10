@@ -13,13 +13,15 @@ from pathlib import Path
 
 from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_logic_kge, get_tech
-from chipleap.verify import csynth, hdlsim, innovus, sim
+from chipleap.verify import cpnr, csynth, hdlsim, innovus, sim
+from chipleap.verify.pnr import PnrError, PnrResult
 from chipleap.verify.remote import Remote
 from chipleap.verify.synth import SMALL_WORDS, SynthError
 from chipleap.verify.tools import ihp_liberty
 
 SIM_TOOLS = ("verilator", *hdlsim.SIMULATORS)
 SYNTH_TOOLS = ("yosys", *csynth.SYNTH_TOOLS)
+PNR_TOOLS = ("librelane", "innovus")
 
 
 def simulate_with(
@@ -112,3 +114,33 @@ def synthesize_with(
         innovus.write(workdir, f"{csynth.TOP}_{tag}.v", f"{csynth.TOP}_{tag}.sdc", lib_ref, names)
         data["innovus_script"] = str(workdir / "innovus.tcl")
     return data
+
+
+def place_route_with(
+    design: Design,
+    workdir: Path,
+    remote: Remote | None = None,
+    tech_key: str = "ihp-sg13g2",
+) -> tuple[PnrResult, float]:
+    """Genus and Innovus on the accelerator against ``tech_key``. Returns the result and
+    the clock it was placed and routed for."""
+    if design.accel is None:
+        raise PnrError("no accelerator in this design")
+    tech = get_tech(tech_key)
+    try:
+        lib, host = synth_liberty(tech_key)
+    except SynthError as exc:
+        raise PnrError(str(exc)) from exc
+    if host and (remote is None or remote.host != host):
+        raise PnrError(
+            f"the {tech_key} files are on {host}; run with --remote {host} and its setup"
+        )
+    lefs = tech.lef or (innovus.ihp_lefs(Path(lib)) if tech_key == "ihp-sg13g2" else ())
+    clock = (
+        min(design.freq_mhz, tech.max_freq_mhz) if design.tech == tech_key else tech.max_freq_mhz
+    )
+    timeout = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "14400"))
+    r = cpnr.place_and_route(
+        design.accel, tech, lib, tuple(lefs), workdir, clock, remote, timeout=timeout
+    )
+    return r, clock

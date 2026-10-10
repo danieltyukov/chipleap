@@ -322,6 +322,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         synth_tool=getattr(args, "synth_tool", "yosys"),
         synth_tech=getattr(args, "synth_tech", "ihp-sg13g2"),
         remote=remote,
+        pnr_tool=getattr(args, "pnr_tool", "librelane"),
     )
     code = _print_steps(results)
     print(f"\nWrote {args.bundle}/verify/VERIFY.md and verify.json")
@@ -425,6 +426,7 @@ def cmd_tech(args: argparse.Namespace) -> int:
         db=args.db,
         host=args.remote,
         name=args.display_name,
+        liberty_slow=args.liberty_slow,
     )
     path = techlib.save(tech, force=args.force)
     print(f"Added technology {tech.key!r} ({tech.node_nm} nm, {tech.vdd:g} V) in {path}")
@@ -570,6 +572,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="ihp-sg13g2",
         help="technology whose liberty Genus or Design Compiler maps to (chipleap tech add)",
     )
+    s.add_argument(
+        "--pnr-tool",
+        default="librelane",
+        choices=["librelane", "innovus"],
+        help="place and route: LibreLane (default) or Cadence Genus and Innovus on --synth-tech",
+    )
     s.add_argument("--remote", help="run the simulator and synthesis on this ssh host")
     s.add_argument(
         "--remote-setup",
@@ -587,6 +595,9 @@ def build_parser() -> argparse.ArgumentParser:
     t = tsub.add_parser("add", help="measure a PDK's liberty files and add it as a technology")
     t.add_argument("name", help="key for the technology, for example mylib40")
     t.add_argument("--liberty", required=True, help="standard-cell liberty (typical corner)")
+    t.add_argument(
+        "--liberty-slow", default="", help="slow-corner liberty, for place-and-route timing"
+    )
     t.add_argument("--node", type=int, required=True, help="process node in nm")
     t.add_argument(
         "--sram-liberty", action="append", default=[], help="SRAM macro .lib file or directory"

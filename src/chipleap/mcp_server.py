@@ -351,11 +351,12 @@ def verify_soc(
     sim_tool: str = "verilator",
     synth_tool: str = "yosys",
     synth_tech: str = "ihp-sg13g2",
+    pnr_tool: str = "librelane",
 ) -> dict[str, Any]:
     """Verify a bundle. The client picks tools from a fixed list; whether they run on a
     server, and the setup that runs there, comes only from the user's own environment
     (CHIPLEAP_REMOTE, CHIPLEAP_REMOTE_SETUP), never from the client."""
-    from chipleap.verify.backends import SIM_TOOLS, SYNTH_TOOLS
+    from chipleap.verify.backends import PNR_TOOLS, SIM_TOOLS, SYNTH_TOOLS
     from chipleap.verify.remote import Remote
     from chipleap.verify.run import verify_bundle
 
@@ -365,6 +366,8 @@ def verify_soc(
         raise ToolError(f"synth_tool must be one of {', '.join(SYNTH_TOOLS)}")
     if synth_tech not in TECHNOLOGIES:
         raise ToolError(f"synth_tech must be one of {', '.join(TECHNOLOGIES)}")
+    if pnr_tool not in PNR_TOOLS:
+        raise ToolError(f"pnr_tool must be one of {', '.join(PNR_TOOLS)}")
     res = verify_bundle(
         Path(out_dir).expanduser(),
         steps=tuple(x.strip() for x in steps.split(",") if x.strip()),
@@ -373,6 +376,7 @@ def verify_soc(
         synth_tool=synth_tool,
         synth_tech=synth_tech,
         remote=Remote.from_env(),
+        pnr_tool=pnr_tool,
     )
     return {"steps": [{"step": r.name, "status": r.status, "summary": r.summary} for r in res]}
 
@@ -563,6 +567,7 @@ def build_server(log_dir: str | None = None) -> Any:
         sim_tool: str = "verilator",
         synth_tool: str = "yosys",
         synth_tech: str = "ihp-sg13g2",
+        pnr_tool: str = "librelane",
     ) -> dict[str, Any]:
         return logged("verify_soc", TOOLS["verify_soc"])(
             out_dir=out_dir,
@@ -571,6 +576,7 @@ def build_server(log_dir: str | None = None) -> Any:
             sim_tool=sim_tool,
             synth_tool=synth_tool,
             synth_tech=synth_tech,
+            pnr_tool=pnr_tool,
         )
 
     @server.tool(

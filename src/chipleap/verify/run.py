@@ -323,6 +323,55 @@ def _synthesize_on(
     return StepResult("synth", "pass", msg, data)
 
 
+def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | None) -> StepResult:
+    """Place and route with Genus and Innovus (``chipleap.verify.cpnr``)."""
+    try:
+        r, clock = backends.place_route_with(design, bundle / "verify" / "innovus", remote, tech)
+    except pnr.PnrError as exc:
+        msg = str(exc).splitlines()[0]
+        status = "skipped" if "not on the path" in msg or "no accelerator" in msg else "fail"
+        return StepResult("pnr", status, f"Innovus: {msg}", {"error": str(exc)})
+    data = {
+        "tool": "Innovus",
+        "technology": tech,
+        "clock_mhz": clock,
+        "die_um2": round(r.die_um2),
+        "core_um2": round(r.core_um2),
+        "cell_um2": round(r.cell_um2),
+        "utilisation": round(r.utilisation, 3),
+        "cells": r.cells,
+        "setup_slack_typ_ns": round(r.setup_slack_typ_ns, 3),
+        "setup_slack_ns": round(r.setup_slack_ns, 3),
+        "hold_slack_ns": round(r.hold_slack_ns, 3),
+        "fmax_mhz": round(r.fmax_mhz, 1),
+        "fmax_worst_mhz": round(r.fmax_worst_mhz, 1),
+        "drc_errors": r.drc_errors,
+        "connectivity_errors": r.lvs_errors,
+        "antenna_nets": r.antenna_nets,
+        "buffer_words": pnr.PNR_WORDS,
+    }
+    met = r.setup_slack_typ_ns >= 0 and r.hold_slack_ns >= 0
+    checks = (
+        "DRC and connectivity clean"
+        if r.clean
+        else f"{r.drc_errors} DRC and {r.lvs_errors} connectivity violations"
+    )
+    if r.antenna_nets:
+        checks += f", {r.antenna_nets} antenna violations"
+    corner = (
+        f", about {r.fmax_worst_mhz:.0f} MHz at the slow corner"
+        if r.setup_slack_ns != r.setup_slack_typ_ns
+        else ""
+    )
+    msg = (
+        f"Innovus: placed and routed on {tech}: {r.core_um2 / 1e6:.3f} mm2 core at "
+        f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
+        f"{'met' if met else 'missed'} at the typical corner (about {r.fmax_mhz:.0f} MHz)"
+        f"{corner}; {checks}"
+    )
+    return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)
+
+
 def verify_bundle(
     bundle: Path,
     *,
@@ -335,6 +384,7 @@ def verify_bundle(
     synth_tool: str = "yosys",
     synth_tech: str = "ihp-sg13g2",
     remote: Remote | None = None,
+    pnr_tool: str = "librelane",
 ) -> list[StepResult]:
     from chipleap.gen.bundle import load_design
 
@@ -355,6 +405,8 @@ def verify_bundle(
             results.append(synthesize(design, bundle / "verify" / "synth"))
         elif step == "xheep":
             results.append(check_xheep(bundle, design, xheep_dir, fetch_xheep))
+        elif step == "pnr" and pnr_tool == "innovus":
+            results.append(_place_route_on(design, synth_tech, bundle, remote))
         elif step == "pnr":
             results.append(place_route(design, bundle / "verify" / "pnr"))
         else:

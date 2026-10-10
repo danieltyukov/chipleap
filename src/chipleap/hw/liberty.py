@@ -199,7 +199,8 @@ def nand2(lib: Library) -> Cell:
     if not cands:
         raise LibertyError("no two-input NAND found")
     unit = [c for c in cands if _drive_one(c.name)]
-    return min(unit or cands, key=lambda c: c.area)
+    # On a tie, the ordinary NAND rather than a clock-tree variant (CKND2...).
+    return min(unit or cands, key=lambda c: (c.area, c.name.upper().startswith("CK"), c.name))
 
 
 def flop(lib: Library) -> Cell:
