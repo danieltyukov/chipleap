@@ -55,6 +55,9 @@ jobs:
     # workflow file and the `pypi` environment.
     name: PyPI
     needs: build
+    # Off until the repository variable PUBLISH_PYPI is "true", set once the publisher is
+    # registered on pypi.org, so a release never fails for want of it.
+    if: vars.PUBLISH_PYPI == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

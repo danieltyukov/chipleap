@@ -9,7 +9,7 @@ files.
 
 ```text
 $ chipleap verify out --sim-tool xcelium --synth-tool genus --remote eda-server \
-    --remote-setup "source /eda/scripts/flexlm.sh; source /eda/cadence/scripts/XCELIUM.sh; source /eda/cadence/scripts/GENUS.sh"
+    --remote-setup "source /opt/eda/licences.sh; source /opt/eda/cadence/xcelium.sh; source /opt/eda/cadence/genus.sh"
 sim    PASS     Xcelium: 21 randomized jobs bit-exact; cycle model error 0.0% max without stalls, ...
 synth  PASS     Genus: logic cell area ... mm2 on ihp-sg13g2 (model ... mm2, ...), critical path ... ns at a 100 MHz target
 ```

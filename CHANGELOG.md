@@ -6,10 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-10
+
 ### Added
 
 - Place and route: `chipleap verify --steps pnr` (or `--steps all`) runs the accelerator through LibreLane on IHP SG13G2, with timing at every corner, KLayout DRC with IHP's rule deck, LVS and antenna repair, and keeps the GDS. The open-PDK example's 1 x 8 GEMV engine routes to a 0.81 mm2 core with clean DRC and LVS, about 120 MHz at the typical corner and 77 MHz at the slow corner. `scripts/render_gds.py` draws a GDS in the PDK's colours.
 - A `standalone` platform: the accelerator as AXI4 IP for any host (an Arm, RISC-V or FPGA SoC), with an AXI4-Lite register port, AXI4 read and write masters, a plain C driver and a protocol-checking AXI testbench. Set `platform: standalone` in a spec or pass `--platform standalone`; reports give the IP's area apart from the assumed host system.
+- Commercial EDA tools next to the open ones: simulation with Cadence Xcelium, Synopsys VCS or Siemens Questa through one simulator-neutral SystemVerilog testbench driven by the generated C driver, and synthesis with Cadence Genus or Synopsys Design Compiler, with Innovus scripts for the netlist (`--sim-tool`, `--synth-tool`). Runs on this machine or on a design server over ssh (`--remote`, `--remote-setup`); the MCP server cannot choose a host or a setup command.
+- `chipleap tech add`, `list` and `remove`: measure a PDK of your own from its liberty files into your config directory, never into a repository, and use it like the built-in technologies.
 - README images: the die render, an animation of the agent's decisions with every floorplan to scale, the report, and the routed layout (`scripts/make_readme_visuals.py`).
 
 ### Fixed
@@ -34,5 +38,6 @@ First release.
 - MCP server with ten tools, a `design_chip` prompt and a spec reference, run logs and `chipleap replay`.
 - Website with a Blender render of a generated die and the agent's decisions animated to scale.
 
-[Unreleased]: https://github.com/danieltyukov/chipleap/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/danieltyukov/chipleap/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/danieltyukov/chipleap/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/danieltyukov/chipleap/releases/tag/v0.1.0

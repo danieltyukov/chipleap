@@ -19,7 +19,7 @@ quoted pieces. Locally nothing runs through a shell: each step is an argument ve
 Only key-based ssh is used, so a password prompt is an error instead of a hang.
 
     CHIPLEAP_REMOTE=eda-server
-    CHIPLEAP_REMOTE_SETUP="source /eda/scripts/flexlm.sh; source /eda/.../GENUS.sh"
+    CHIPLEAP_REMOTE_SETUP="source /opt/eda/licences.sh; source /opt/eda/cadence/genus.sh"
 """
 
 from __future__ import annotations

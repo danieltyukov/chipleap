@@ -67,8 +67,10 @@ Published microcontroller deployments so far use models under about 15 million p
 | Checks feasibility | capacity, read-only memories, the address window, and whether a PHY exists at the node |
 | Answers inverse questions | `chipleap require`: what a target demands |
 | Explains | a decision log with hypotheses, results and rejected alternatives |
-| Generates | an X-HEEP configuration, accelerator RTL, register map, driver, testbench, datasheet |
-| Verifies | consistency, lint, simulation against a golden model with a cycle cross-check, synthesis on IHP SG13G2, X-HEEP's checks |
-| Runs | locally, free, from the command line or any MCP assistant, with replayable run logs |
+| Generates | an X-HEEP configuration or AXI4 IP for any host, accelerator RTL, register map, driver, testbench, datasheet |
+| Verifies | consistency, lint, simulation against a golden model with a cycle cross-check, synthesis, place and route with DRC and LVS on IHP SG13G2, X-HEEP's checks |
+| Runs | locally, free, from the command line or any MCP assistant, with replayable run logs; on open tools by default, and on Cadence, Synopsys and Siemens simulators and synthesis, locally or on a design server, when you have them |
 
-What ChipLeap does not do: generate arbitrary RTL, debug your design, close timing or sign off. It decides and specifies, then hands over a verified starting point that tools further down the flow can take.
+The agentic EDA suites drive their own vendor's tools; ChipLeap drives whichever of the open and commercial tools you have, and a PDK of your own through `chipleap tech add`.
+
+What ChipLeap does not do: generate arbitrary RTL, debug your design, or sign off for a foundry. It decides and specifies, then hands over a verified starting point that tools further down the flow can take.
