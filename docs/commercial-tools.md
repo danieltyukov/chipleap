@@ -2,8 +2,8 @@
 
 ChipLeap runs on open tools by default, and the same checks run on the commercial ones a
 university or company already licenses: Cadence Xcelium, Synopsys VCS or Siemens Questa
-for simulation, Cadence Genus or Synopsys Design Compiler for synthesis, with Cadence
-Innovus scripts for the mapped netlist. The tools can be on this machine or on a design
+for simulation, Cadence Genus or Synopsys Design Compiler for synthesis, and Cadence
+Genus with Innovus for place and route. The tools can be on this machine or on a design
 server reached over ssh, and the process can be a foundry PDK measured from its liberty
 files.
 
@@ -54,10 +54,42 @@ compiled `.db`: name one with `chipleap tech add --db`, or ChipLeap compiles the
 with Library Compiler (`lc_shell`) first.
 
 When the technology's LEF files are known (the IHP SG13G2 ones are found next to its
-liberty), the step also writes `innovus.tcl` and `mmmc.tcl` for the 16-word netlist:
-floorplan, placement, clock tree, routing, post-route timing and reports, and a GDS when
-the technology names a layer map. ChipLeap does not run Innovus itself; the open flow it
-runs for layout is LibreLane.
+liberty), the step also writes `innovus.tcl` and `mmmc.tcl` for the 16-word netlist, for
+running Innovus by hand. The place-and-route step below runs it for you.
+
+## Place and route
+
+```text
+$ chipleap verify out --steps pnr --pnr-tool innovus --synth-tech ihp-sg13g2 \
+    --remote eda-server --remote-setup "source /opt/eda/licences.sh; source /opt/eda/cadence/genus.sh; source /opt/eda/cadence/innovus.sh"
+pnr    PASS     Innovus: placed and routed on ihp-sg13g2: ... mm2 core at 60% utilisation, ... cells; 100 MHz met at the typical corner (about ... MHz), about ... MHz at the slow corner; DRC and connectivity clean
+```
+
+`--pnr-tool innovus` is the commercial counterpart of the LibreLane step and reports the
+same things. Genus maps the accelerator with 16-word buffers (in silicon they are SRAM
+macros) to the technology's typical library, using the LEF files to estimate wires. Then
+Innovus:
+
+1. reads the LEF files and an analysis view per corner, typical and, when the technology
+   has one, slow;
+2. makes a floorplan at 60 % utilisation and a power ring with stripes on the two top
+   routing layers, sized from those layers' own minimum width and spacing, so one script
+   serves any PDK (an aluminium redistribution layer is left out);
+3. places the cells and the pins, builds the clock tree, routes, and repairs setup and
+   hold after routing;
+4. inserts the library's filler cells and checks connectivity against the netlist, the
+   LEF design rules and process antennas.
+
+The step passes when the clock is met at the typical corner, hold is met at every corner
+and the three checks are clean, like the LibreLane step. It reports the core area,
+utilisation, cell count, the clock reached at each corner, and the violations. Innovus
+extracts parasitics from the resistance and capacitance the LEF gives each layer, as no
+Quantus technology file is assumed. The work directory, `out/verify/innovus/`, keeps the
+scripts, reports, logs and the saved Innovus database.
+
+This is a block-level check of the accelerator, not a sign-off: the foundry's own rule
+decks (Calibre or Pegasus) and LVS are the next step for a tape-out, run on the GDS your
+flow streams out with the PDK's layer map.
 
 ## Running on a server
 
@@ -77,7 +109,7 @@ sources `.csh` files or uses `setenv` runs under tcsh, anything else under bash.
   licence is checked out.
 
 The MCP tool `verify_soc` takes the tool choices (`sim_tool`, `synth_tool`,
-`synth_tech`), each checked against a fixed list, so an assistant can run the commercial
+`synth_tech`, `pnr_tool`), each checked against a fixed list, so an assistant can run the commercial
 flow too. It cannot choose a host or a setup snippet: a remote run happens only when you
 set `CHIPLEAP_REMOTE` and `CHIPLEAP_REMOTE_SETUP` in the environment that starts the MCP
 server, because anything an assistant reads could try to steer it.
@@ -85,10 +117,13 @@ server, because anything an assistant reads could try to steer it.
 ## Your own PDK
 
 ```text
-$ chipleap tech add mylib40 --node 40 --liberty /pdk/std/typ.lib \
+$ chipleap tech add mylib40 --node 40 --liberty /pdk/std/typ.lib --liberty-slow /pdk/std/slow.lib \
     --sram-liberty /pdk/sram/lib --lef /pdk/tech.lef --lef /pdk/std/cells.lef
 Added technology 'mylib40' (40 nm, 1.1 V) in ~/.config/chipleap/tech/mylib40.yaml
 ```
+
+`--liberty-slow` names the slow-corner library, which place and route times beside the
+typical one.
 
 `chipleap tech add` measures what the liberty files state and scales what they do not:
 
@@ -104,11 +139,40 @@ Added technology 'mylib40' (40 nm, 1.1 V) in ~/.config/chipleap/tech/mylib40.yam
 Without macro libraries the SRAM figures are scaled from IHP SG13G2 by the gate area. The
 technology then appears everywhere a built-in one does: in exploration (restrict a spec to
 it with `constraints: {tech: [mylib40]}`), in `chipleap catalog` and `chipleap tech list`,
-and as `--synth-tech mylib40` for Genus and Design Compiler.
+and as `--synth-tech mylib40` for Genus, Design Compiler and Innovus.
 
 With `--remote HOST`, the liberty files stay on the server: each is read over ssh into
 memory, measured and dropped, and the technology records the paths on that host, so
 synthesis with `--remote HOST` uses them where they are.
+
+### A foundry PDK on a design server, step by step
+
+The usual case for a foundry kit: the PDK and the tools live on a university or company
+server, under an NDA, and ChipLeap runs on a laptop.
+
+1. Find the standard-cell library's typical and slow liberty files, its compiled `.db`
+   (for Design Compiler) and the LEF for your metal stack, on the server.
+2. Measure them without copying them:
+
+   ```text
+   chipleap tech add mylib40 --remote eda-server --node 40 \
+       --liberty /kits/foundry40/std/lib/typical.lib --liberty-slow /kits/foundry40/std/lib/slow.lib \
+       --db /kits/foundry40/std/lib/typical.db --lef /kits/foundry40/std/lef/cells_7lm.lef
+   ```
+
+   If the kit has SRAM macros already generated, add `--sram-liberty` with their liberty
+   files. Memory compilers usually need a licence of their own; without macros the SRAM
+   figures are scaled from the measured gate area, as the table above says.
+3. Synthesize and place and route on the server, against that technology:
+
+   ```text
+   chipleap verify out --steps synth,pnr --synth-tool genus --pnr-tool innovus \
+       --synth-tech mylib40 --remote eda-server --remote-setup "..."
+   ```
+
+   The liberty and LEF files are used where they are; only ChipLeap's scripts travel to
+   the server, and its reports and logs come back.
+4. Explore with the technology by naming it in a spec: `constraints: {tech: [mylib40]}`.
 
 ## What stays private
 
@@ -116,7 +180,8 @@ synthesis with `--remote HOST` uses them where they are.
   empty value turns them off). They hold the measured numbers and the file paths, never
   library content, and nothing writes them into a bundle or a repository. Under an NDA,
   keep that directory out of version control and backups you share.
-- A liberty that is not on this machine is never copied to it.
-- Synthesis and simulation results stay in the bundle's `verify/` directory. Licence
+- A liberty or LEF file that is not on this machine is never copied to it.
+- Simulation, synthesis and place-and-route results stay in the bundle's `verify/`
+  directory. Licence
   terms for commercial tools often forbid publishing benchmark results; ChipLeap does not
   publish anything, and the project's own documentation quotes only open-tool numbers.

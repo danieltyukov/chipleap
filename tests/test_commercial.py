@@ -230,7 +230,15 @@ def test_mcp_cannot_choose_where_or_how_tools_run(tmp_path):
     from chipleap import mcp_server
 
     params = set(inspect.signature(mcp_server.TOOLS["verify_soc"]).parameters)
-    assert params == {"out_dir", "steps", "fetch_xheep", "sim_tool", "synth_tool", "synth_tech"}
+    assert params == {
+        "out_dir",
+        "steps",
+        "fetch_xheep",
+        "sim_tool",
+        "synth_tool",
+        "synth_tech",
+        "pnr_tool",
+    }
     for name, fn in mcp_server.TOOLS.items():
         for p in inspect.signature(fn).parameters:
             assert not any(w in p for w in ("remote", "setup", "host", "script")), (name, p)
@@ -238,6 +246,8 @@ def test_mcp_cannot_choose_where_or_how_tools_run(tmp_path):
         mcp_server.verify_soc(str(tmp_path), sim_tool="xcelium; rm -rf ~")
     with pytest.raises(mcp_server.ToolError, match="synth_tech"):
         mcp_server.verify_soc(str(tmp_path), synth_tech="../../etc")
+    with pytest.raises(mcp_server.ToolError, match="pnr_tool"):
+        mcp_server.verify_soc(str(tmp_path), pnr_tool="innovus -init /tmp/x.tcl")
 
     server = mcp_server.build_server()
     try:

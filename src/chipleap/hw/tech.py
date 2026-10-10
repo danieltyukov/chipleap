@@ -88,6 +88,7 @@ class Technology:
     # ``chipleap tech add``. Paths are on ``host`` when it is set (a design server), so a
     # foundry library never has to leave the machine it is licensed on.
     liberty: str = ""
+    liberty_slow: str = ""  # slow corner, for place-and-route timing at both corners
     db: str = ""  # compiled liberty for Design Compiler
     lef: tuple[str, ...] = ()  # technology LEF first, then the cell LEFs
     host: str = ""

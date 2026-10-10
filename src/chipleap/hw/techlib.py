@@ -118,6 +118,7 @@ def measure(
     lef: tuple[str, ...] = (),
     db: str = "",
     host: str = "",
+    liberty_slow: str = "",
     name: str = "",
     logic_util: float = 0.7,
 ) -> tuple[Technology, dict[str, str]]:
@@ -181,6 +182,7 @@ def measure(
             + " measured from your liberty files; logic energy scaled from Horowitz 2014."
         ),
         liberty=std_liberty,
+        liberty_slow=liberty_slow,
         db=db,
         lef=tuple(lef),
         host=host,
