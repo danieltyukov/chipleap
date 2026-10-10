@@ -120,6 +120,7 @@ Core area, excluding pads:
 - SRAM: each bank from the largest macros available, as `macros x periphery + KiB x array`.
 - Accelerator logic: `accel_logic_kge`, fitted to Yosys synthesis of the generated RTL on SG13G2 (below): 28.8 kGE of control, registers and store engine, 2.2 kGE per OBI port, and per dataflow a cost per MAC plus a cost per lane, column or array edge. Weight width does not enter, because the PEs multiply 8 x 8 and only the unpacking depends on it.
 - Accelerator buffers: SRAM macros.
+- AXI4 adapter (standalone platform only): 0.54 kGE, synthesized on SG13G2 with the core as a black box; the same for 1 to 16 ports, because the read ports are wiring. With it, the accelerator is what `Evaluation.ip_area` reports as the generated IP; every other entry is the host system the model assumes (docs/platforms.md).
 - Memory interface: PHY area (LPDDR only, scaled linearly from 28 nm) plus controller logic.
 
 `chipleap verify` synthesizes the accelerator's logic with Yosys on SG13G2 and reports how far this estimate is from it (cell area against cell area, before the utilisation factor).

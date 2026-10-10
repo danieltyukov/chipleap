@@ -3,6 +3,10 @@
 Each test case is a random matrix multiply. The testbench checks every output against a
 golden model and reports the cycle count, which is compared with the analytical model's
 prediction for the same job under the same memory behaviour.
+
+``platform="xheep"`` simulates the core on its OBI and register interfaces;
+``platform="standalone"`` simulates it behind the AXI4 wrapper, programmed over
+AXI4-Lite against an AXI4 memory model that also checks the protocol.
 """
 
 from __future__ import annotations
@@ -15,7 +19,14 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from chipleap.gen.rtl import accel_sv, driver_header, rtl_params, testbench_cpp
+from chipleap.gen.rtl import (
+    accel_sv,
+    axi_sv,
+    driver_header,
+    rtl_params,
+    testbench_axi_cpp,
+    testbench_cpp,
+)
 from chipleap.hw.design import Accel
 from chipleap.model.accel import Bandwidth, k_align, plan_tiles, simulate_job
 from chipleap.verify.tools import verilator
@@ -65,24 +76,39 @@ def cache_dir() -> Path:
     return Path(base) / "chipleap"
 
 
-def build(accel: Accel, workdir: Path | None = None, jobs: int = 0) -> Path:
+def build(
+    accel: Accel, workdir: Path | None = None, jobs: int = 0, platform: str = "xheep"
+) -> Path:
     """Build the Verilator model for ``accel`` (cached by parameters) and return the binary."""
     tool = verilator()
     if not tool.found:
         raise SimError("Verilator is not installed; see docs/verification.md")
     p = rtl_params(accel)
-    sources = (
-        accel_sv() + testbench_cpp() + driver_header(accel, "sim") + " ".join(p.verilator_args())
+    axi = platform == "standalone"
+    top = "chipleap_accel_axi" if axi else "chipleap_accel"
+    tb_name, tb_text = (
+        ("tb_chipleap_axi.cpp", testbench_axi_cpp())
+        if axi
+        else (
+            "tb_chipleap.cpp",
+            testbench_cpp(),
+        )
     )
+    header = driver_header(accel, "sim", platform=platform)
+    rtl = {"chipleap_accel.sv": accel_sv()}
+    if axi:
+        rtl["chipleap_accel_axi.sv"] = axi_sv()
+    sources = "".join(rtl.values()) + tb_text + header + " ".join(p.verilator_args())
     digest = hashlib.sha256(sources.encode()).hexdigest()[:16]
     root = workdir or (cache_dir() / f"sim-{digest}")
-    binary = root / "obj_dir" / "Vchipleap_accel"
+    binary = root / "obj_dir" / f"V{top}"
     if binary.exists():
         return binary
     root.mkdir(parents=True, exist_ok=True)
-    (root / "chipleap_accel.sv").write_text(accel_sv())
-    (root / "tb_chipleap.cpp").write_text(testbench_cpp())
-    (root / "chipleap_driver.h").write_text(driver_header(accel, "sim"))
+    for fname, text in rtl.items():
+        (root / fname).write_text(text)
+    (root / tb_name).write_text(tb_text)
+    (root / "chipleap_driver.h").write_text(header)
     cmd = [
         str(tool.path),
         "--cc",
@@ -98,12 +124,12 @@ def build(accel: Accel, workdir: Path | None = None, jobs: int = 0) -> Path:
         "-Wno-lint",
         "-Wno-style",
         "--top-module",
-        "chipleap_accel",
+        top,
         *p.verilator_args(),
         "-CFLAGS",
         f"-O2 -I{root}",
-        "chipleap_accel.sv",
-        "tb_chipleap.cpp",
+        *rtl,
+        tb_name,
         "-j",
         str(jobs or max(1, (os.cpu_count() or 2) // 2)),
     ]
@@ -155,9 +181,13 @@ def predicted_cycles(accel: Accel, case: Case) -> float:
 
 
 def run(
-    accel: Accel, cases: list[Case], binary: Path | None = None, timeout: float = 600
+    accel: Accel,
+    cases: list[Case],
+    binary: Path | None = None,
+    timeout: float = 600,
+    platform: str = "xheep",
 ) -> list[CaseResult]:
-    exe = binary or build(accel)
+    exe = binary or build(accel, platform=platform)
     stdin = "\n".join(c.line() for c in cases) + "\n"
     try:
         out = subprocess.run(

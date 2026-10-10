@@ -23,7 +23,7 @@ from chipleap.explore.engine import Candidate, Evaluator, diagnose, explore
 from chipleap.explore.moves import neighbours
 from chipleap.explore.score import Point
 from chipleap.hw.cpu import CPUS
-from chipleap.hw.design import Design
+from chipleap.hw.design import Design, DesignError
 from chipleap.hw.memory import MEMORIES
 from chipleap.hw.tech import TECHNOLOGIES
 from chipleap.model.bounds import requirements
@@ -47,9 +47,10 @@ RISC-V SoC with an accelerator. Typical flow:
 4. explain_bottleneck and evaluate_design: interrogate a design and try your own changes.
    explain_bottleneck lists every single change with its effect, so you can reason about
    trade-offs the objective does not capture.
-5. generate_soc then verify_soc: X-HEEP configuration, accelerator RTL, driver, datasheet;
-   Verilator simulation against a golden model, Yosys synthesis on IHP SG13G2, X-HEEP's
-   own config validation.
+5. generate_soc then verify_soc: accelerator RTL, driver, datasheet, and either an X-HEEP
+   configuration (platform xheep, a RISC-V SoC) or an AXI4 wrapper for any host (platform
+   standalone: Arm, other RISC-V, FPGA); Verilator simulation against a golden model,
+   Yosys synthesis on IHP SG13G2, X-HEEP's own config validation for xheep designs.
 All numbers are analytical estimates except those verify_soc measures. Say so when
 reporting them."""
 
@@ -83,6 +84,10 @@ constraints:
 allow:
   weights: [int8, int4]             # precisions the explorer may choose between
 objective: energy                   # energy | area | throughput | edp
+platform: xheep                     # xheep: an X-HEEP SoC (RISC-V) is generated
+                                    # standalone: the accelerator alone, AXI4 IP for any
+                                    # host (Arm, other RISC-V, FPGA); cpu, bus, banks and
+                                    # ext_mem then describe the host the model assumes
 start:                              # optional design the agent starts from
   tech: ihp-sg13g2
 ```
@@ -125,6 +130,7 @@ accel:                              # or null
   abuf_kib: 16
   wbuf_kib: 8
   double_buffer: true
+platform: xheep                     # xheep | standalone
 ```
 """
 
@@ -321,11 +327,17 @@ def generate_soc(
     design: str | dict[str, Any],
     out_dir: str,
     weights: str | None = None,
+    platform: str | None = None,
 ) -> dict[str, Any]:
     from chipleap.gen.bundle import write_bundle
 
     s = _spec(spec)
     d = _design(design)
+    if platform:
+        try:
+            d = Design.from_dict({**d.to_dict(), "platform": platform})
+        except DesignError as exc:
+            raise ToolError(str(exc)) from exc
     _, c = _candidate(s, d, weights)
     out = Path(out_dir).expanduser()
     files = write_bundle(out, d, weights=c.point.weights, spec=s, candidate=c)
@@ -500,14 +512,20 @@ def build_server(log_dir: str | None = None) -> Any:
         )
 
     @server.tool(
-        description="Write the SoC bundle for a design: X-HEEP configuration, "
-        "accelerator RTL, X-HEEP adapter, register map, driver, testbench, datasheet."
+        description="Write the bundle for a design: accelerator RTL, register map, driver, "
+        "testbench, datasheet, plus either an X-HEEP configuration and adapter "
+        '(platform="xheep") or an AXI4 wrapper for any host (platform="standalone"). '
+        "platform overrides the design's own."
     )
     def generate_soc(
-        spec: str, design: str, out_dir: str, weights: str | None = None
+        spec: str,
+        design: str,
+        out_dir: str,
+        weights: str | None = None,
+        platform: str | None = None,
     ) -> dict[str, Any]:
         return logged("generate_soc", TOOLS["generate_soc"])(
-            spec=spec, design=design, out_dir=out_dir, weights=weights
+            spec=spec, design=design, out_dir=out_dir, weights=weights, platform=platform
         )
 
     @server.tool(

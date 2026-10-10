@@ -14,13 +14,15 @@ from dataclasses import dataclass, field, replace
 from chipleap.hw.cpu import CPUModel, get_cpu
 from chipleap.hw.design import Design
 from chipleap.hw.memory import MEMORIES, ExternalMemory, get_memory
-from chipleap.hw.tech import Technology, accel_logic_kge, get_tech
+from chipleap.hw.tech import AXI_ADAPTER_KGE, Technology, accel_logic_kge, get_tech
 from chipleap.model.accel import Bandwidth, TilingError, job_timing
 from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workload
 
 # Logic outside the CPU, memories and accelerator: debug module, DMA, boot ROM, power
 # manager, timers, interrupt controllers, UART, SPI, I2C, GPIO, pad control.
 XHEEP_BASE_KGE = 110.0
+# Area entries that make up the generated accelerator IP (see Evaluation.ip_area).
+IP_AREA_KEYS = ("accelerator logic", "accelerator buffers", "axi adapter")
 # Firmware code, data and stack kept in the first banks.
 DEFAULT_FIRMWARE_KIB = 32
 # CPU cycles to program and start one accelerator job and take its completion interrupt.
@@ -102,6 +104,13 @@ class Evaluation:
         return sum(self.area_mm2.values())
 
     @property
+    def ip_area(self) -> float:
+        """What ChipLeap generates by itself: the accelerator and, on the standalone
+        platform, its AXI4 adapter. On X-HEEP the rest of the chip is generated too; on
+        the standalone platform it is the host system the model assumes."""
+        return sum(v for k, v in self.area_mm2.items() if k in IP_AREA_KEYS)
+
+    @property
     def bound(self) -> str:
         return max(self.time_by_bound.items(), key=lambda kv: kv[1])[0]
 
@@ -116,6 +125,7 @@ class Evaluation:
             "energy_mj": self.energy_per_unit_mj,
             "power_mw": self.power_mw,
             "area_mm2": self.total_area,
+            "ip_area_mm2": self.ip_area,
         }
 
 
@@ -408,6 +418,8 @@ def area_breakdown(
         kge = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports)
         area["accelerator logic"] = tech.logic_mm2(kge)
         area["accelerator buffers"] = tech.sram_mm2(a.abuf_kib) + tech.sram_mm2(a.wbuf_kib)
+        if d.platform == "standalone":
+            area["axi adapter"] = tech.logic_mm2(AXI_ADAPTER_KGE)
     if mem is not None:
         area["memory interface"] = mem.phy_mm2(tech.node_nm) * d.ext_channels + tech.logic_mm2(
             mem.phy_kge * d.ext_channels

@@ -35,6 +35,7 @@ constraints:
 allow:
   weights: [int8, int4]             # precisions the explorer may choose between
 objective: energy                   # energy | area | throughput | edp
+platform: xheep                     # xheep | standalone, see docs/platforms.md
 start:                              # optional design the agent starts from
   tech: ihp-sg13g2
 ```
@@ -82,6 +83,7 @@ accel:                              # or null
   abuf_kib: 16
   wbuf_kib: 8
   double_buffer: true
+platform: xheep                     # xheep (an X-HEEP SoC) | standalone (AXI4 IP, any host)
 ```
 
 ## LLM presets

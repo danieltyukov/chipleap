@@ -1,5 +1,6 @@
 /*
- * ChipLeap accelerator driver for X-HEEP firmware. Generated for design "{name}".
+ * ChipLeap accelerator driver for {host}.
+ * Generated for design "{name}".
  *
  * chipleap_plan() picks tile sizes exactly like chipleap.model.accel.plan_tiles, so the
  * cycle counts the explorer predicts are the ones this driver programs. Override
@@ -22,7 +23,7 @@
 #define CHIPLEAP_WBUF_BYTES {wbuf_bytes}u
 #define CHIPLEAP_DOUBLE_BUF {double_buf}u
 #define CHIPLEAP_ACC_ROWS {acc_rows}u
-#define CHIPLEAP_BASE {base:#010x}u
+{base_block}
 
 #define CHIPLEAP_REG_CTRL 0x00u
 #define CHIPLEAP_REG_STATUS 0x04u

@@ -14,7 +14,14 @@ from typing import Any
 import yaml
 
 from chipleap.hw.cpu import CPUS
-from chipleap.hw.design import SPEC_NAME_MAX, Design, DesignError, is_safe_name, safe_name
+from chipleap.hw.design import (
+    PLATFORMS,
+    SPEC_NAME_MAX,
+    Design,
+    DesignError,
+    is_safe_name,
+    safe_name,
+)
 from chipleap.hw.memory import MEMORIES, NONE_KEY
 from chipleap.hw.tech import TECHNOLOGIES
 from chipleap.model.evaluate import DEFAULT_FIRMWARE_KIB
@@ -47,6 +54,9 @@ class Spec:
     objective: str = "energy"
     start: Design | None = None
     description: str = ""
+    # What gets generated: an X-HEEP SoC, or the accelerator alone as AXI4 IP for any host.
+    # The explorer never changes it.
+    platform: str = "xheep"
     extra: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
@@ -115,6 +125,8 @@ class Spec:
         if self.weight_formats:
             out["allow"] = {"weights": list(self.weight_formats)}
         out["objective"] = self.objective
+        if self.platform != "xheep":
+            out["platform"] = self.platform
         return out
 
 
@@ -164,6 +176,7 @@ def parse_spec(data: Any, *, name: str = "spec") -> Spec:
         "allow",
         "objective",
         "start",
+        "platform",
     }
     unknown = set(data) - known
     if unknown:
@@ -206,14 +219,21 @@ def parse_spec(data: Any, *, name: str = "spec") -> Spec:
     if objective not in OBJECTIVES:
         raise SpecError(f"objective must be one of {', '.join(OBJECTIVES)}")
 
+    platform = str(data.get("platform", "xheep"))
+    if platform not in PLATFORMS:
+        raise SpecError(f"platform must be one of {', '.join(PLATFORMS)}")
+
     start = None
     if data.get("start") is not None:
         try:
             base = Design().to_dict()
+            base["platform"] = platform
             base.update(data["start"])
             start = Design.from_dict(base)
         except (DesignError, TypeError) as exc:
             raise SpecError(f"start: {exc}") from exc
+        if start.platform != platform:
+            raise SpecError(f"start: platform {start.platform} differs from the spec's {platform}")
 
     spec = Spec(
         name=_name(data.get("name"), name),
@@ -240,6 +260,7 @@ def parse_spec(data: Any, *, name: str = "spec") -> Spec:
         firmware_kib=_number(cons, "firmware_kib", "constraints") or DEFAULT_FIRMWARE_KIB,
         objective=objective,
         start=start,
+        platform=platform,
     )
     spec.workload()  # surface workload errors now, with their location
     return spec
