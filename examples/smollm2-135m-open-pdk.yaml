@@ -1,0 +1,16 @@
+name: smollm2-open-pdk
+description: The largest useful language model on a chip you can tape out with open tools.
+workload:
+  llm:
+    model: smollm2-135m
+    phase: decode
+    context: 512
+    batch: 1
+    weights: int4
+    kv: int8
+targets:
+  throughput: 2          # tokens per second
+constraints:
+  tech: [ihp-sg13g2]     # IHP SG13G2 130 nm, open PDK
+  power_mw: 150
+objective: area

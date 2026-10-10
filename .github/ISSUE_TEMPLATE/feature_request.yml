@@ -1,0 +1,19 @@
+name: Feature request
+description: A workload, decision, technology, memory or check ChipLeap should support
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you are trying to decide or build
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What ChipLeap should do
+  - type: textarea
+    id: sources
+    attributes:
+      label: Data and sources
+      description: For new technologies, memories or models, where the numbers come from.

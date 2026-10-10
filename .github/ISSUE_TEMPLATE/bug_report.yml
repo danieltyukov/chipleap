@@ -1,0 +1,30 @@
+name: Bug report
+description: Something in ChipLeap does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected and what you got. Paste error output.
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Spec or design
+      description: The smallest spec or design.yaml that shows the problem.
+      render: yaml
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `chipleap --version`
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Tools
+      description: Output of `chipleap doctor`, for simulation, synthesis or X-HEEP problems.
+      render: text

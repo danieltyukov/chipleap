@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests scripts
+      - run: ruff format --check src tests scripts
+      - run: mypy
+      - run: pytest -m "not rtl"
+      - name: Smoke the CLI
+        run: |
+          chipleap --version
+          chipleap require -m llama-3.2-1b -t 5
+          chipleap explore examples/smollm2-135m-open-pdk.yaml --samples 300 -o out
+          chipleap verify out --steps consistency
+
+  hardware:
+    name: RTL simulation and X-HEEP
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SV2V_VERSION: v0.0.13
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Verilator and Yosys
+        run: sudo apt-get update && sudo apt-get install -y verilator yosys
+      - name: Install sv2v
+        run: |
+          curl -sSL -o sv2v.zip https://github.com/zachjs/sv2v/releases/download/${SV2V_VERSION}/sv2v-Linux.zip
+          unzip -q sv2v.zip && sudo install sv2v-Linux/sv2v /usr/local/bin/sv2v
+      - run: pip install -e ".[dev,xheep]"
+      - name: RTL tests
+        run: pytest tests/test_rtl.py tests/test_gen.py -v
+      - name: Generate, lint, simulate and check a design with X-HEEP
+        run: |
+          chipleap explore examples/llama-3.2-1b-decode.yaml --samples 300 -o out
+          chipleap verify out --steps consistency,lint,sim,xheep --fetch-xheep
+      - name: X-HEEP accepts every bus and accelerator configuration
+        run: pytest tests/test_xheep.py -v
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bundle
+          path: out/

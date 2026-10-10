@@ -1,0 +1,84 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chipleap"
+dynamic = ["version"]
+description = "Architecture exploration from workload to RISC-V SoC: an analytical evaluator, an explainable design agent and an X-HEEP generator with RTL verification."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Daniel Tyukov" }]
+keywords = [
+  "design-space-exploration",
+  "hardware-architecture",
+  "risc-v",
+  "x-heep",
+  "llm",
+  "accelerator",
+  "mcp",
+  "eda",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+dependencies = ["pyyaml>=6.0", "mcp>=1.10"]
+
+[project.optional-dependencies]
+xheep = ["hjson>=3.0", "mako>=1.2"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10", "types-PyYAML", "hjson>=3.0", "mako>=1.2"]
+site = ["pillow>=10"]
+
+[project.scripts]
+chipleap = "chipleap.cli:main"
+
+[project.urls]
+Homepage = "https://danieltyukov.github.io/chipleap/"
+Source = "https://github.com/danieltyukov/chipleap"
+Issues = "https://github.com/danieltyukov/chipleap/issues"
+Changelog = "https://github.com/danieltyukov/chipleap/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/chipleap/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chipleap"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "examples", "docs", "README.md", "LICENSE", "CHANGELOG.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+  "rtl: needs Verilator (skipped when it is not installed)",
+  "synth: needs Yosys (skipped when it is not installed)",
+  "xheep: needs an X-HEEP checkout in CHIPLEAP_XHEEP_DIR",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/chipleap"]
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["mcp.*"]
+ignore_missing_imports = true

@@ -1,0 +1,16 @@
+name: qwen3-prefill
+description: Time to first token for a 256-token prompt, where compute and dataflow matter.
+workload:
+  llm:
+    model: qwen3-0.6b
+    phase: prefill
+    prompt: 256
+    batch: 1
+    weights: int8
+    kv: int8
+targets:
+  latency_ms: 2000       # whole prompt in two seconds
+constraints:
+  tech: [generic-28nm]
+  area_mm2: 6
+objective: energy

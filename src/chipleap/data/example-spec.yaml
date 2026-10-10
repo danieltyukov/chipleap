@@ -1,0 +1,18 @@
+name: llama-1b-edge
+description: Llama 3.2 1B answering at reading speed on a battery-powered device.
+workload:
+  llm:
+    model: llama-3.2-1b
+    phase: decode
+    context: 1024
+    batch: 1
+    weights: int4
+    kv: int8
+targets:
+  throughput: 5        # tokens per second
+constraints:
+  area_mm2: 8
+  power_mw: 400
+allow:
+  weights: [int8, int4]
+objective: energy

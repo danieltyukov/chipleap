@@ -1,0 +1,26 @@
+name: kws-always-on
+description: Keyword spotting on an always-on wearable, a DS-CNN shaped like Hello Edge's small model.
+workload:
+  graph:
+    name: ds-cnn-s
+    unit: inference
+    weights: int8
+    ops:
+      - conv2d: {name: conv1, h: 49, w: 10, cin: 1, cout: 64, kh: 10, kw: 4, stride: 2, act: true}
+      - dwconv2d: {name: dw1, h: 25, w: 5, c: 64, kh: 3, kw: 3, act: true}
+      - conv2d: {name: pw1, h: 25, w: 5, cin: 64, cout: 64, kh: 1, kw: 1, act: true}
+      - dwconv2d: {name: dw2, h: 25, w: 5, c: 64, kh: 3, kw: 3, act: true}
+      - conv2d: {name: pw2, h: 25, w: 5, cin: 64, cout: 64, kh: 1, kw: 1, act: true}
+      - dwconv2d: {name: dw3, h: 25, w: 5, c: 64, kh: 3, kw: 3, act: true}
+      - conv2d: {name: pw3, h: 25, w: 5, cin: 64, cout: 64, kh: 1, kw: 1, act: true}
+      - dwconv2d: {name: dw4, h: 25, w: 5, c: 64, kh: 3, kw: 3, act: true}
+      - conv2d: {name: pw4, h: 25, w: 5, cin: 64, cout: 64, kh: 1, kw: 1, act: true}
+      - vector: {name: pool, kind: pool, elements: 8000}
+      - matmul: {name: fc, m: 1, k: 64, n: 12}
+      - vector: {name: softmax, kind: softmax, elements: 12}
+targets:
+  throughput: 50         # inferences per second, a 20 ms hop
+constraints:
+  tech: [ihp-sg13g2, generic-65nm]
+  ext_mem: [none]
+objective: energy

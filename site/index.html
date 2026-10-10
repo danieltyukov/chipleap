@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChipLeap: design the chip your model needs</title>
+  <meta name="description" content="ChipLeap explores hardware architecture from a workload such as Llama 3.2 1B: memory, external memory, dataflow, compute and process node, each decision explained. It generates a RISC-V SoC on X-HEEP and verifies it with open tools. Open source.">
+  <meta name="color-scheme" content="light">
+  <link rel="canonical" href="https://danieltyukov.github.io/chipleap/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="ChipLeap">
+  <meta property="og:title" content="ChipLeap: design the chip your model needs">
+  <meta property="og:description" content="Architecture exploration from workload to RISC-V SoC, every decision explained, verified on open tools. Open source.">
+  <meta property="og:url" content="https://danieltyukov.github.io/chipleap/">
+  <meta property="og:image" content="https://danieltyukov.github.io/chipleap/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="A rendered die designed by ChipLeap next to the line: design the chip your model needs.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="ChipLeap: design the chip your model needs">
+  <meta name="twitter:description" content="Architecture exploration from workload to RISC-V SoC, every decision explained, verified on open tools.">
+  <meta name="twitter:image" content="https://danieltyukov.github.io/chipleap/og.png">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=9f6df636b8">
+</head>
+<body>
+  <header class="nav">
+    <div class="shell nav-inner">
+      <a class="brand" href="./" aria-label="ChipLeap home"><img src="logo-mark.svg" alt="" width="28" height="28"><span>ChipLeap</span></a>
+      <nav aria-label="Sections">
+        <a href="#design">How it decides</a>
+        <a href="#verified">Verification</a>
+        <a href="#assistant">MCP</a>
+        <a href="https://github.com/danieltyukov/chipleap/tree/main/docs">Docs</a>
+      </nav>
+      <div class="nav-cta">
+        <a class="link-github" href="https://github.com/danieltyukov/chipleap">GitHub</a>
+        <a class="btn btn-primary btn-sm" href="#start">Get started</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="shell hero-grid">
+        <div class="hero-copy">
+          <a class="pill" href="https://github.com/danieltyukov/chipleap">Open source, MIT licensed</a>
+          <h1>Design the chip your model needs.</h1>
+          <p class="lead">ChipLeap explores the architecture before anyone writes RTL: memory system, external memory, dataflow, compute and process node, each choice explained. Then it generates a RISC-V SoC on <span class="nb">X-HEEP</span> and checks it with open tools.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#start">Get started</a>
+            <a class="btn btn-ghost" href="#design">Watch it decide</a>
+          </div>
+          <div class="cmd" role="group" aria-label="Install command">
+            <code>uv tool install <span class="nb">git+https://github.com/</span><wbr><span class="nb">danieltyukov/chipleap</span></code>
+            <button class="copy" type="button" aria-label="Copy the install command">Copy</button>
+          </div>
+        </div>
+        <figure class="hero-art" aria-labelledby="hero-cap">
+          <div class="art-frame">
+            <picture>
+              <source type="image/webp" srcset="img/die-1200.webp 1200w, img/die-2400.webp 2400w" sizes="(max-width: 900px) 100vw, 60vw">
+              <img src="img/die-1200.png" width="1200" height="800" alt="A rendered die designed by ChipLeap for SmolLM2 135M on the IHP SG13G2 open PDK: SRAM, logic, a GEMV engine and an octal PSRAM interface, bonded into a package.">
+            </picture>
+            <!-- callouts:start -->
+<div class="callout right" style="--x:50.1%;--y:32.7%;--tx:46px;--ty:-70px"><svg width="1" height="1"><line x1="0" y1="0" x2="46" y2="-52"/></svg><span class="dot"><i>1</i></span><span class="tag"><b>SRAM</b>32 KiB</span></div>
+<div class="callout right" style="--x:54.9%;--y:51.9%;--tx:40px;--ty:40px"><svg width="1" height="1"><line x1="0" y1="0" x2="40" y2="58"/></svg><span class="dot"><i>2</i></span><span class="tag"><b>GEMV engine</b>1 x 8 int8 MACs</span></div>
+<div class="callout right" style="--x:64.5%;--y:38.8%;--tx:44px;--ty:-54px"><svg width="1" height="1"><line x1="0" y1="0" x2="44" y2="-36"/></svg><span class="dot"><i>3</i></span><span class="tag"><b>RISC-V core</b>CV32E20</span></div>
+<div class="callout left" style="--x:39.8%;--y:52.8%;--tx:-48px;--ty:34px"><svg width="1" height="1"><line x1="0" y1="0" x2="-48" y2="52"/></svg><span class="dot"><i>4</i></span><span class="tag"><b>Memory interface</b>2 x octal PSRAM</span></div>
+<!-- callouts:end -->
+          </div>
+          <!-- callout-key:start -->
+<ol class="callout-key"><li><b>SRAM</b> 32 KiB</li><li><b>GEMV engine</b> 1 x 8 int8 MACs</li><li><b>RISC-V core</b> CV32E20</li><li><b>Memory interface</b> 2 x octal PSRAM</li></ol>
+<!-- callout-key:end -->
+          <figcaption id="hero-cap">Rendered to scale from a design ChipLeap produced: SmolLM2 135M on the open IHP 130 nm PDK.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="band-works" aria-label="Built on">
+      <div class="shell works">
+        <span>Generates and checks with</span>
+        <ul>
+          <li>X-HEEP</li><li>IHP SG13G2</li><li>Verilator</li><li>Yosys</li><li>sv2v</li><li>Model Context Protocol</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="design" class="story" aria-labelledby="design-h">
+      <div class="shell">
+        <div class="section-head">
+          <h2 id="design-h">Watch it design a chip</h2>
+          <!-- story-intro:start -->
+<p>Llama 3.2 1B decoding at 5 tokens per second, within 8 mm² and 400 mW. The agent starts from a bare microcontroller, names what limits it, tries every single change, keeps the best and says why. The floorplan is drawn to scale at every step. This run evaluated 2,153 designs in 0.9 s.</p>
+<!-- story-intro:end -->
+        </div>
+        <div class="story-grid">
+          <ol class="story-steps" id="story-steps">
+            <!-- steps:start -->
+<li data-i="0"><span class="n">Start</span><h3>Start from a bare microcontroller</h3><p>A CV32E20 at 100 MHz with two 32 KiB banks on IHP 130 nm. The CPU does every multiply itself, and the 642 MiB of weights and KV cache do not fit in a 64 MiB HyperRAM.</p><p class="delta"><b>0.0097</b> tokens per second</p></li>
+<li data-i="1"><span class="n">Decision 1</span><h3>Move to 65 nm, 200 MHz and LPDDR2</h3><p>A newer node allows faster clocks and memory interfaces at lower energy. Before this step 100% of the time went to compute.</p><p class="delta"><b>0.0097 to 0.019</b> tokens per second, 854 to 327 mJ per token, 3.53 to 2.92 mm², now buildable</p></li>
+<li data-i="2"><span class="n">Decision 2</span><h3>Add a GEMV engine</h3><p>Matrix multiplies dominate and the CPU does them one MAC at a time. Before this step 100% of the time went to compute.</p><p class="delta"><b>0.019 to 1.71</b> tokens per second, 327 to 86.2 mJ per token, 2.92 to 3.49 mm²</p></li>
+<li data-i="3"><span class="n">Decision 3</span><h3>Move to 28 nm, 400 MHz and LPDDR4X</h3><p>A newer node allows faster clocks and memory interfaces at lower energy. Before this step 75% of the time went to the accelerator&#x27;s ports.</p><p class="delta"><b>1.71 to 3.31</b> tokens per second, 86.2 to 29 mJ per token, 3.49 to 2.43 mm²</p></li>
+<li data-i="4"><span class="n">Decision 4</span><h3>Move to 16 nm, 800 MHz</h3><p>A newer node allows faster clocks and memory interfaces at lower energy. Before this step 76% of the time went to the accelerator&#x27;s ports.</p><p class="delta"><b>3.31 to 6.19</b> tokens per second, 29 to 27.9 mJ per token, 2.43 to 1.34 mm², meets every target</p></li>
+<li data-i="5"><span class="n">Decision 5</span><h3>Switch to LPDDR5</h3><p>A slower interface can be cheaper in area and energy per bit. Before this step 78% of the time went to the accelerator&#x27;s ports.</p><p class="delta">throughput unchanged at <b>6.19</b> tokens per second, 27.9 to 22.5 mJ per token, 1.34 to 1.00 mm²</p></li>
+<li data-i="6"><span class="n">Decision 6</span><h3>Make the banks 16 KiB</h3><p>Unused SRAM costs area and leakage. Before this step 78% of the time went to the accelerator&#x27;s ports.</p><p class="delta">throughput unchanged at <b>6.19</b> tokens per second, 1.00 to 0.97 mm²</p><p>No single change lowers the energy further, so the agent stops with a 4 x 8 GEMV engine next to a CV32E20 at 800 MHz in 16 nm, fed by LPDDR5: 6.19 tokens per second at 22.5 mJ per token in 0.97 mm². Its weights now arrive as fast as the accelerator&#x27;s ports take them in, so more ports would raise the token rate but not lower the energy per token.</p></li>
+<!-- steps:end -->
+          </ol>
+          <div class="story-panel" aria-hidden="true">
+            <div class="panel-card">
+              <div class="panel-top">
+                <div><span class="k">Process</span><span class="v" id="p-node">-</span></div>
+                <div><span class="k">Memory</span><span class="v" id="p-mem">-</span></div>
+                <div><span class="k">Core area</span><span class="v" id="p-area">-</span></div>
+              </div>
+              <svg id="fp" viewBox="0 0 400 400" class="fp"></svg>
+              <div class="panel-meter">
+                <div class="meter-num"><span id="p-tps">-</span><small>tokens per second</small></div>
+                <svg id="spark" viewBox="0 0 240 64" class="spark"></svg>
+              </div>
+              <div class="legend">
+                <span><i class="sw sram"></i>SRAM</span><span><i class="sw accel"></i>Accelerator</span><span><i class="sw buffer"></i>Buffers</span><span><i class="sw cpu"></i>CPU</span><span><i class="sw soc"></i>Bus, peripherals</span><span><i class="sw phy"></i>Memory interface</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="flow" aria-labelledby="flow-h">
+      <div class="shell">
+        <div class="section-head">
+          <h2 id="flow-h">One loop, from requirement to RTL</h2>
+          <p>Each stage writes a file the next one reads, so every result can be opened, edited and checked.</p>
+        </div>
+        <div class="flow-line" id="flow-line">
+          <div class="flow-track"><span class="pulse"></span></div>
+          <ol>
+            <li><b>Describe</b><span>A YAML spec: the model, context and precision; tokens per second, area and power; the nodes and memories you can use.</span></li>
+            <li><b>Size</b><span><code>chipleap require</code> turns the target into bandwidth, MAC rate and capacity, and rules out what cannot deliver.</span></li>
+            <li><b>Explore</b><span>The explainable agent plus a seeded global search: a decision log, a Pareto front, a recommended design.</span></li>
+            <li><b>Generate</b><span>An X-HEEP configuration, the accelerator in SystemVerilog, a register map, a C driver, a testbench, a datasheet.</span></li>
+            <li><b>Verify</b><span>Simulation against a golden model, cycles against the model, synthesis on IHP SG13G2, X-HEEP's own checks.</span></li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="verified" class="dark" aria-labelledby="verified-h">
+      <div class="shell">
+        <div class="section-head">
+          <h2 id="verified-h">The model is checked against the RTL it generates</h2>
+          <p>The accelerator model is the tile schedule the generated hardware runs, so the two can be compared cycle for cycle. These results come from <code>chipleap verify</code> and the test suite on this release.</p>
+        </div>
+        <!-- stats:start -->
+<div class="stats"><div class="stat"><span class="num" data-to="21.0" data-dec="0" data-suffix="">21</span><span class="lab">randomized jobs bit-exact against a golden model</span></div><div class="stat"><span class="num" data-to="0.0" data-dec="1" data-suffix="%">0.0%</span><span class="lab">cycle error between the model and the RTL without memory stalls</span></div><div class="stat"><span class="num" data-to="27.0" data-dec="0" data-suffix="">27</span><span class="lab">X-HEEP templates rendered for the generated configuration</span></div><div class="stat"><span class="num" data-to="152.3" data-dec="0" data-suffix=" MHz">152 MHz</span><span class="lab">clock the synthesized accelerator logic reaches on IHP SG13G2, estimated</span></div></div>
+<!-- stats:end -->
+        <!-- verify:start -->
+<div class="table-scroll"><table class="vt"><tbody><tr><th scope="row">Consistency</th><td><span class="ok">Pass</span> design.yaml, RTL wrappers, driver, register map and X-HEEP configuration agree.</td></tr><tr><th scope="row">Lint</th><td><span class="ok">Pass</span> Verilator -Wall reports no warnings.</td></tr><tr><th scope="row">Simulation</th><td><span class="ok">Pass</span> 21 randomized jobs bit-exact; cycle model error 0.0% max without stalls, 3.5% mean with random stalls.</td></tr><tr><th scope="row">Synthesis</th><td><span class="ok">Pass</span> Logic cell area 0.3144 mm² on IHP SG13G2 (model 0.3217 mm², +2%), critical path 6.12 ns, about 152 MHz.</td></tr><tr><th scope="row">X-HEEP</th><td><span class="ok">Pass</span> X-HEEP validated the configuration (1 bank, 0 interleaved) and rendered 27 templates.</td></tr><tr><th scope="row">Model inputs</th><td><span class="ok">Tested</span> Parameter counts of all twelve LLM presets within 2% of their model cards. IHP SG13G2 SRAM area within 2% of the liberty data for every macro size. Accelerator logic area within 4% on average of synthesis across 11 configurations. The C driver plans the same tiles as the model on 6,000 random shapes.</td></tr></tbody></table></div>
+<!-- verify:end -->
+      </div>
+    </section>
+
+    <section id="assistant" class="assistant" aria-labelledby="assistant-h">
+      <div class="shell assistant-grid">
+        <div class="assistant-copy">
+          <h2 id="assistant-h">Ask in plain words. Get a chip.</h2>
+          <p>ChipLeap is an MCP server. Its tools answer architecture questions rather than run single EDA tools, so Claude, Cursor, VS Code or Codex can take a requirement, write the spec, explore, question the bottleneck, then generate and verify the SoC. Every call can be logged and replayed.</p>
+          <div class="cmd" role="group" aria-label="Add to Claude Code">
+            <code>claude mcp add chipleap <span class="nb">-s user</span> <span class="nb">-- chipleap mcp</span></code>
+            <button class="copy" type="button" aria-label="Copy the Claude Code command">Copy</button>
+          </div>
+          <p class="small">Claude Desktop, Cursor, VS Code and Codex: <a href="https://github.com/danieltyukov/chipleap/blob/main/docs/mcp.md">docs/mcp.md</a>.</p>
+        </div>
+        <div class="console" id="console">
+          <div class="console-bar"><i></i><i></i><i></i><span>assistant with ChipLeap</span></div>
+          <!-- console:start -->
+<div class="console-body" id="console-body"><p class="c-user">Design the smallest chip on the open IHP PDK that runs SmolLM2 135M at two tokens per second.</p><p class="c-tool">required_resources(spec)</p><p class="c-out">77 MB read per token: 155 MB/s sustained and 74 MiB resident. At 130 nm only serial memories work: HyperRAM or octal PSRAM, several channels for capacity.</p><p class="c-tool">explore_designs(spec, objective=&quot;area&quot;)</p><p class="c-out">1,758 designs evaluated. The agent added a GEMV engine, doubled the memory channels, moved the weights to octal PSRAM, then made 7 trims to the SRAM, buffers and array, and stopped at the smallest design that still meets the target.</p><p class="c-ai">Recommended: CV32E20 at 100 MHz, 32 KiB of SRAM, a 1 x 8 GEMV engine and 2 octal PSRAM channels. 2.29 tokens per second, 44 mW, 3.4 mm², limited by external memory. Shall I generate and verify it?</p><p class="c-user">Yes.</p><p class="c-tool">generate_soc(...)  verify_soc(...)</p><p class="c-out">All checks pass. 21 randomized jobs bit-exact; cycle counts match the model exactly without memory stalls.</p></div>
+<!-- console:end -->
+        </div>
+      </div>
+    </section>
+
+    <section id="calc" class="calc-section" aria-labelledby="calc-h">
+      <div class="shell">
+        <div class="section-head">
+          <h2 id="calc-h">The arithmetic that sets the limit</h2>
+          <p>At batch one, decode reads every weight once per token, so the external memory sets a ceiling no amount of compute can raise. Pick a model and a memory.</p>
+        </div>
+        <form class="calc" id="calc-form" aria-label="Token rate ceiling">
+          <div><label for="c-model">Model</label><select id="c-model"></select></div>
+          <div><label for="c-fmt">Weights</label><select id="c-fmt"><option value="int4">int4</option><option value="int8">int8</option></select></div>
+          <div><label for="c-mem">External memory</label><select id="c-mem"></select></div>
+          <div><label for="c-ch">Channels</label><select id="c-ch"><option>1</option><option>2</option><option>4</option></select></div>
+          <div class="result"><output id="c-out" for="c-model c-fmt c-mem c-ch">-</output><span class="unit">tokens per second at most</span></div>
+          <p class="verdict" id="c-verdict" aria-live="polite"></p>
+        </form>
+      </div>
+    </section>
+
+    <section id="fits" class="fits" aria-labelledby="fits-h">
+      <div class="shell">
+        <div class="section-head">
+          <h2 id="fits-h">Where it fits</h2>
+          <p>Agentic EDA suites from Cadence, Synopsys and Siemens, and startups such as ChipAgents, Chipmind and SigmanticAI, mostly start from a specification or RTL on licensed tools. Workload-to-chip companies such as Architect Labs and Cognichip are closed services. Academic tools such as Timeloop, ZigZag and LLMCompass model accelerators without generating hardware. ChipLeap works on the step before the specification, and hands one over.</p>
+        </div>
+        <div class="table-scroll">
+          <table class="cmp">
+            <thead>
+              <tr><th scope="col"><span class="sr">Capability</span></th><th scope="col" class="us">ChipLeap</th><th scope="col">Agentic EDA suites</th><th scope="col">Workload-to-chip services</th><th scope="col">Academic DSE tools</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">Starts from the workload and its targets</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="n">Spec or RTL</td><td data-label="Workload-to-chip services" class="y">Yes</td><td data-label="Academic DSE tools" class="y">Yes</td></tr>
+              <tr><th scope="row">Chooses the external memory and checks it can be built at the node</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="n">No</td><td data-label="Workload-to-chip services" class="p">Fixed by the spec</td><td data-label="Academic DSE tools" class="n">Bandwidth only</td></tr>
+              <tr><th scope="row">Explains every decision in a log you can diff</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="p">Review steps</td><td data-label="Workload-to-chip services" class="n">Not published</td><td data-label="Academic DSE tools" class="p">Some</td></tr>
+              <tr><th scope="row">Generates an SoC configuration and RTL</th><td data-label="ChipLeap" class="us y">X-HEEP and accelerator</td><td data-label="Agentic EDA suites" class="y">RTL</td><td data-label="Workload-to-chip services" class="y">Yes</td><td data-label="Academic DSE tools" class="n">No</td></tr>
+              <tr><th scope="row">Checks its model against that RTL, cycle for cycle</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="n">Not applicable</td><td data-label="Workload-to-chip services" class="p">Not published</td><td data-label="Academic DSE tools" class="n">No</td></tr>
+              <tr><th scope="row">Runs locally and free, on open tools and an open PDK</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="n">Licensed</td><td data-label="Workload-to-chip services" class="n">Service</td><td data-label="Academic DSE tools" class="y">Yes</td></tr>
+              <tr><th scope="row">Works from any MCP assistant</th><td data-label="ChipLeap" class="us y">Yes</td><td data-label="Agentic EDA suites" class="p">Some</td><td data-label="Workload-to-chip services" class="n">No</td><td data-label="Academic DSE tools" class="n">Rarely</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small">Based on public material as of October 2026. The bottleneck-driven loop follows prior work such as Explainable-DSE (ASPLOS 2024). <a href="https://github.com/danieltyukov/chipleap/blob/main/docs/landscape.md">Full comparison with sources</a>.</p>
+      </div>
+    </section>
+
+    <section id="start" class="start" aria-labelledby="start-h">
+      <div class="shell start-grid">
+        <div>
+          <h2 id="start-h">Run it on your machine</h2>
+          <p>Python 3.10 or newer. Verilator, Yosys, sv2v and the IHP PDK are optional: <code>chipleap verify</code> uses what it finds, and <code>chipleap doctor</code> lists it.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="https://github.com/danieltyukov/chipleap">View on GitHub</a>
+            <a class="btn btn-ghost" href="https://github.com/danieltyukov/chipleap/tree/main/docs">Read the docs</a>
+          </div>
+        </div>
+        <pre class="terminal"><code><span class="t-c"># install</span>
+uv tool install git+https://github.com/danieltyukov/chipleap
+
+<span class="t-c"># write a spec, size it, explore</span>
+chipleap init llama.yaml
+chipleap require llama.yaml
+chipleap explore llama.yaml -o out
+
+<span class="t-c"># simulate, synthesize, run X-HEEP checks</span>
+chipleap verify out</code></pre>
+      </div>
+    </section>
+
+    <section id="faq" class="faq" aria-labelledby="faq-h">
+      <div class="shell narrow">
+        <h2 id="faq-h">Questions</h2>
+        <details><summary>Does it need a commercial EDA licence?</summary><p>No. Simulation and lint use Verilator, synthesis uses Yosys with sv2v, the technology data comes from the IHP SG13G2 open PDK, and X-HEEP's own generator checks the configuration. The model, the explorer and the generators need none of them.</p></details>
+        <details><summary>How accurate is the model?</summary><p>For the accelerator, the model predicts the generated RTL's cycle count exactly in simulation without memory stalls, and within a few percent with random stalls. Its logic area is within 4% on average of Yosys synthesis on IHP SG13G2, and the synthesized logic runs faster than the clock the model allows there. Memories, CPU and energy rest on technology data that is measured for IHP SG13G2 and scaled from published figures for the other nodes, and reports say which is which. <a href="https://github.com/danieltyukov/chipleap/blob/main/docs/model.md">docs/model.md</a> lists every number and its source.</p></details>
+        <details><summary>Why X-HEEP?</summary><p>It is an open, configurable RISC-V microcontroller from EPFL with a Python configuration API, an accelerator interface and several chips taped out. Its generator validates what ChipLeap writes.</p></details>
+        <details><summary>Can I use my own model or network?</summary><p>Yes. Any decoder-only transformer can be described by its shape, and other networks as convolutions, depthwise convolutions, matrix multiplies and element-wise operators.</p></details>
+        <details><summary>What does the generated accelerator not do yet?</summary><p>It computes int8 activations against int8, int4 or int2 weights with int32 results. Requantization, activation functions and int4 group scales run on the CPU, and the model counts them there. It has not been taped out.</p></details>
+        <details><summary>Is it affiliated with EPFL, IHP or any company named here?</summary><p>No. ChipLeap is an independent open-source project.</p></details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="shell foot-inner">
+      <a class="brand" href="./"><img src="logo-mark.svg" alt="" width="24" height="24"><span>ChipLeap</span></a>
+      <nav aria-label="Project">
+        <a href="https://github.com/danieltyukov/chipleap">GitHub</a>
+        <a href="https://github.com/danieltyukov/chipleap/tree/main/docs">Docs</a>
+        <a href="https://github.com/danieltyukov/chipleap/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/danieltyukov/chipleap/issues">Issues</a>
+      </nav>
+      <p>MIT license. Not affiliated with EPFL, IHP or any company named on this page.</p>
+    </div>
+  </footer>
+  <script src="app.js?v=3aa848a241" defer></script>
+</body>
+</html>
