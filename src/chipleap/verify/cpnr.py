@@ -83,6 +83,10 @@ set init_gnd_net {ground}
 set init_mmmc_file mmmc.tcl
 init_design
 setMultiCpuUsage -localCpu 4
+# Libraries without a plain set-and-reset flip-flop (IHP SG13G2) leave Genus a scan flop
+# for registers that reset to 1. There is no scan chain to stitch in this block, so the
+# placer's "scan chains not defined" notice says nothing about the result.
+suppressMessage IMPSP-9099
 setDesignMode -process {node_nm}
 
 # The two top routing layers carry the power grid, the aluminium redistribution layer
@@ -114,9 +118,28 @@ addStripe -nets {{{power} {ground}}} -layer $v -direction vertical -width $w -sp
     -set_to_set_distance [expr {{20 * $w + 2 * $s}}] -start_from left -start_offset 20
 sroute -connect {{corePin}} -nets {{{power} {ground}}} -allowJogging 1 -allowLayerChange 1
 
-# Genus may map registers to scan flops; there is no scan chain to stitch here.
 setPlaceMode -place_global_place_io_pins true -place_global_ignore_scan true
 place_opt_design
+
+# Clock-tree cells: some libraries' buffers are not picked up automatically, so name them,
+# clock buffers and inverters first (CKBD4, CKND4), plain ones otherwise (buf_4, inv_4),
+# never a dont_use cell and never a clock NAND (CKND2D1) for an inverter.
+set ckbuf {{}}
+set ckinv {{}}
+set buf {{}}
+set inv {{}}
+foreach c [dbGet head.libCells] {{
+    if {{[dbGet $c.dontUse] == 1}} {{ continue }}
+    set n [dbGet $c.name]
+    if {{[regexp -nocase {{^CKBD[0-9]+[A-Z]*$}} $n]}} {{ lappend ckbuf $n }}
+    if {{[regexp -nocase {{^CKND[0-9]+[A-Z]*$}} $n]}} {{ lappend ckinv $n }}
+    if {{[regexp -nocase {{(^BUFFD[0-9]+|_buf_[0-9]+)}} $n]}} {{ lappend buf $n }}
+    if {{[regexp -nocase {{(^INVD[0-9]+|_inv_[0-9]+)}} $n]}} {{ lappend inv $n }}
+}}
+if {{[llength $ckbuf] == 0}} {{ set ckbuf $buf }}
+if {{[llength $ckinv] == 0}} {{ set ckinv $inv }}
+if {{[llength $ckbuf] > 0}} {{ set_ccopt_property buffer_cells $ckbuf }}
+if {{[llength $ckinv] > 0}} {{ set_ccopt_property inverter_cells $ckinv }}
 ccopt_design
 routeDesign
 setAnalysisMode -analysisType onChipVariation
@@ -127,7 +150,10 @@ optDesign -postRoute -hold
 # not 0x0, when nothing matches).
 set fills [dbGet -e [dbGet -e -p head.libCells.name *FILL*].name]
 if {{[llength $fills] == 0}} {{ set fills [dbGet -e [dbGet -e -p head.libCells.name *fill*].name] }}
-if {{[llength $fills] > 0}} {{ addFiller -cell $fills -prefix CHIPLEAP_FILL }}
+if {{[llength $fills] > 0}} {{
+    addFiller -cell $fills -prefix CHIPLEAP_FILL
+    ecoRoute -target
+}}
 
 {timing}
 verifyConnectivity -report connectivity.rpt
