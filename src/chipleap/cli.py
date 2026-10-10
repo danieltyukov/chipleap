@@ -557,7 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("tech", help="technologies of your own, measured from liberty files")
     tsub = s.add_subparsers(dest="tech_cmd", required=True)
     t = tsub.add_parser("add", help="measure a PDK's liberty files and add it as a technology")
-    t.add_argument("name", help="key for the technology, for example tsmc40lp")
+    t.add_argument("name", help="key for the technology, for example mylib40")
     t.add_argument("--liberty", required=True, help="standard-cell liberty (typical corner)")
     t.add_argument("--node", type=int, required=True, help="process node in nm")
     t.add_argument(

@@ -127,7 +127,7 @@ def test_bad_hosts_are_refused(host, monkeypatch):
         techlib.read_text("/pdk/std.lib", host or "-x")
 
 
-@pytest.mark.parametrize("host", ["icdcs11", "user@eda.example.com", "my-host_1", "a.b"])
+@pytest.mark.parametrize("host", ["eda-server", "user@eda.example.com", "my-host_1", "a.b"])
 def test_good_hosts(host):
     assert remote.Remote(host).host == host
 
