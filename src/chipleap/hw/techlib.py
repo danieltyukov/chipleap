@@ -69,16 +69,27 @@ def default_io_mts(node_nm: float) -> int:
     return round(_interp(node_nm, pairs))
 
 
-def read_text(path: str, host: str = "") -> str:
-    """A text file, local or read over ssh from ``host`` into memory."""
-    if not host:
-        return Path(path).read_text(errors="replace")
-    out = subprocess.run(
-        ["ssh", *SSH_OPTS, host, f"cat {shlex.quote(path)}"],
+def _ssh(host: str, bash_script: str) -> subprocess.CompletedProcess[str]:
+    """Run a quoted bash script on ``host`` (an ssh alias or user@host, after ``--``)."""
+    from chipleap.verify.remote import RemoteError, check_host
+
+    try:
+        check_host(host)
+    except RemoteError as exc:
+        raise TechError(str(exc)) from exc
+    return subprocess.run(
+        ["ssh", *SSH_OPTS, "--", host, f"bash -c {shlex.quote(bash_script)}"],
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def read_text(path: str, host: str = "") -> str:
+    """A text file, local or read over ssh from ``host`` into memory."""
+    if not host:
+        return Path(path).read_text(errors="replace")
+    out = _ssh(host, f"cat -- {shlex.quote(path)}")
     if out.returncode != 0:
         raise TechError(f"cannot read {path} on {host}: {out.stderr.strip()[-300:]}")
     return out.stdout
@@ -89,13 +100,7 @@ def list_libs(path: str, host: str = "") -> list[str]:
     if not host:
         return [str(p) for p in liberty.liberty_files(Path(path))]
     q = shlex.quote(path)
-    probe = f"if [ -d {q} ]; then ls -1 {q}/*.lib; else echo {q}; fi"
-    out = subprocess.run(
-        ["ssh", *SSH_OPTS, host, f"bash -c {shlex.quote(probe)}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    out = _ssh(host, f"if [ -d {q} ]; then ls -1 -- {q}/*.lib; else echo {q}; fi")
     if out.returncode != 0:
         raise TechError(f"cannot list {path} on {host}: {out.stderr.strip()[-300:]}")
     return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]

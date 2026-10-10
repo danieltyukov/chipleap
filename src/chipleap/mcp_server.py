@@ -339,9 +339,10 @@ def verify_soc(
     sim_tool: str = "verilator",
     synth_tool: str = "yosys",
     synth_tech: str = "ihp-sg13g2",
-    remote: str = "",
-    remote_setup: str = "",
 ) -> dict[str, Any]:
+    """Verify a bundle. The client picks tools from a fixed list; whether they run on a
+    server, and the setup that runs there, comes only from the user's own environment
+    (CHIPLEAP_REMOTE, CHIPLEAP_REMOTE_SETUP), never from the client."""
     from chipleap.verify.backends import SIM_TOOLS, SYNTH_TOOLS
     from chipleap.verify.remote import Remote
     from chipleap.verify.run import verify_bundle
@@ -350,6 +351,8 @@ def verify_soc(
         raise ToolError(f"sim_tool must be one of {', '.join(SIM_TOOLS)}")
     if synth_tool not in SYNTH_TOOLS:
         raise ToolError(f"synth_tool must be one of {', '.join(SYNTH_TOOLS)}")
+    if synth_tech not in TECHNOLOGIES:
+        raise ToolError(f"synth_tech must be one of {', '.join(TECHNOLOGIES)}")
     res = verify_bundle(
         Path(out_dir).expanduser(),
         steps=tuple(x.strip() for x in steps.split(",") if x.strip()),
@@ -357,7 +360,7 @@ def verify_soc(
         sim_tool=sim_tool,
         synth_tool=synth_tool,
         synth_tech=synth_tech,
-        remote=Remote.from_env(remote or None, remote_setup or None),
+        remote=Remote.from_env(),
     )
     return {"steps": [{"step": r.name, "status": r.status, "summary": r.summary} for r in res]}
 
@@ -530,10 +533,10 @@ def build_server(log_dir: str | None = None) -> Any:
     @server.tool(
         description="Verify a bundle: Verilator lint, randomized simulation against a "
         "golden model with a cycle cross-check, synthesis, X-HEEP config validation. Steps: "
-        "consistency,lint,sim,synth,xheep. sim_tool: verilator (default), xcelium, vcs or "
-        "questa; synth_tool: yosys (default), genus or dc; synth_tech: the technology to "
-        "map to; remote: an ssh host where the commercial tools run, with remote_setup the "
-        "shell snippet that puts them on the path there."
+        "consistency,lint,sim,synth,xheep. sim_tool: verilator (default), xcelium, vcs, "
+        "questa or verilator-sv; synth_tool: yosys (default), genus or dc; synth_tech: a "
+        "technology key to map to. Commercial tools run where the user configured them "
+        "(here, or on the server in the user's CHIPLEAP_REMOTE)."
     )
     def verify_soc(
         out_dir: str,
@@ -542,8 +545,6 @@ def build_server(log_dir: str | None = None) -> Any:
         sim_tool: str = "verilator",
         synth_tool: str = "yosys",
         synth_tech: str = "ihp-sg13g2",
-        remote: str = "",
-        remote_setup: str = "",
     ) -> dict[str, Any]:
         return logged("verify_soc", TOOLS["verify_soc"])(
             out_dir=out_dir,
@@ -552,8 +553,6 @@ def build_server(log_dir: str | None = None) -> Any:
             sim_tool=sim_tool,
             synth_tool=synth_tool,
             synth_tech=synth_tech,
-            remote=remote,
-            remote_setup=remote_setup,
         )
 
     @server.tool(

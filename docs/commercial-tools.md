@@ -76,8 +76,11 @@ sources `.csh` files or uses `setenv` runs under tcsh, anything else under bash.
   Locally, `chipleap doctor` looks them up on the path without starting them, so no
   licence is checked out.
 
-The MCP tool `verify_soc` takes the same choices (`sim_tool`, `synth_tool`, `synth_tech`,
-`remote`, `remote_setup`), so an assistant can run the commercial flow too.
+The MCP tool `verify_soc` takes the tool choices (`sim_tool`, `synth_tool`,
+`synth_tech`), each checked against a fixed list, so an assistant can run the commercial
+flow too. It cannot choose a host or a setup snippet: a remote run happens only when you
+set `CHIPLEAP_REMOTE` and `CHIPLEAP_REMOTE_SETUP` in the environment that starts the MCP
+server, because anything an assistant reads could try to steer it.
 
 ## Your own PDK
 

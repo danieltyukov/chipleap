@@ -106,8 +106,8 @@ def synthesize_with(
     }
     if lefs:
         # Same naming as the synthesis scripts: local files sit in the work directory.
-        names = tuple(Path(p).name if Path(p).is_file() else p for p in lefs)
-        lib_ref = Path(lib).name if Path(lib).is_file() else lib
+        names = tuple(csynth.local_name(p) if Path(p).is_file() else p for p in lefs)
+        lib_ref = csynth.local_name(lib) if Path(lib).is_file() else lib
         tag = f"w{SMALL_WORDS[-1]}"
         innovus.write(workdir, f"{csynth.TOP}_{tag}.v", f"{csynth.TOP}_{tag}.sdc", lib_ref, names)
         data["innovus_script"] = str(workdir / "innovus.tcl")

@@ -81,17 +81,55 @@ library (sram_{words}x{bits}) {{
 # --- remote execution -------------------------------------------------------
 
 
+def _remote_bash(line: str) -> str:
+    """The bash script inside a wrapped remote command line, unquoted."""
+    import shlex
+
+    inner = shlex.split(line)[-1]  # the outer shell's -c argument
+    return shlex.split(inner.split("exec bash -c ", 1)[1])[0]
+
+
 def test_setup_shell_follows_the_script():
     assert remote.is_csh("source /eda/scripts/flexlm.csh")
     assert remote.is_csh("setenv CDS_LIC_FILE 1@x")
     assert not remote.is_csh("source /eda/scripts/flexlm.sh; export X=1")
-    csh = remote.wrap("xrun -f run.f", "/tmp/w", "source a.csh")
+    steps = [remote.Step(("xrun", "-f", "run.f"))]
+    csh = remote.wrap(steps, "/tmp/w", "source a.csh")
     assert csh.startswith("tcsh -f -c ")
-    assert "source a.csh; cd /tmp/w && xrun -f run.f" in csh
-    sh = remote.wrap("genus -batch", "/tmp/w x", "source a.sh;")
+    assert "source a.csh; cd /tmp/w && exec bash -c " in csh
+    assert _remote_bash(csh) == "xrun -f run.f"
+    sh = remote.wrap([remote.Step(("genus", "-batch"), "g.out")], "/tmp/w x", "source a.sh;")
     assert sh.startswith("bash -c ")
-    assert "cd '/tmp/w x' && genus -batch" in sh.replace("'\"'\"'", "'")
-    assert remote.wrap("ls", "/tmp/w").startswith("bash -c ")
+    assert _remote_bash(sh) == "genus -batch > g.out 2>&1"
+    assert remote.wrap(steps, "/tmp/w").startswith("bash -c ")
+
+
+def test_step_arguments_are_quoted():
+    s = remote.Step(("vsim", "-do", "run -all; quit -f", "$(rm -rf ~)"), "out log")
+    assert s.shell() == "vsim -do 'run -all; quit -f' '$(rm -rf ~)' > 'out log' 2>&1"
+    with pytest.raises(ValueError):
+        remote.Step(("x",), "../escape.log")
+    with pytest.raises(ValueError):
+        remote.Step(())
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["-oProxyCommand=x", "a;b", "a b", "", "a\nb", "@host", "user@-x", "a$(id)", "x/y"],
+)
+def test_bad_hosts_are_refused(host, monkeypatch):
+    with pytest.raises(remote.RemoteError, match="ssh alias or user@host"):
+        remote.Remote(host)
+    monkeypatch.setenv("CHIPLEAP_REMOTE", host or "-")
+    with pytest.raises(remote.RemoteError):
+        remote.Remote.from_env()
+    with pytest.raises(techlib.TechError):
+        techlib.read_text("/pdk/std.lib", host or "-x")
+
+
+@pytest.mark.parametrize("host", ["icdcs11", "user@eda.example.com", "my-host_1", "a.b"])
+def test_good_hosts(host):
+    assert remote.Remote(host).host == host
 
 
 def test_which_reads_bash_and_csh_output():
@@ -100,28 +138,57 @@ def test_which_reads_bash_and_csh_output():
         "xrun": "/eda/x/bin/xrun",
         "genus": "/eda/g/bin/genus",
     }
+    with pytest.raises(remote.RemoteError, match="program name"):
+        remote.Remote("server").which(["xrun; rm -rf ~"])
+
+
+def _fake_ssh(calls, scratch="/tmp/chipleap-abcd1234"):
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        out = scratch + "\n" if "mktemp" in cmd[-1] else "ok\n"
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    return fake_run
 
 
 def test_remote_run_copies_runs_and_cleans_up(tmp_path, monkeypatch):
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        out = "/tmp/chipleap-abc\n" if "mktemp" in cmd[-1] else "ok\n"
-        return subprocess.CompletedProcess(cmd, 0, out, "")
-
-    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(remote.subprocess, "run", _fake_ssh(calls))
     monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/bin/rsync")
     r = remote.Remote("server", "source /tools/setup.csh")
-    out = r.run(tmp_path, "xrun -q tb.sv")
+    out = r.run(tmp_path, [remote.Step(("xrun", "-q", "tb.sv"))])
     assert out.stdout == "ok\n"
     ssh = [c for c in calls if c[0] == "ssh"]
     sync = [c for c in calls if c[0] == "rsync"]
+    for c in ssh:
+        assert c[c.index("--") + 1] == "server"  # the host always follows "--"
     assert "BatchMode=yes" in ssh[0]
-    assert sync[0][-2:] == [f"{tmp_path}/", "server:/tmp/chipleap-abc/"]
-    assert "tcsh -f -c" in ssh[1][-1] and "xrun -q tb.sv" in ssh[1][-1]
-    assert sync[1][-2:] == ["server:/tmp/chipleap-abc/", f"{tmp_path}/"]
-    assert ssh[-1][-1] == "rm -rf /tmp/chipleap-abc"
+    assert sync[0][-3:] == ["--", f"{tmp_path}/", "server:/tmp/chipleap-abcd1234/"]
+    assert "tcsh -f -c" in ssh[1][-1] and _remote_bash(ssh[1][-1]) == "xrun -q tb.sv"
+    assert sync[1][-3:] == ["--", "server:/tmp/chipleap-abcd1234/", f"{tmp_path}/"]
+    assert ssh[-1][-1] == "rm -rf -- /tmp/chipleap-abcd1234"
+
+
+@pytest.mark.parametrize("scratch", ["/tmp/chipleap-x; rm -rf ~", "/", "/home/me", ""])
+def test_unexpected_scratch_directories_are_refused(tmp_path, monkeypatch, scratch):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(remote.subprocess, "run", _fake_ssh(calls, scratch))
+    with pytest.raises(remote.RemoteError, match="scratch"):
+        remote.Remote("server").run(tmp_path, [remote.Step(("true",))])
+    assert not any("rm" in c[-1] for c in calls)
+
+
+def test_local_steps_run_without_a_shell(tmp_path):
+    steps = [
+        remote.Step(("echo", "$(touch pwned)"), "a.log"),
+        remote.Step(("echo", "visible")),
+    ]
+    out = remote.run_steps(steps, tmp_path, None)
+    assert out.returncode == 0 and out.stdout == "visible\n"
+    assert (tmp_path / "a.log").read_text() == "$(touch pwned)\n"
+    assert not (tmp_path / "pwned").exists()
+    bad = remote.run_steps([remote.Step(("false",)), remote.Step(("echo", "x"))], tmp_path, None)
+    assert bad.returncode != 0 and bad.stdout == ""
 
 
 def test_remote_refuses_password_logins(monkeypatch):
@@ -152,8 +219,46 @@ def test_testbench_parameters_follow_the_design():
     sv = hdlsim.testbench_sv()
     assert '`include "tb_config.svh"' in sv and "module tb_chipleap" in sv
     for key in ("xcelium", "vcs", "questa"):
-        assert "tb_chipleap" in hdlsim.SIMULATORS[key].command
-        assert hdlsim.SIMULATORS[key].commercial
+        sim = hdlsim.SIMULATORS[key]
+        assert any("tb_chipleap" in s.argv for s in sim.steps) and sim.commercial
+        assert sim.steps[0].argv[0] in ("xrun", "vcs", "vlib")
+
+
+def test_mcp_cannot_choose_where_or_how_tools_run(tmp_path):
+    import inspect
+
+    from chipleap import mcp_server
+
+    params = set(inspect.signature(mcp_server.TOOLS["verify_soc"]).parameters)
+    assert params == {"out_dir", "steps", "fetch_xheep", "sim_tool", "synth_tool", "synth_tech"}
+    for name, fn in mcp_server.TOOLS.items():
+        for p in inspect.signature(fn).parameters:
+            assert not any(w in p for w in ("remote", "setup", "host", "script")), (name, p)
+    with pytest.raises(mcp_server.ToolError, match="sim_tool"):
+        mcp_server.verify_soc(str(tmp_path), sim_tool="xcelium; rm -rf ~")
+    with pytest.raises(mcp_server.ToolError, match="synth_tech"):
+        mcp_server.verify_soc(str(tmp_path), synth_tech="../../etc")
+
+    server = mcp_server.build_server()
+    try:
+        from mcp import Client
+    except ImportError:  # mcp 1.x has no in-process client
+        return
+
+    async def schemas() -> dict[str, set[str]]:
+        async with Client(server) as c:
+            tools = (await c.list_tools()).tools
+            out = {}
+            for t in tools:
+                schema = getattr(t, "input_schema", None) or getattr(t, "inputSchema", {})
+                out[t.name] = set(schema.get("properties", {}))
+            return out
+
+    import asyncio
+
+    for name, props in asyncio.run(schemas()).items():
+        assert not any(w in p for p in props for w in ("remote", "setup", "host")), name
+    assert asyncio.run(schemas())["verify_soc"] == params
 
 
 def test_simulator_output_with_a_transcript_prefix_parses():
@@ -267,6 +372,19 @@ def test_missing_tool_says_how_to_run_remotely(tmp_path, monkeypatch):
     monkeypatch.setattr(csynth.shutil, "which", lambda name: None)
     with pytest.raises(csynth.SynthError, match="--remote"):
         csynth.synthesize(ACCEL, "genus", "lib.lib", tmp_path)
+
+
+def test_paths_in_tool_scripts_are_plain(tmp_path):
+    work = tmp_path / "w"
+    work.mkdir()
+    server = remote.Remote("server")
+    assert csynth.stage("/pdk/std.lib", work, server) == "/pdk/std.lib"
+    with pytest.raises(csynth.SynthError, match="a path on the server"):
+        csynth.stage("/pdk/x}; exec rm -rf ~", work, server)
+    local = tmp_path / "my lib (v2).lib"
+    local.write_text("library (x) {}")
+    name = csynth.stage(str(local), work, None)
+    assert name == "my_lib__v2_.lib" and (work / name).is_file()
 
 
 def test_innovus_script():

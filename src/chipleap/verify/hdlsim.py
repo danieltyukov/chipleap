@@ -25,7 +25,7 @@ from pathlib import Path
 from chipleap.gen.rtl import accel_sv, driver_header, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.model.accel import plan_tiles
-from chipleap.verify.remote import Remote, RemoteError, run_tool
+from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.sim import Case, CaseResult, SimError, cache_dir, predicted_cycles
 
 
@@ -35,14 +35,15 @@ class Simulator:
     name: str
     vendor: str
     binary: str  # what must be on the path
-    command: str  # run in the work directory
+    steps: tuple[Step, ...]  # run in the work directory, in order
 
     @property
     def commercial(self) -> bool:
         return self.vendor != "open source"
 
 
-_SOURCES = "chipleap_accel.sv tb_chipleap.sv"
+_SOURCES = ("chipleap_accel.sv", "tb_chipleap.sv")
+_STIM = "+stim=stim.txt"
 SIMULATORS: dict[str, Simulator] = {
     s.key: s
     for s in (
@@ -51,36 +52,61 @@ SIMULATORS: dict[str, Simulator] = {
             "Xcelium",
             "Cadence",
             "xrun",
-            f"xrun -64bit -sv -q -nocopyright -timescale 1ns/1ps -top tb_chipleap {_SOURCES} "
-            "+stim=stim.txt -l xrun.log",
+            (
+                Step(
+                    (
+                        "xrun", "-64bit", "-sv", "-q", "-nocopyright", "-timescale", "1ns/1ps",
+                        "-top", "tb_chipleap", *_SOURCES, _STIM, "-l", "xrun.log",
+                    )
+                ),
+            ),
         ),
         Simulator(
             "vcs",
             "VCS",
             "Synopsys",
             "vcs",
-            f"vcs -full64 -sverilog -q -timescale=1ns/1ps -top tb_chipleap {_SOURCES} -o simv "
-            "-l vcs_compile.log && ./simv -q +stim=stim.txt -l simv.log",
+            (
+                Step(
+                    (
+                        "vcs", "-full64", "-sverilog", "-q", "-timescale=1ns/1ps",
+                        "-top", "tb_chipleap", *_SOURCES, "-o", "simv",
+                    ),
+                    "vcs_compile.log",
+                ),
+                Step(("./simv", "-q", _STIM, "-l", "simv.log")),
+            ),
         ),
         Simulator(
             "questa",
             "Questa",
             "Siemens",
             "vsim",
-            f"vlib work && vlog -sv -quiet -timescale 1ns/1ps {_SOURCES} && "
-            'vsim -c -quiet tb_chipleap +stim=stim.txt -do "run -all; quit -f"',
+            (
+                Step(("vlib", "work"), "vlib.log"),
+                Step(("vlog", "-sv", "-quiet", "-timescale", "1ns/1ps", *_SOURCES), "vlog.log"),
+                Step(("vsim", "-c", "-quiet", "tb_chipleap", _STIM, "-do", "run -all; quit -f")),
+            ),
         ),
         Simulator(
             "verilator-sv",
             "Verilator (SystemVerilog testbench)",
             "open source",
             "verilator",
-            "verilator --binary --timing -Wno-fatal -Wno-lint -Wno-style -Wno-TIMESCALEMOD "
-            f"--top-module tb_chipleap {_SOURCES} -o tb >verilator.log 2>&1 && "
-            "obj_dir/tb +stim=stim.txt",
+            (
+                Step(
+                    (
+                        "verilator", "--binary", "--timing", "-Wno-fatal", "-Wno-lint",
+                        "-Wno-style", "-Wno-TIMESCALEMOD", "--top-module", "tb_chipleap",
+                        *_SOURCES, "-o", "tb",
+                    ),
+                    "verilator.log",
+                ),
+                Step(("obj_dir/tb", _STIM)),
+            ),
         ),
     )
-}
+}  # fmt: skip
 
 
 def get_simulator(key: str) -> Simulator:
@@ -218,7 +244,7 @@ def run(
         )
     prepare(accel, cases, workdir)
     try:
-        out = run_tool(sim.command, workdir, remote, timeout)
+        out = run_steps(list(sim.steps), workdir, remote, timeout)
     except RemoteError as exc:
         raise SimError(str(exc)) from exc
     log = out.stdout + "\n" + out.stderr

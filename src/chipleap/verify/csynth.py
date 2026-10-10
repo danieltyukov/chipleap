@@ -26,7 +26,7 @@ from pathlib import Path
 
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
-from chipleap.verify.remote import Remote, RemoteError, run_tool
+from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.synth import SMALL_WORDS, SynthError, SynthResult
 
 TOP = "chipleap_accel"
@@ -180,15 +180,25 @@ def parse_slack(tool: str, text: str) -> float:
     raise SynthError("no slack in the Genus timing report")
 
 
+def local_name(path: str) -> str:
+    """The plain file name a local input gets in the work directory."""
+    return re.sub(r"[^A-Za-z0-9_.+-]", "_", Path(path).name).lstrip("-") or "input"
+
+
 def stage(path: str, workdir: Path, remote: Remote | None) -> str:
     """How a script names an input file: a local file is copied into the work directory
     (and travels with it to a server); a path that only exists on the server is used
     where it is."""
+    # Names end up in Tcl braces: a local file is copied under a plain name, and a path on
+    # the server must be plain already.
     if Path(path).is_file():
-        shutil.copy2(path, workdir / Path(path).name)
-        return Path(path).name
+        name = local_name(path)
+        shutil.copy2(path, workdir / name)
+        return name
     if remote is None:
         raise SynthError(f"{path} not found")
+    if not re.fullmatch(r"[A-Za-z0-9_./+~-]+", path) or path.startswith("-"):
+        raise SynthError(f"{path!r}: a path on the server must use letters, digits and _ . / + ~ -")
     return path
 
 
@@ -216,25 +226,38 @@ def synthesize(
     lib = stage(liberty, workdir, remote)
     phys = tuple(stage(p, workdir, remote) for p in lefs) if tool == "genus" else ()
     period = 1000.0 / clock_mhz
-    commands = []
+    steps: list[Step] = []
     if tool == "dc" and not db:
         db = Path(lib).with_suffix(".db").name
         (workdir / "compile_lib.tcl").write_text(lc_script(lib, db))
-        commands.append("lc_shell -f compile_lib.tcl > lc.log 2>&1")
+        steps.append(Step(("lc_shell", "-f", "compile_lib.tcl"), "lc.log"))
+    elif db:
+        db = stage(db, workdir, remote)
     for words in SMALL_WORDS:
         tag = f"w{words}"
         rtl = f"{TOP}_{tag}.sv"
         (workdir / rtl).write_text(specialize(accel_sv(), run_params(accel, words)))
         if tool == "genus":
             (workdir / f"run_{tag}.tcl").write_text(genus_script(rtl, lib, period, tag, phys))
-            commands.append(
-                f"genus -batch -no_gui -files run_{tag}.tcl -log genus_{tag} > genus_{tag}.out 2>&1"
+            steps.append(
+                Step(
+                    (
+                        "genus",
+                        "-batch",
+                        "-no_gui",
+                        "-files",
+                        f"run_{tag}.tcl",
+                        "-log",
+                        f"genus_{tag}",
+                    ),
+                    f"genus_{tag}.out",
+                )
             )
         else:
             (workdir / f"run_{tag}.tcl").write_text(dc_script(rtl, db, period, tag))
-            commands.append(f"dc_shell -f run_{tag}.tcl > dc_{tag}.out 2>&1")
+            steps.append(Step(("dc_shell", "-f", f"run_{tag}.tcl"), f"dc_{tag}.out"))
     try:
-        out = run_tool(" && ".join(commands), workdir, remote, timeout)
+        out = run_steps(steps, workdir, remote, timeout)
     except RemoteError as exc:
         raise SynthError(str(exc)) from exc
     runs = []
