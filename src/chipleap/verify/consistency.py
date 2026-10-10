@@ -4,7 +4,8 @@ A bundle is edited by hand once it leaves ChipLeap: someone retunes a parameter 
 RTL wrapper, or bumps a bank count in the X-HEEP configuration. This step re-derives every
 generated value from ``design.yaml`` and reports each place where a file disagrees, so
 drift between the design record, the RTL, the driver, the register map and the X-HEEP
-configuration is caught before it reaches silicon.
+configuration (or, on the standalone platform, the AXI4 wrapper) is caught before it
+reaches silicon.
 """
 
 from __future__ import annotations
@@ -28,7 +29,12 @@ def check(bundle: Path, design: Design) -> list[str]:
             return None
         return p.read_text()
 
-    cfg = read(f"xheep/{design.name}.py")
+    standalone = design.platform == "standalone"
+    cfg = None if standalone else read(f"xheep/{design.name}.py")
+    if standalone and (bundle / "xheep" / f"{design.name}.py").is_file():
+        problems.append(
+            f"xheep/{design.name}.py: present, but design.yaml says the platform is standalone"
+        )
     if cfg is not None:
         expect = {
             "bus": f"BusType.{design.bus}",
@@ -62,7 +68,14 @@ def check(bundle: Path, design: Design) -> list[str]:
         "WBUF_WORDS": p.wbuf_words,
         "ACC_ROWS": p.acc_rows,
     }
-    for rel in ("rtl/chipleap_accel_top.sv", "rtl/chipleap_accel_xheep.sv"):
+    wrappers = (
+        ("rtl/chipleap_accel_axi_top.sv",)
+        if standalone
+        else ("rtl/chipleap_accel_top.sv", "rtl/chipleap_accel_xheep.sv")
+    )
+    if standalone:
+        read("rtl/chipleap_accel_axi.sv")
+    for rel in wrappers:
         text = read(rel)
         if text is None:
             continue

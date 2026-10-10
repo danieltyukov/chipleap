@@ -36,6 +36,12 @@ ACCEL_KGE: dict[str, tuple[float, float]] = {
 }
 
 
+# The AXI4 wrapper of the standalone platform: the AXI4-Lite slave's response registers,
+# the write master's handshake flags and the address multiplexer. Synthesized on SG13G2
+# with the core as a black box, 0.54 kGE for 1 to 16 ports (the read ports are wiring).
+AXI_ADAPTER_KGE = 0.54
+
+
 def accel_logic_kge(dataflow: str, rows: int, cols: int, ports: int) -> float:
     """Logic of the generated accelerator, without its activation and weight buffers.
 

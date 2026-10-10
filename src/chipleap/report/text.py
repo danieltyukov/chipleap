@@ -47,6 +47,17 @@ def headline(ev: Evaluation) -> str:
     )
 
 
+def ip_note(ev: Evaluation) -> str:
+    """On the standalone platform, what is generated and what the model only assumes."""
+    if ev.design.platform != "standalone":
+        return ""
+    return (
+        f"Generated IP: the accelerator with AXI4 interfaces, {num(ev.ip_area)} mm2. The host "
+        "CPU, its SRAM, interconnect and memory controller are assumed by the model, not "
+        f"generated; with them the system estimate is {num(ev.total_area)} mm2."
+    )
+
+
 def op_rows(ev: Evaluation, limit: int = 12) -> list[list[str]]:
     total = ev.time_s or 1.0
     rows = []
@@ -96,6 +107,8 @@ def format_evaluation(ev: Evaluation) -> str:
         "Energy per step (mJ): "
         + ", ".join(f"{k} {v / 1e9:.3g}" for k, v in ev.energy_pj_by.items()),
     ]
+    if ip_note(ev):
+        lines.append(ip_note(ev))
     return "\n".join(lines)
 
 
@@ -133,6 +146,8 @@ def format_explore(r: ExploreResult, verbose: bool = False) -> str:
         "  " + headline(b.evaluation),
         "  bottleneck: " + b.evaluation.bound,
     ]
+    if ip_note(b.evaluation):
+        lines.append("  " + ip_note(b.evaluation))
     if b.assessment.violations:
         lines += ["  cannot work: " + v for v in b.assessment.violations]
     if b.assessment.misses:

@@ -1,8 +1,12 @@
-"""A design point: an X-HEEP configuration plus an optional accelerator.
+"""A design point: a host system plus an optional accelerator.
 
-Every field maps onto something the generator emits: the CPU, bus and memory banks go
-into the X-HEEP configuration, the accelerator fields become RTL parameters, and the
-external memory sets the address window and the integration notes.
+Every field maps onto something the generator emits or the model assumes. On the
+``xheep`` platform the CPU, bus and memory banks go into an X-HEEP configuration and the
+accelerator plugs into it. On the ``standalone`` platform the generated hardware is the
+accelerator alone, with AXI4 interfaces for any host (Arm, other RISC-V cores, FPGA
+processing systems); the CPU, bus, banks and external memory then describe the host
+system the model assumes around it. The accelerator fields become RTL parameters either
+way.
 """
 
 from __future__ import annotations
@@ -22,6 +26,11 @@ DATAFLOW_NAMES = {
     "os": "output-stationary systolic array",
 }
 BUS_TYPES = ("onetoM", "NtoM")
+PLATFORMS = ("xheep", "standalone")
+PLATFORM_NAMES = {
+    "xheep": "X-HEEP SoC (RISC-V)",
+    "standalone": "standalone accelerator IP with AXI4 interfaces, for any host",
+}
 IL_BANK_COUNTS = (0, 2, 4, 8)
 MAX_BANKS = 16
 
@@ -54,7 +63,8 @@ def _pow2(x: int) -> bool:
 
 @dataclass(frozen=True)
 class Accel:
-    """Accelerator attached to X-HEEP through OBI master ports and a register interface.
+    """The generated accelerator: a register interface and 32-bit read and write master
+    ports (OBI towards X-HEEP, or AXI4 through the standalone wrapper).
 
     ``rows`` and ``cols`` mean different things per dataflow:
 
@@ -107,6 +117,7 @@ class Design:
     ext_mem: str = NONE_KEY
     ext_channels: int = 1
     accel: Accel | None = None
+    platform: str = "xheep"
     notes: tuple[str, ...] = field(default=(), compare=False)
 
     @property
@@ -119,6 +130,8 @@ class Design:
                 f"name {self.name!r} must be 1 to {DESIGN_NAME_MAX} letters, digits, '_', '.' or '-', "
                 "starting with a letter or digit"
             )
+        if self.platform not in PLATFORMS:
+            raise DesignError(f"platform must be one of {', '.join(PLATFORMS)}")
         if self.tech not in TECHNOLOGIES:
             raise DesignError(f"tech must be one of {', '.join(TECHNOLOGIES)}")
         if self.cpu not in CPUS:
@@ -203,4 +216,6 @@ class Design:
             ch = f"{self.ext_channels}x " if self.ext_channels > 1 else ""
             parts.append(f"{ch}{self.ext_mem}")
         parts.append(self.tech)
+        if self.platform == "standalone":
+            parts.append("standalone AXI IP")
         return ", ".join(parts)

@@ -100,7 +100,11 @@ def floorplan(ev: Evaluation) -> Floorplan:
     groups: list[tuple[str, float]] = []
     if area.get("sram"):
         groups.append(("sram", area["sram"]))
-    acc = area.get("accelerator logic", 0.0) + area.get("accelerator buffers", 0.0)
+    acc = (
+        area.get("accelerator logic", 0.0)
+        + area.get("accelerator buffers", 0.0)
+        + area.get("axi adapter", 0.0)
+    )
     if acc:
         groups.append(("accelerator", acc))
     groups.append(("cpu", area["cpu"]))
@@ -138,7 +142,8 @@ def floorplan(ev: Evaluation) -> Floorplan:
                     )
                 )
         elif name == "accelerator":
-            logic = area.get("accelerator logic", 0.0)
+            # The standalone platform's AXI adapter sits with the accelerator's logic.
+            logic = area.get("accelerator logic", 0.0) + area.get("axi adapter", 0.0)
             buf = area.get("accelerator buffers", 0.0)
             sub = squarify([logic / acc * w * h, buf / acc * w * h], x, y, w, h)
             a_ = d.accel

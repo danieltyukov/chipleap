@@ -7,11 +7,11 @@
   DATASHEET.md         memory map, registers, interfaces, programming sequence
   report.html|md       explorer report with the agent's decisions (after explore)
   explore.json         machine-readable results and the full decision log
-  xheep/<name>.py      X-HEEP configuration (make mcu-gen X_HEEP_CFG=...)
-  rtl/                 accelerator SystemVerilog, X-HEEP adapter, FuseSoC core,
-                       register description (reggen hjson)
+  xheep/<name>.py      X-HEEP configuration (make mcu-gen X_HEEP_CFG=...); xheep only
+  rtl/                 accelerator SystemVerilog, the X-HEEP adapter or the AXI4 wrapper,
+                       FuseSoC core, register description (reggen hjson)
   sw/chipleap_driver.h firmware driver with the tile planner
-  tb/tb_chipleap.cpp   Verilator testbench
+  tb/                  Verilator testbench (OBI on xheep, AXI4 on standalone)
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from chipleap.gen.xheep import xheep_config
 from chipleap.hw.design import Design, DesignError
 from chipleap.report.data import explore_dict, explore_markdown
 from chipleap.report.html import explore_html
+from chipleap.report.text import ip_note
 from chipleap.spec import Spec
 
 
@@ -67,6 +68,8 @@ def _readme(c: Candidate | None, design: Design, spec: Spec | None) -> str:
             f"{e.power_mw:.3g} mW, {e.total_area:.3g} mm2 (bottleneck: {e.bound}).",
             "",
         ]
+        if ip_note(e):
+            lines += [ip_note(e), ""]
     lines += [
         "| Path | Contents |",
         "|---|---|",
@@ -79,31 +82,48 @@ def _readme(c: Candidate | None, design: Design, spec: Spec | None) -> str:
             "| `report.html`, `report.md` | Exploration report and decision log |",
             "| `explore.json` | Machine-readable results |",
         ]
-    lines += [
-        "| `DATASHEET.md` | Memory map, registers, interfaces, programming |",
-        f"| `xheep/{design.name}.py` | X-HEEP configuration |",
-    ]
-    if design.accel:
+    standalone = design.platform == "standalone"
+    lines.append(
+        "| `DATASHEET.md` | Registers, interfaces, programming, "
+        + ("address map |" if standalone else "memory map |")
+    )
+    if not standalone:
+        lines.append(f"| `xheep/{design.name}.py` | X-HEEP configuration |")
+    if design.accel and standalone:
+        lines += [
+            "| `rtl/` | Accelerator RTL, AXI4 wrapper, FuseSoC core, register hjson |",
+            "| `sw/chipleap_driver.h` | Driver for any host (define `CHIPLEAP_BASE`) |",
+            "| `tb/tb_chipleap_axi.cpp` | Verilator testbench with an AXI4 memory model |",
+        ]
+    elif design.accel:
         lines += [
             "| `rtl/` | Accelerator RTL, X-HEEP adapter, FuseSoC core, register hjson |",
             "| `sw/chipleap_driver.h` | Firmware driver |",
             "| `tb/tb_chipleap.cpp` | Verilator testbench |",
         ]
-    lines += [
-        "",
-        "Next steps:",
-        "",
-        "```sh",
-        "chipleap verify .            # simulate, synthesize, check with X-HEEP's generator",
-        "```",
-        "",
-        "In an X-HEEP checkout:",
-        "",
-        "```sh",
-        f"make mcu-gen X_HEEP_CFG=<path to this bundle>/xheep/{design.name}.py",
-        "```",
-        "",
-    ]
+    lines += ["", "Next steps:", "", "```sh"]
+    if standalone:
+        lines += [
+            "chipleap verify .            # lint, simulate through AXI4, synthesize",
+            "```",
+            "",
+            "Instantiate `chipleap_accel_axi_top` (rtl/) in your SoC: its AXI4-Lite port on",
+            "the host's peripheral interconnect, its AXI4 masters on a port that reaches the",
+            "memory holding the weights. docs/platforms.md has the details.",
+            "",
+        ]
+    else:
+        lines += [
+            "chipleap verify .            # simulate, synthesize, check with X-HEEP's generator",
+            "```",
+            "",
+            "In an X-HEEP checkout:",
+            "",
+            "```sh",
+            f"make mcu-gen X_HEEP_CFG=<path to this bundle>/xheep/{design.name}.py",
+            "```",
+            "",
+        ]
     return "\n".join(lines)
 
 
@@ -141,7 +161,8 @@ def write_bundle(
         metrics = ev.metrics()
         unit = ev.workload.unit
         workload = ev.workload.description
-    put(f"xheep/{design.name}.py", xheep_config(design, ext_bytes, spec.name if spec else ""))
+    if design.platform != "standalone":
+        put(f"xheep/{design.name}.py", xheep_config(design, ext_bytes, spec.name if spec else ""))
     put(
         "DATASHEET.md",
         datasheet(
@@ -154,7 +175,7 @@ def write_bundle(
         ),
     )
     if design.accel is not None:
-        written += write_rtl(design.accel, design.name, out)
+        written += write_rtl(design.accel, design.name, out, platform=design.platform)
         put("rtl/chipleap_accel.hjson", reggen_hjson(design.name))
     if result is not None:
         put("report.html", explore_html(result, result.cloud))

@@ -14,7 +14,7 @@ from chipleap.explore.engine import Candidate, explore
 from chipleap.explore.score import Point, assess
 from chipleap.gen.bundle import load_design, write_bundle
 from chipleap.hw.cpu import CPUS
-from chipleap.hw.design import Design, DesignError
+from chipleap.hw.design import PLATFORMS, Design, DesignError
 from chipleap.hw.memory import MEMORIES
 from chipleap.hw.tech import TECHNOLOGIES
 from chipleap.model.bounds import requirements
@@ -253,8 +253,15 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 0 if c.assessment.feasible else 2
 
 
+def _with_platform(spec: Spec, platform: str | None) -> Spec:
+    if not platform:
+        return spec
+    start = spec.start.with_(platform=platform) if spec.start else None
+    return spec.with_(platform=platform, start=start)
+
+
 def cmd_explore(args: argparse.Namespace) -> int:
-    spec = load_spec(args.spec)
+    spec = _with_platform(load_spec(args.spec), args.platform)
     r = explore(spec, samples=args.samples, seed=args.seed, max_steps=args.steps)
     if args.out:
         out = Path(args.out)
@@ -266,8 +273,9 @@ def cmd_explore(args: argparse.Namespace) -> int:
     else:
         print(format_explore(r, verbose=args.verbose))
         if args.out:
+            dirs = "rtl/, sw/, tb/" if spec.platform == "standalone" else "xheep/, rtl/, sw/, tb/"
             print(
-                f"\nWrote {args.out}/ (report.html, DATASHEET.md, xheep/, rtl/, sw/, tb/). "
+                f"\nWrote {args.out}/ (report.html, DATASHEET.md, {dirs}). "
                 f"Next: chipleap verify {args.out}"
             )
     return 0 if r.best.assessment.feasible else 2
@@ -279,6 +287,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
     cand = _evaluate(spec, design, weights) if spec else None
     if args.name:
         design = design.with_(name=args.name)
+    if args.platform:
+        design = design.with_(platform=args.platform)
     files = write_bundle(Path(args.out), design, weights=weights, spec=spec, candidate=cand)
     print(f"Wrote {len(files)} files to {args.out}/")
     return 0
@@ -428,6 +438,11 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--steps", type=int, default=40, help="most agent steps per phase")
         s.add_argument("--json", action="store_true")
         s.add_argument(
+            "--platform",
+            choices=PLATFORMS,
+            help="override the spec: xheep (an X-HEEP SoC) or standalone (AXI4 IP, any host)",
+        )
+        s.add_argument(
             "-v",
             "--verbose",
             action="store_true",
@@ -448,6 +463,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--out", required=True)
     s.add_argument("--spec", help="spec, to include predictions in the datasheet")
     s.add_argument("--name", help="rename the design")
+    s.add_argument(
+        "--platform",
+        choices=PLATFORMS,
+        help="xheep (X-HEEP SoC) or standalone (the accelerator as AXI4 IP for any host)",
+    )
     s.set_defaults(func=cmd_generate)
 
     s = sub.add_parser("verify", help="lint, simulate, synthesize and X-HEEP-check a bundle")

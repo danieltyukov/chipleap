@@ -75,14 +75,38 @@ def accel_sv() -> str:
     return _source("rtl", "chipleap_accel.sv")
 
 
+def axi_sv() -> str:
+    return _source("rtl", "chipleap_accel_axi.sv")
+
+
 def testbench_cpp() -> str:
     return _source("tb", "tb_chipleap.cpp")
 
 
-def driver_header(accel: Accel, name: str, base: int = DEFAULT_REG_BASE) -> str:
+def testbench_axi_cpp() -> str:
+    return _source("tb", "tb_chipleap_axi.cpp")
+
+
+def driver_header(
+    accel: Accel, name: str, base: int = DEFAULT_REG_BASE, platform: str = "xheep"
+) -> str:
     p = rtl_params(accel)
+    if platform == "standalone":
+        host = "any host that maps its AXI4-Lite port into memory"
+        # The integrator places the register window, so there is no default to guess.
+        base_block = (
+            "#ifndef CHIPLEAP_BASE\n"
+            '#error "Define CHIPLEAP_BASE: the address the interconnect gives the AXI4-Lite '
+            'register port"\n'
+            "#endif"
+        )
+    else:
+        host = "X-HEEP firmware"
+        base_block = f"#ifndef CHIPLEAP_BASE\n#define CHIPLEAP_BASE {base:#010x}u\n#endif"
     return _source("sw", "chipleap_driver.h.tpl").format(
         name=name,
+        host=host,
+        base_block=base_block,
         dataflow_id=p.dataflow,
         rows=p.rows,
         cols=p.cols,
@@ -92,21 +116,39 @@ def driver_header(accel: Accel, name: str, base: int = DEFAULT_REG_BASE) -> str:
         wbuf_bytes=accel.wbuf_kib * 1024,
         double_buf=p.double_buf,
         acc_rows=p.acc_rows,
-        base=base,
     )
 
 
-def write_rtl(accel: Accel, name: str, out: Path, base: int = DEFAULT_REG_BASE) -> list[Path]:
-    """Write the accelerator, its parameter wrapper, driver and testbench into ``out``."""
+def write_rtl(
+    accel: Accel,
+    name: str,
+    out: Path,
+    base: int = DEFAULT_REG_BASE,
+    platform: str = "xheep",
+) -> list[Path]:
+    """Write the accelerator, its wrappers, driver and testbench into ``out``.
+
+    ``xheep`` adds the X-HEEP adapter (register interface and OBI); ``standalone`` adds
+    the AXI4 wrapper and its testbench instead, for any host.
+    """
     p = rtl_params(accel)
-    files = {
-        out / "rtl" / "chipleap_accel.sv": accel_sv(),
-        out / "rtl" / "chipleap_accel_top.sv": _top_wrapper(p, name),
-        out / "rtl" / "chipleap_accel_xheep.sv": _xheep_wrapper(p, name),
-        out / "rtl" / "chipleap_accel.core": _fusesoc_core(name),
-        out / "sw" / "chipleap_driver.h": driver_header(accel, name, base),
-        out / "tb" / "tb_chipleap.cpp": testbench_cpp(),
-    }
+    files: dict[Path, str] = {out / "rtl" / "chipleap_accel.sv": accel_sv()}
+    if platform == "standalone":
+        files |= {
+            out / "rtl" / "chipleap_accel_axi.sv": axi_sv(),
+            out / "rtl" / "chipleap_accel_axi_top.sv": _axi_top_wrapper(p, name),
+            out / "rtl" / "chipleap_accel.core": _fusesoc_core(name, platform),
+            out / "sw" / "chipleap_driver.h": driver_header(accel, name, base, platform),
+            out / "tb" / "tb_chipleap_axi.cpp": testbench_axi_cpp(),
+        }
+    else:
+        files |= {
+            out / "rtl" / "chipleap_accel_top.sv": _top_wrapper(p, name),
+            out / "rtl" / "chipleap_accel_xheep.sv": _xheep_wrapper(p, name),
+            out / "rtl" / "chipleap_accel.core": _fusesoc_core(name, platform),
+            out / "sw" / "chipleap_driver.h": driver_header(accel, name, base, platform),
+            out / "tb" / "tb_chipleap.cpp": testbench_cpp(),
+        }
     for path, text in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
@@ -228,23 +270,107 @@ endmodule
 """
 
 
-def _fusesoc_core(name: str) -> str:
+def _axi_top_wrapper(p: RtlParams, name: str, id_width: int = 1) -> str:
+    n = p.ports
+    return f"""// Parameterised instance of the ChipLeap accelerator with AXI4 interfaces, for
+// design "{name}". Read port 0 with the write channels is one full AXI4 master; the
+// other {n - 1} read port(s) are read-only AXI4 masters. AXI_ID_WIDTH is {id_width}; change it
+// here if the interconnect expects wider IDs (the wrapper drives ID 0).
+// SPDX-License-Identifier: MIT
+
+module chipleap_accel_axi_top (
+    input logic clk_i,
+    input logic rst_ni,
+    input logic [31:0] s_axil_awaddr_i,
+    input logic [2:0] s_axil_awprot_i,
+    input logic s_axil_awvalid_i,
+    output logic s_axil_awready_o,
+    input logic [31:0] s_axil_wdata_i,
+    input logic [3:0] s_axil_wstrb_i,
+    input logic s_axil_wvalid_i,
+    output logic s_axil_wready_o,
+    output logic [1:0] s_axil_bresp_o,
+    output logic s_axil_bvalid_o,
+    input logic s_axil_bready_i,
+    input logic [31:0] s_axil_araddr_i,
+    input logic [2:0] s_axil_arprot_i,
+    input logic s_axil_arvalid_i,
+    output logic s_axil_arready_o,
+    output logic [31:0] s_axil_rdata_o,
+    output logic [1:0] s_axil_rresp_o,
+    output logic s_axil_rvalid_o,
+    input logic s_axil_rready_i,
+    output logic [{n}-1:0][{id_width}-1:0] m_axi_arid_o,
+    output logic [{n}-1:0][31:0] m_axi_araddr_o,
+    output logic [{n}-1:0][7:0] m_axi_arlen_o,
+    output logic [{n}-1:0][2:0] m_axi_arsize_o,
+    output logic [{n}-1:0][1:0] m_axi_arburst_o,
+    output logic [{n}-1:0] m_axi_arlock_o,
+    output logic [{n}-1:0][3:0] m_axi_arcache_o,
+    output logic [{n}-1:0][2:0] m_axi_arprot_o,
+    output logic [{n}-1:0][3:0] m_axi_arqos_o,
+    output logic [{n}-1:0] m_axi_arvalid_o,
+    input logic [{n}-1:0] m_axi_arready_i,
+    input logic [{n}-1:0][{id_width}-1:0] m_axi_rid_i,
+    input logic [{n}-1:0][31:0] m_axi_rdata_i,
+    input logic [{n}-1:0][1:0] m_axi_rresp_i,
+    input logic [{n}-1:0] m_axi_rlast_i,
+    input logic [{n}-1:0] m_axi_rvalid_i,
+    output logic [{n}-1:0] m_axi_rready_o,
+    output logic [{id_width}-1:0] m_axi_awid_o,
+    output logic [31:0] m_axi_awaddr_o,
+    output logic [7:0] m_axi_awlen_o,
+    output logic [2:0] m_axi_awsize_o,
+    output logic [1:0] m_axi_awburst_o,
+    output logic m_axi_awlock_o,
+    output logic [3:0] m_axi_awcache_o,
+    output logic [2:0] m_axi_awprot_o,
+    output logic [3:0] m_axi_awqos_o,
+    output logic m_axi_awvalid_o,
+    input logic m_axi_awready_i,
+    output logic [31:0] m_axi_wdata_o,
+    output logic [3:0] m_axi_wstrb_o,
+    output logic m_axi_wlast_o,
+    output logic m_axi_wvalid_o,
+    input logic m_axi_wready_i,
+    input logic [{id_width}-1:0] m_axi_bid_i,
+    input logic [1:0] m_axi_bresp_i,
+    input logic m_axi_bvalid_i,
+    output logic m_axi_bready_o,
+    output logic irq_o
+);
+  chipleap_accel_axi #(
+{p.sv_overrides()},
+    .AXI_ID_WIDTH({id_width})
+  ) u_accel (.*);
+endmodule
+"""
+
+
+def _fusesoc_core(name: str, platform: str = "xheep") -> str:
+    if platform == "standalone":
+        files = ["chipleap_accel.sv", "chipleap_accel_axi.sv", "chipleap_accel_axi_top.sv"]
+        top = "chipleap_accel_axi_top"
+        what = "with AXI4 interfaces"
+    else:
+        files = ["chipleap_accel.sv", "chipleap_accel_top.sv", "chipleap_accel_xheep.sv"]
+        top = "chipleap_accel_top"
+        what = "for X-HEEP"
+    listing = "\n".join(f"      - {f}" for f in files)
     return f"""CAPI=2:
 # SPDX-License-Identifier: MIT
 name: "chipleap:accel:{name}:0.1.0"
-description: "ChipLeap matrix accelerator generated for {name}"
+description: "ChipLeap matrix accelerator generated for {name}, {what}"
 
 filesets:
   rtl:
     files:
-      - chipleap_accel.sv
-      - chipleap_accel_top.sv
-      - chipleap_accel_xheep.sv
+{listing}
     file_type: systemVerilogSource
 
 targets:
   default:
     filesets:
       - rtl
-    toplevel: chipleap_accel_top
+    toplevel: {top}
 """

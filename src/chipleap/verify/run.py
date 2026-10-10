@@ -46,12 +46,12 @@ def consistency(design: Design, bundle: Path) -> StepResult:
             f"{len(problems)} files disagree with design.yaml",
             {"problems": problems},
         )
-    return StepResult(
-        "consist",
-        "pass",
-        "design.yaml, RTL wrappers, driver, register map and X-HEEP configuration agree",
-        {},
+    agree = (
+        "design.yaml, AXI4 wrapper, driver and register map agree"
+        if design.platform == "standalone"
+        else "design.yaml, RTL wrappers, driver, register map and X-HEEP configuration agree"
     )
+    return StepResult("consist", "pass", agree, {})
 
 
 def lint(design: Design, bundle: Path) -> StepResult:
@@ -60,15 +60,18 @@ def lint(design: Design, bundle: Path) -> StepResult:
         return StepResult("lint", "skipped", "no accelerator in this design")
     if not tool.found:
         return StepResult("lint", "skipped", "Verilator is not installed")
-    src = bundle / "rtl" / "chipleap_accel.sv"
+    rtl = bundle / "rtl"
+    # The standalone platform's AXI4 wrapper is linted together with the core it wraps.
+    axi = design.platform == "standalone"
+    files = [rtl / "chipleap_accel.sv"] + ([rtl / "chipleap_accel_axi.sv"] if axi else [])
     cmd = [
         str(tool.path),
         "--lint-only",
         "-Wall",
         "--top-module",
-        "chipleap_accel",
+        "chipleap_accel_axi" if axi else "chipleap_accel",
         *rtl_params(design.accel).verilator_args(),
-        str(src),
+        *(str(f) for f in files),
     ]
     out = subprocess.run(cmd, capture_output=True, text=True, check=False)
     msgs = [ln for ln in (out.stdout + out.stderr).splitlines() if ln.startswith("%")]
@@ -86,7 +89,7 @@ def simulate(design: Design, cases: int = 0, seed: int = 0) -> StepResult:
         todo = sim.default_cases(design.accel, seed=seed)
         if cases:
             todo = todo[:cases]
-        results = sim.run(design.accel, todo)
+        results = sim.run(design.accel, todo, platform=design.platform)
     except sim.SimError as exc:
         return StepResult("sim", "fail", str(exc).splitlines()[0], {"error": str(exc)})
     fails = [r for r in results if not r.ok]
@@ -116,8 +119,9 @@ def simulate(design: Design, cases: int = 0, seed: int = 0) -> StepResult:
     }
     if fails:
         return StepResult("sim", "fail", f"{len(fails)} of {len(results)} cases wrong", data)
+    via = " through the AXI4 wrapper" if design.platform == "standalone" else ""
     msg = (
-        f"{len(results)} randomized jobs bit-exact; cycle model error "
+        f"{len(results)} randomized jobs bit-exact{via}; cycle model error "
         f"{(max(clean) if clean else 0) * 100:.1f}% max without stalls, "
         f"{(statistics.mean(stalled) if stalled else 0) * 100:.1f}% mean with random stalls"
     )
@@ -162,6 +166,8 @@ def _count(n: object, noun: str) -> str:
 
 
 def check_xheep(bundle: Path, design: Design, checkout: Path | None, fetch: bool) -> StepResult:
+    if design.platform != "xheep":
+        return StepResult("xheep", "skipped", "not an X-HEEP design (standalone AXI4 IP)")
     co = xheep.find_checkout(checkout)
     if co is None and fetch:
         try:

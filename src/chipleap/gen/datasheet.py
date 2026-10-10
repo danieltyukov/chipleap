@@ -115,6 +115,7 @@ def datasheet(
     mem = get_memory(d.ext_mem)
     ext_start, ext_len = ext_window(ext_bytes)
     code = code_section_bytes(d)
+    standalone = d.platform == "standalone"
     lines = [
         f"# {d.name}: design datasheet",
         "",
@@ -130,9 +131,16 @@ def datasheet(
             f"{metrics['energy_mj']:.3g} mJ/{unit}, {metrics['power_mw']:.3g} mW, "
             f"{metrics['area_mm2']:.3g} mm2 core area.",
         ]
+    if metrics and standalone:
+        lines += [
+            "",
+            f"Generated IP: the accelerator with AXI4 interfaces, {metrics['ip_area_mm2']:.3g} "
+            "mm2. Everything in the next table is the host system the model assumes around it, "
+            "not something ChipLeap generates; the prediction holds for a host like it.",
+        ]
     lines += [
         "",
-        "## System",
+        "## Host system assumed by the model" if standalone else "## System",
         "",
         "| Item | Value |",
         "|---|---|",
@@ -144,27 +152,44 @@ def datasheet(
         + (f", {d.il_banks} x {d.il_bank_kib} KiB interleaved" if d.il_banks else "")
         + " |",
         f"| External memory | {mem.name + (f' x {d.ext_channels}' if d.ext_channels > 1 else '') if mem else 'none'} |",
-        "",
-        "## Memory map",
-        "",
-        "| Region | Start | Size |",
-        "|---|---|---|",
-        f"| Code (SRAM) | 0x00000000 | {code:#x} |",
-        f"| Data (SRAM) | {code:#010x} | {d.banks * d.bank_kib * 1024 - code:#x} |",
     ]
-    if d.il_banks:
-        start = d.banks * d.bank_kib * 1024
-        lines.append(
-            f"| Interleaved data (SRAM) | {start:#010x} | {d.il_banks * d.il_bank_kib * 1024:#x} |"
-        )
-    lines += ["| Debug | 0x10000000 | 0x100000 |", "| Base peripherals | 0x20000000 | 0x100000 |"]
-    if d.accel:
-        lines.append(f"| Accelerator registers | {DEFAULT_REG_BASE:#010x} | 0x40 |")
-    lines += [
-        "| User peripherals | 0x30000000 | 0x100000 |",
-        "| SPI flash | 0x40000000 | 0x1000000 |",
-        f"| External slaves (memory) | {ext_start:#010x} | {ext_len:#x} |",
-    ]
+    if standalone:
+        lines += [
+            "",
+            "## Address map",
+            "",
+            "The IP decodes a 64-byte register window on its AXI4-Lite port, wherever the "
+            "host's interconnect places it (the driver's `CHIPLEAP_BASE`). Its AXI4 masters read "
+            "X and W and write Y at the addresses software programs, so they must reach the "
+            "memory that holds them.",
+        ]
+    if not standalone:
+        lines += [
+            "",
+            "## Memory map",
+            "",
+            "| Region | Start | Size |",
+            "|---|---|---|",
+            f"| Code (SRAM) | 0x00000000 | {code:#x} |",
+            f"| Data (SRAM) | {code:#010x} | {d.banks * d.bank_kib * 1024 - code:#x} |",
+        ]
+        if d.il_banks:
+            start = d.banks * d.bank_kib * 1024
+            lines.append(
+                f"| Interleaved data (SRAM) | {start:#010x} | "
+                f"{d.il_banks * d.il_bank_kib * 1024:#x} |"
+            )
+        lines += [
+            "| Debug | 0x10000000 | 0x100000 |",
+            "| Base peripherals | 0x20000000 | 0x100000 |",
+        ]
+        if d.accel:
+            lines.append(f"| Accelerator registers | {DEFAULT_REG_BASE:#010x} | 0x40 |")
+        lines += [
+            "| User peripherals | 0x30000000 | 0x100000 |",
+            "| SPI flash | 0x40000000 | 0x1000000 |",
+            f"| External slaves (memory) | {ext_start:#010x} | {ext_len:#x} |",
+        ]
     if d.accel:
         a = d.accel
         p = rtl_params(a)
@@ -179,9 +204,23 @@ def datasheet(
             "",
             "| Interface | Width | Purpose |",
             "|---|---|---|",
-            "| Register interface | 32 bit | Configuration and status (PULP reg_intf) |",
-            f"| OBI read masters | {a.ports} x 32 bit | Activations and weights, one word per port per cycle |",
-            "| OBI write master | 32 bit | Results |",
+            *(
+                [
+                    "| AXI4-Lite slave (`s_axil_*`) | 32 bit | Configuration and status |",
+                    f"| AXI4 read masters (`m_axi_ar*`, `m_axi_r*`) | {a.ports} x 32 bit | "
+                    "Activations and weights: single-beat INCR reads, ID 0, in order, up to 4 "
+                    "in flight per port |",
+                    "| AXI4 write master (`m_axi_aw*`, `m_axi_w*`, `m_axi_b*`) | 32 bit | "
+                    "Results: single-beat writes |",
+                ]
+                if standalone
+                else [
+                    "| Register interface | 32 bit | Configuration and status (PULP reg_intf) |",
+                    f"| OBI read masters | {a.ports} x 32 bit | Activations and weights, one "
+                    "word per port per cycle |",
+                    "| OBI write master | 32 bit | Results |",
+                ]
+            ),
             "| irq_o | 1 bit | Job done, when IRQ_EN is set |",
             "",
             f"Buffers: {a.abuf_kib} KiB activations and {a.wbuf_kib} KiB weights, "
@@ -215,12 +254,29 @@ def datasheet(
             "4. `chipleap_cycles()` returns the cycle count, which the model predicts exactly in",
             "   simulation without memory stalls.",
             "",
-            "### Integration into X-HEEP",
-            "",
-            "Instantiate `chipleap_accel_xheep` in your top level next to `core_v_mini_mcu`:",
-            "connect `reg_req_i`/`reg_rsp_o` to a slot of the external peripheral bus (the",
-            f"driver assumes base {DEFAULT_REG_BASE:#010x}), the read and write OBI masters to",
-            "`ext_xbar_master_req_i`/`ext_xbar_master_resp_o`, and `irq_o` to a free fast",
-            "interrupt. Generate the MCU with `make mcu-gen X_HEEP_CFG=xheep/<design>.py`.",
         ]
+        if standalone:
+            lines += [
+                "### Integration with any host",
+                "",
+                "Instantiate `chipleap_accel_axi_top` from `rtl/`. Connect `s_axil_*` to a",
+                "peripheral port of the host's interconnect and define `CHIPLEAP_BASE` to that",
+                "address before including the driver. Read port 0 with the write channels is one",
+                "full AXI4 master; further read ports are read-only masters. Give them a path to",
+                "the memory that holds the weights (on a Zynq, an HP or ACP port; on an Arm or",
+                "RISC-V SoC, a manager port of the main interconnect), and route `irq_o` to an",
+                "interrupt input. `AXI_ID_WIDTH` in the top file sets the ID width. The model",
+                "assumes each port can move one 32-bit word per cycle, which needs the",
+                "interconnect to accept back-to-back single-beat reads.",
+            ]
+        else:
+            lines += [
+                "### Integration into X-HEEP",
+                "",
+                "Instantiate `chipleap_accel_xheep` in your top level next to `core_v_mini_mcu`:",
+                "connect `reg_req_i`/`reg_rsp_o` to a slot of the external peripheral bus (the",
+                f"driver assumes base {DEFAULT_REG_BASE:#010x}), the read and write OBI masters",
+                "to `ext_xbar_master_req_i`/`ext_xbar_master_resp_o`, and `irq_o` to a free fast",
+                "interrupt. Generate the MCU with `make mcu-gen X_HEEP_CFG=xheep/<design>.py`.",
+            ]
     return "\n".join(lines) + "\n"

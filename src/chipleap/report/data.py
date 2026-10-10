@@ -8,7 +8,7 @@ from chipleap import __version__
 from chipleap.explore.engine import Candidate, ExploreResult, Step
 from chipleap.model.bounds import Requirements
 from chipleap.model.evaluate import Evaluation
-from chipleap.report.text import OP_HEADERS, headline, md_table, num, op_rows
+from chipleap.report.text import OP_HEADERS, headline, ip_note, md_table, num, op_rows
 
 
 def evaluation_dict(ev: Evaluation, ops: bool = True) -> dict[str, Any]:
@@ -128,6 +128,7 @@ def explore_markdown(r: ExploreResult) -> str:
         "",
         f"{headline(ev)}. Main bottleneck: {ev.bound}.",
         "",
+        *([ip_note(ev), ""] if ip_note(ev) else []),
         "Meets every target and budget in the spec."
         if b.assessment.meets
         else "\n".join(f"- {x}" for x in (*b.assessment.violations, *b.assessment.misses)),

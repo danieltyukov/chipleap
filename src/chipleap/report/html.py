@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from chipleap import __version__
 from chipleap.explore.engine import Candidate, ExploreResult
 from chipleap.model.evaluate import Evaluation
-from chipleap.report.text import headline, num
+from chipleap.report.text import headline, ip_note, num
 
 BOUND_COLORS = {
     "external memory": "var(--c-ext)",
@@ -339,6 +339,7 @@ def explore_html(r: ExploreResult, cloud: Sequence[Candidate] = ()) -> str:
 <p>Recommended design: <b>{esc(b.design.summary())}</b>, weights {esc(b.point.weights)}.
 <span class="{"" if b.assessment.meets else "bad"}">{esc(status)}</span></p>
 {_kpis(ev)}
+{f"<p>{esc(ip_note(ev))}</p>" if ip_note(ev) else ""}
 <h2>Pareto front</h2>
 <p>{len(r.pareto)} designs that no other explored design beats on throughput, energy and area at once,
 out of {r.evaluated} evaluated in {r.seconds:.1f} s. Marker size follows area. Grey dots are other feasible designs.</p>
