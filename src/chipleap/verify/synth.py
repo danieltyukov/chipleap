@@ -145,7 +145,8 @@ def synthesize(
             "IHP SG13G2 liberty not found: install the open PDK (for example with ciel or "
             "volare) or point CHIPLEAP_LIBERTY at sg13g2_stdcell_typ_1p20V_25C.lib"
         )
-    work = workdir or Path(tempfile.mkdtemp(prefix="chipleap-synth-"))
+    # Absolute, because Yosys runs inside the work directory and is given these paths.
+    work = (workdir or Path(tempfile.mkdtemp(prefix="chipleap-synth-"))).resolve()
     work.mkdir(parents=True, exist_ok=True)
     src = work / "chipleap_accel.sv"
     src.write_text(accel_sv())
