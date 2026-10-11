@@ -10,6 +10,7 @@ from chipleap.rtl import dft as D
 from chipleap.rtl.netlist import Chain, parse_netlist
 from chipleap.rtl.pnr import config
 from chipleap.rtl.project import load_project
+from chipleap.rtl.provenance import file_digest, record
 from chipleap.verify.tools import fault, gl_iverilog, openroad, quaigh
 
 SCAN = r"""
@@ -183,7 +184,8 @@ def test_pnr_routes_the_scan_netlist(counter_project, tmp_path, monkeypatch):
     p = load_project(counter_project)
     scanned = tmp_path / "counter.scan.v"
     scanned.write_text(SCAN)
-    fake = D.ScanResult(scanned, scanned, (), {}, "scan_enable_0", 2, (), {})
+    sealed = record(tmp_path, D.SCAN_MANIFEST, "scan", {scanned.name: file_digest(scanned)})
+    fake = D.ScanResult(scanned, scanned, (), {}, "scan_enable_0", 2, (), {}, None, sealed)
     monkeypatch.setattr(D, "insert_scan", lambda project, work: fake)
     (tmp_path / "pnr").mkdir()
     cfg = config(p, tmp_path / "pnr")

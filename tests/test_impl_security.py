@@ -18,11 +18,13 @@ from chipleap.rtl import openroad as orr
 from chipleap.rtl import power as P
 from chipleap.rtl import upf as U
 from chipleap.rtl.netlist import Chain
+from chipleap.rtl.pnr import config as pnr_config
 from chipleap.rtl.pnr import seal_routed
 from chipleap.rtl.project import EcoChange, load_project
-from chipleap.rtl.provenance import file_digest, seal
+from chipleap.rtl.provenance import file_digest, record, seal
 from chipleap.rtl.verify import run_step
 from chipleap.verify import launch, tools
+from chipleap.verify.pnr import PnrError
 
 # What a project might ship, hoping a step finds it on a relative or empty PATH entry.
 PLANTED = ("vvp", "iverilog", "fault", "nl2bench", "quaigh", "openroad", "yosys", "docker")
@@ -162,11 +164,7 @@ def test_scan_insertion_runs_nothing_from_the_project(hostile, monkeypatch):
 def test_atpg_and_chain_simulation_run_nothing_from_the_project(hostile):
     p = load_project(hostile.root)
     work = p.work_dir("dft")
-    netlist = work / "counter.scan.v"
-    netlist.write_text(SCAN_NETLIST)
-    scan = D.ScanResult(
-        netlist, netlist, (Chain("chain_0", "en_i", "q_o[1]", ("q0", "q1")),), {}, "", 2, (), {}
-    )
+    scan = recorded_scan(work)
     views = orr.pdk_views(p)
     with tools.excluding(p.root):
         with pytest.raises(D.DftError, match="fault cut failed"):
@@ -174,6 +172,16 @@ def test_atpg_and_chain_simulation_run_nothing_from_the_project(hostile):
         with pytest.raises(D.DftError, match="Icarus could not compile"):
             D.simulate_patterns(p, scan, [], views, work)
     assert not hostile.sentinel.exists()
+
+
+def recorded_scan(work, text=SCAN_NETLIST):
+    """A scan insertion's result as insert_scan leaves it: both netlists written and
+    recorded in the manifest beside them."""
+    netlist = work / "counter.scan.v"
+    netlist.write_text(text)
+    sealed = record(work, D.SCAN_MANIFEST, "scan", {netlist.name: file_digest(netlist)})
+    chain = Chain("chain_0", "en_i", "q_o[1]", ("q0", "q1"))
+    return D.ScanResult(netlist, netlist, (chain,), {}, "", 2, (), {}, None, sealed)
 
 
 def test_gate_level_tests_run_nothing_from_the_project(hostile):
@@ -368,3 +376,95 @@ def test_sections_are_quoted_into_upf(tmp_path):
     (tmp_path / "project.yaml").write_text(text)
     with pytest.raises(ValueError, match="upf"):
         load_project(tmp_path)
+
+
+# DFT reuses its own netlists only as it recorded them.
+
+
+@pytest.fixture
+def scan_tools(tmp_path, monkeypatch, ihp_pdk):
+    """Fault, Quaigh and Icarus stand-ins that note each run in ``ran`` and fail."""
+    ran = tmp_path / "ran"
+    bin_dir = tmp_path / "tools"
+    for name in ("fault", "nl2bench", "quaigh", "iverilog", "vvp"):
+        # A version probe is not a run.
+        body = 'case "$1" in -V) echo "Icarus Verilog version 13.0"; exit 0;; --version | --help) exit 0;; esac\n'
+        executable(bin_dir / name, body + f'echo {name} >> "{ran}"\nexit 1\n')
+    for var, name in (
+        ("CHIPLEAP_FAULT", "fault"),
+        ("CHIPLEAP_QUAIGH", "quaigh"),
+        ("CHIPLEAP_GL_IVERILOG", "iverilog"),
+    ):
+        monkeypatch.setenv(var, str(bin_dir / name))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]))
+    return ran
+
+
+@pytest.mark.parametrize(
+    "tamper, why",
+    [
+        # The scan netlist swapped after it was recorded.
+        (
+            lambda scan: scan.netlist.write_text(SCAN_NETLIST.replace("q_o[0]", "planted")),
+            "changed after ChipLeap recorded it",
+        ),
+        # The manifest deleted, as by a repository that ships its own build/dft.
+        (lambda scan: (scan.netlist.parent / D.SCAN_MANIFEST).unlink(), "is missing"),
+        # The manifest of another insertion (here, of the swapped netlist) put in its place.
+        (
+            lambda scan: recorded_scan(scan.netlist.parent, SCAN_NETLIST + "// other\n"),
+            "made again",
+        ),
+        # The manifest edited to vouch for the swapped netlist.
+        (
+            lambda scan: (scan.netlist.parent / D.SCAN_MANIFEST).write_text(
+                (scan.netlist.parent / D.SCAN_MANIFEST)
+                .read_text()
+                .replace(scan.sealed.files["counter.scan.v"], "0" * 64)
+            ),
+            "does not verify",
+        ),
+    ],
+    ids=["swapped-netlist", "deleted-manifest", "stale-manifest", "edited-manifest"],
+)
+def test_dft_uses_its_netlists_only_as_recorded(
+    counter_project, scan_tools, monkeypatch, tamper, why
+):
+    proj = counter_project / "project.yaml"
+    proj.write_text(proj.read_text() + "dft: {}\n")
+    p = load_project(counter_project)
+    work = p.work_dir("dft")
+    scan = recorded_scan(work)
+    tamper(scan)
+    views = orr.pdk_views(p)
+    monkeypatch.setattr(D, "insert_scan", lambda project, work: scan)
+    (counter_project / "build/pnr").mkdir()
+    for use in (
+        lambda: D.run_atpg(p, scan, views, work),
+        lambda: D.simulate_patterns(p, scan, [], views, work),
+        # Place and route copies the scan netlist for LibreLane through the same manifest.
+        lambda: pnr_config(p, counter_project / "build/pnr"),
+    ):
+        with pytest.raises((D.DftError, PnrError), match=why):
+            use()
+    assert not scan_tools.exists(), "a tool ran on a netlist that was not checked"
+    assert not (counter_project / "build/pnr/src/counter.scan.v").exists()
+
+
+def test_scan_insertion_records_the_bytes_it_used(counter_project, ihp_pdk, monkeypatch):
+    """The synthesized netlist is read for its ports from the copy OpenROAD gets, checked
+    against the hash taken while copying; a copy changed in between is refused."""
+    netlist = counter_project / "synth.v"
+    netlist.write_text(SCAN_NETLIST)
+    monkeypatch.setattr(D, "synthesize", lambda project, work: SimpleNamespace(netlist=netlist))
+    real_stage = orr.Job.stage
+
+    def stage_then_swap(self, src, name=None, *, sealed=None):
+        rel = real_stage(self, src, name, sealed=sealed)
+        if src == netlist:
+            (self.dir / rel).write_text(SCAN_NETLIST + "// swapped\n")
+        return rel
+
+    monkeypatch.setattr(orr.Job, "stage", stage_then_swap)
+    with pytest.raises(D.DftError, match="changed after ChipLeap copied it"):
+        D.insert_scan(load_project(counter_project))

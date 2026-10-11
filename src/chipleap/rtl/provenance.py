@@ -173,10 +173,19 @@ def seal(
             files[rel] = file_digest(path)
             if len(files) > MAX_FILES:
                 raise SealError(f"more than {MAX_FILES} files to record in {root}")
-    body = {"format": FORMAT, "what": what, "files": files, "extra": extra or {}}
+    return record(root, name, what, files, extra)
+
+
+def record(
+    root: Path, name: str, what: str, files: dict[str, str], extra: dict[str, Any] | None = None
+) -> Sealed:
+    """Write the manifest ``root/name`` for ``files`` (paths relative to ``root``) with the
+    SHA-256 the caller took of the very bytes it wrote or read, rather than reading the
+    files again."""
+    body = {"format": FORMAT, "what": what, "files": dict(files), "extra": extra or {}}
     mac = _mac(body)
     builddir.write_text(root, name, json.dumps({**body, "mac": mac}, indent=1, sort_keys=True))
-    return Sealed(root.resolve(), what, files, extra or {}, mac)
+    return Sealed(root.resolve(), what, dict(files), extra or {}, mac)
 
 
 def unseal(root: Path, name: str) -> None:
@@ -287,16 +296,16 @@ class Sealed:
         except ValueError as exc:
             raise SealError(f"{Path(path).name} is not valid JSON: {exc}") from None
 
-    def copy(self, path: str | Path, dest: Path) -> None:
+    def copy(self, path: str | Path, dest: Path) -> str:
         """Copy a recorded file to ``dest``, checking the hash of the bytes copied."""
         real, digest = self.locate(path)
-        copy_file(real, dest, digest)
+        return copy_file(real, dest, digest)
 
 
-def copy_file(src: Path, dest: Path, digest: str | None = None, limit: int = READ_LIMIT) -> None:
+def copy_file(src: Path, dest: Path, digest: str | None = None, limit: int = READ_LIMIT) -> str:
     """Copy the regular file ``src`` to the new file ``dest``, never following a symlink at
-    either end; with ``digest``, the copy is removed and refused unless its SHA-256 is
-    that."""
+    either end, and return the SHA-256 of the bytes copied; with ``digest``, the copy is
+    removed and refused unless it is that."""
     h = hashlib.sha256()
     fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC, 0o644)
     try:
@@ -309,3 +318,4 @@ def copy_file(src: Path, dest: Path, digest: str | None = None, limit: int = REA
     except BaseException:
         dest.unlink()
         raise
+    return h.hexdigest()

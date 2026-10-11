@@ -26,7 +26,7 @@ from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.openroad import ECO_MANIFEST, PNR_MANIFEST, RUN_TAG
 from chipleap.rtl.project import Project
-from chipleap.rtl.provenance import Sealed, copy_file, seal, unseal
+from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
 from chipleap.verify.pnr import PnrError, PnrResult, parse, run_librelane, signoff
 from chipleap.verify.result import StepResult
@@ -128,15 +128,16 @@ def _scan_netlist(project: Project, workdir: Path, src: Path) -> dict[str, Any]:
     """The configuration's sources for a project with scan: OpenROAD's scan-inserted
     netlist. LibreLane's synthesis keeps its cells and buffers its assignments; Verilator
     cannot lint a netlist without the cell models, so lint is off."""
-    from chipleap.rtl.dft import DftError, insert_scan
+    from chipleap.rtl.dft import DftError, insert_scan, scan_sealed
     from chipleap.rtl.netlist import NetlistError
     from chipleap.rtl.openroad import OpenroadError
 
     try:
         scan = insert_scan(project, workdir / "scan")
-    except (DftError, OpenroadError, NetlistError) as exc:
+        # Through the insertion's manifest: LibreLane routes the bytes that were checked.
+        scan_sealed(scan).copy(scan.netlist, src / scan.netlist.name)
+    except (DftError, OpenroadError, NetlistError, SealError) as exc:
         raise PnrError(f"scan insertion (dft.insert) failed: {exc}") from exc
-    copy_file(scan.netlist, src / scan.netlist.name)
     return {"VERILOG_FILES": [f"dir::src/{scan.netlist.name}"], "RUN_LINTER": False}
 
 

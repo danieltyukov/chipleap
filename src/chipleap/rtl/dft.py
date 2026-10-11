@@ -22,6 +22,8 @@ are not plain), and the pattern data as files the testbench reads with ``$readme
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -53,11 +55,12 @@ from chipleap.rtl.openroad import (
     pdk_views,
     read_json,
     read_limited,
+    read_limited_bytes,
     routed_run,
     routed_views,
 )
 from chipleap.rtl.project import DftConfig, Project
-from chipleap.rtl.provenance import Sealed, SealError, copy_file
+from chipleap.rtl.provenance import Sealed, SealError, copy_file, open_sealed, record, unseal
 from chipleap.rtl.synth import SynthError, synthesize
 from chipleap.verify import launch
 from chipleap.verify.result import StepResult
@@ -95,6 +98,8 @@ FAULT_SCL = {
 }
 SCAN_PORT_RE = re.compile(r"^scan_(enable|in|out)_\d+$")
 FAULT_TIMEOUT_S = 3600.0
+# The manifest of a scan insertion's two netlists, in its work directory.
+SCAN_MANIFEST = "chipleap-scan.manifest.json"
 MISMATCHES_SHOWN = 20
 
 
@@ -105,13 +110,17 @@ class DftError(RuntimeError):
 @dataclass(frozen=True)
 class ScanResult:
     netlist: Path  # the scan-inserted netlist
-    prescan: Path  # the synthesized netlist it came from
+    prescan: Path  # the synthesized netlist it came from, as OpenROAD was given it
     chains: tuple[Chain, ...]
     clocks: dict[str, str]  # chain -> clock port
     scan_enable: str
     flops: int
     unscannable: tuple[str, ...]
     report: dict[str, list[str]]  # OpenROAD's plan: chain -> cells
+    # The scan netlist's top module, parsed from the bytes that were hashed and written.
+    top: Module | None = None
+    # The manifest (SCAN_MANIFEST) recording both netlists; later uses copy them through it.
+    sealed: Sealed | None = None
 
 
 @dataclass
@@ -123,6 +132,8 @@ class AtpgResult:
     generator_coverage_pct: float | None
     vectors: Path  # Fault's test vector file
     version: str = ""
+    # The vector file as read once, for the patterns: the file is not read again.
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -267,30 +278,51 @@ def chains_of(
 
 
 def insert_scan(project: Project, workdir: Path | None = None) -> ScanResult:
-    """Synthesize the project and insert its scan chains."""
+    """Synthesize the project and insert its scan chains. Both netlists are recorded in
+    ``SCAN_MANIFEST`` with the hashes of the bytes OpenROAD was given and the bytes it
+    wrote, and every later use (ATPG, the chain simulation, place and route) copies them
+    through it."""
     cfg = project.dft or DftConfig()
     work = project.work_dir(workdir or "dft")
+    # First, so a run that stops halfway leaves no manifest for the netlists it replaces.
+    unseal(work, SCAN_MANIFEST)
     views = pdk_views(project)
     try:
         synth = synthesize(project, work / "synth")
     except SynthError as exc:
         raise DftError(f"synthesis failed: {exc}") from exc
-    pre = read_netlist([synth.netlist]).top(project.top)
+    job = Job(work, "scan")
+    files = views.stage_all(job)
+    netlist = job.stage(synth.netlist)
+    # From here on the synthesized netlist is the staged copy: its hash was taken of the
+    # bytes copied, and it is read only with that hash checked.
+    prescan = job.dir / netlist
+    pre_digest = job.digests[netlist]
+    pre_text = _read_checked(prescan, pre_digest)
+    pre = parse_netlist(pre_text).top(project.top)
     taken = [p for p in pre.ports if SCAN_PORT_RE.match(p)]
     if taken:
         raise DftError(
             f"the design already has a port named {taken[0]}, which scan insertion would add"
         )
-    job = Job(work, "scan")
-    files = views.stage_all(job)
-    netlist = job.stage(synth.netlist)
     log, code = job.run(scan_script(project, files, netlist, cfg))
     written = job.output(f"{project.top}.scan.v")
     if code != 0 or not written.is_file():
         raise failure("OpenROAD scan insertion", log, code)
-    # Beside the step's other results, where place and route and the report find it.
-    out = builddir.write_text(work, written.name, read_limited(written))
-    top = read_netlist([out]).top(project.top)
+    # Read once: these bytes are hashed, written beside the step's other results (where
+    # place and route and the report find them) and parsed.
+    data = read_limited_bytes(written)
+    out = builddir.write_bytes(work, written.name, data)
+    top = parse_netlist(data.decode(errors="replace")).top(project.top)
+    sealed = record(
+        work,
+        SCAN_MANIFEST,
+        "scan",
+        {
+            prescan.relative_to(work).as_posix(): pre_digest,
+            out.name: hashlib.sha256(data).hexdigest(),
+        },
+    )
     chains, clocks = chains_of(top, [c.port for c in project.clocks])
     flops = [i for i in top.instances if FLOP_CELL_RE.match(i.cell)]
     on_chain = {c for ch in chains for c in ch.cells}
@@ -304,14 +336,40 @@ def insert_scan(project: Project, workdir: Path | None = None) -> ScanResult:
             )
     return ScanResult(
         netlist=out,
-        prescan=synth.netlist,
+        prescan=prescan,
         chains=tuple(chains),
         clocks=clocks,
         scan_enable=enables[0] if enables else "",
         flops=len(flops),
         unscannable=unscannable,
         report=plan,
+        top=top,
+        sealed=sealed,
     )
+
+
+def _read_checked(path: Path, digest: str) -> str:
+    """The text of ``path``, read once and refused unless those bytes hash to ``digest``."""
+    data = read_limited_bytes(path)
+    if not hmac.compare_digest(hashlib.sha256(data).hexdigest(), digest):
+        raise DftError(f"{path.name} changed after ChipLeap copied it")
+    return data.decode(errors="replace")
+
+
+def scan_sealed(scan: ScanResult) -> Sealed:
+    """The manifest of ``scan``'s netlists as it is on disk now: it must be there, verify,
+    and be the one this insertion wrote (not an earlier or later run's)."""
+    if scan.sealed is None:
+        raise DftError("the scan netlists were not recorded by ChipLeap")
+    try:
+        sealed = open_sealed(scan.sealed.root, SCAN_MANIFEST, "scan")
+    except SealError as exc:
+        raise DftError(f"the scan netlists cannot be used: {exc}") from None
+    if not hmac.compare_digest(sealed.mac, scan.sealed.mac):
+        raise DftError(
+            "the scan netlists were made again after this step inserted them; run it again"
+        )
+    return sealed
 
 
 # ATPG with Fault.
@@ -371,9 +429,10 @@ def run_atpg(project: Project, scan: ScanResult, views: PdkViews, workdir: Path)
     if not gl_iverilog().found:
         raise OpenroadUnavailable("Fault simulates with Icarus 13 or newer, not installed")
     assert tool.path is not None and conv.path is not None
+    sealed = scan_sealed(scan)
     work = builddir.work_dir(workdir, "atpg", empty=True)
     top = project.top
-    _stage(scan.prescan, work, f"{top}.nl.v")
+    _stage(scan.prescan, work, f"{top}.nl.v", sealed)
     builddir.write_text(work, "scl.yml", yaml.safe_dump(FAULT_SCL, sort_keys=False))
     env = fault_env(tool.path)
     bypass = _bypass(project)
@@ -463,7 +522,9 @@ def parse_atpg(log: str, coverage_yaml: str, vectors: Path, version: str = "") -
         pct = float(m.group(1)) if m else pct
     gen = re.findall(r"detecting \d+/\d+ faults \(([\d.]+)% coverage\)", log)
     data = read_json(vectors)
-    patterns = len(data.get("coverageList", [])) if isinstance(data, dict) else 0
+    if not isinstance(data, dict):
+        raise DftError("Fault's vectors file is not a mapping")
+    patterns = len(data.get("coverageList", []))
     return AtpgResult(
         coverage_pct=round(pct, 2),
         faults=faults,
@@ -472,6 +533,7 @@ def parse_atpg(log: str, coverage_yaml: str, vectors: Path, version: str = "") -
         generator_coverage_pct=float(gen[-1]) if gen else None,
         vectors=vectors,
         version=version,
+        data=data,
     )
 
 
@@ -908,14 +970,19 @@ def simulate_patterns(
     sealed: Sealed | None = None,
 ) -> SimResult:
     """Run the flush pattern and ``patterns`` through the chains of ``netlist`` (the scan
-    netlist by default) on Icarus 13 with the cell models. A routed netlist comes with its
-    run's manifest, ``sealed``, and is simulated only as it was recorded."""
+    netlist by default) on Icarus 13 with the cell models. Either netlist is simulated
+    only as it was recorded: the scan netlist through the insertion's manifest, a routed
+    one through its run's, ``sealed``. The copy is checked as it is made, and the testbench
+    is built from the copy."""
     tool = gl_iverilog()
     vvp = gl_vvp(tool)
     if not tool.found or tool.path is None or vvp is None:
         raise OpenroadUnavailable("Icarus 13 or newer is not installed (CHIPLEAP_GL_IVERILOG)")
+    if netlist is not None and sealed is None:
+        raise DftError(f"{netlist.name} was not recorded by ChipLeap")
+    source = sealed if netlist is not None else scan_sealed(scan)
     work = builddir.work_dir(workdir, name, empty=True)
-    dut = _stage(netlist or scan.netlist, work, sealed=sealed)
+    dut = _stage(netlist or scan.netlist, work, sealed=source)
     models = [_stage(m, work) for m in views.models]
     top = read_netlist([work / dut]).top(project.top)
     clocks = [c.port for c in project.clocks]
@@ -1034,11 +1101,9 @@ def run_dft(
         except OpenroadUnavailable as exc:
             notes.append(f"ATPG skipped: {exc}")
         if atpg is not None:
-            top = read_netlist([scan.netlist]).top(project.top)
-            data = read_json(atpg.vectors)
-            if not isinstance(data, dict):
-                raise DftError("Fault's vectors file is not a mapping")
-            patterns = map_patterns(data, scan, top)
+            # The netlist and the vectors as they were read and checked, not read again.
+            top = scan.top or read_netlist([scan.netlist]).top(project.top)
+            patterns = map_patterns(atpg.data, scan, top)
             builddir.write_text(
                 work, "patterns.json", json.dumps(patterns_json(scan, patterns, atpg), indent=1)
             )

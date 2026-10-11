@@ -59,6 +59,11 @@ class OpenroadUnavailable(OpenroadError):
 def read_limited(path: Path, limit: int = TEXT_LIMIT) -> str:
     """The text of a tool's output file, refused when it is larger than ``limit`` or is
     not a regular file (a symlink is never followed)."""
+    return read_limited_bytes(path, limit).decode(errors="replace")
+
+
+def read_limited_bytes(path: Path, limit: int = TEXT_LIMIT) -> bytes:
+    """``read_limited`` as bytes, for a caller that hashes what it then uses."""
     try:
         fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
     except OSError as exc:
@@ -69,7 +74,10 @@ def read_limited(path: Path, limit: int = TEXT_LIMIT) -> str:
             raise OpenroadError(f"{path.name} is not a regular file")
         if st.st_size > limit:
             raise OpenroadError(f"{path.name} is larger than {limit >> 20} MB")
-        return fh.read(limit).decode(errors="replace")
+        data = fh.read(limit + 1)
+        if len(data) > limit:  # it grew after fstat
+            raise OpenroadError(f"{path.name} is larger than {limit >> 20} MB")
+        return data
 
 
 def read_json(path: Path, limit: int = TEXT_LIMIT) -> Any:
@@ -92,6 +100,8 @@ class Job:
         self.name = name
         self.dir = builddir.work_dir(workdir, name, empty=True)
         self.inputs = builddir.work_dir(self.dir, "inputs")
+        # The SHA-256 of each staged copy (by its path in the job), taken of the bytes copied.
+        self.digests: dict[str, str] = {}
 
     def stage(self, src: Path, name: str | None = None, *, sealed: Sealed | None = None) -> str:
         """Copy ``src`` into ``inputs/`` and return its path relative to the job; with
@@ -106,14 +116,16 @@ class Job:
             raise OpenroadError(f"{dest_name} is staged twice")
         try:
             if sealed is not None:
-                sealed.copy(src, dest)
+                digest = sealed.copy(src, dest)
             else:
-                copy_file(src.resolve(), dest)
+                digest = copy_file(src.resolve(), dest)
         except SealError as exc:
             raise OpenroadError(str(exc)) from None
         except OSError as exc:
             raise OpenroadError(f"{src.name} cannot be staged: {exc.strerror}") from None
-        return dest.relative_to(self.dir).as_posix()
+        rel = dest.relative_to(self.dir).as_posix()
+        self.digests[rel] = digest
+        return rel
 
     def output(self, name: str) -> Path:
         """A file OpenROAD wrote in the job directory (it may not exist)."""
