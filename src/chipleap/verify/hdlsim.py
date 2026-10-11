@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import subprocess
 from dataclasses import dataclass
 from importlib import resources
@@ -27,6 +26,7 @@ from chipleap.hw.design import Accel
 from chipleap.model.accel import plan_tiles
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.sim import Case, CaseResult, SimError, cache_dir, predicted_cycles
+from chipleap.verify.tools import clean_env, which
 
 
 @dataclass(frozen=True)
@@ -150,7 +150,7 @@ def tb_config(accel: Accel) -> str:
 
 def stim_generator(accel: Accel) -> Path:
     """Build stim_gen for ``accel`` with this machine's C++ compiler (cached by source)."""
-    cxx = shutil.which("c++") or shutil.which("g++") or shutil.which("clang++")
+    cxx = which("c++") or which("g++") or which("clang++")
     if cxx is None:
         raise SimError("a C++ compiler is needed to write the stimulus (c++, g++ or clang++)")
     header = driver_header(accel, "sim")
@@ -165,6 +165,7 @@ def stim_generator(accel: Accel) -> Path:
     out = subprocess.run(
         [cxx, "-O2", "-std=c++14", f"-I{root}", "stim_gen.cpp", "-o", "stim_gen"],
         cwd=root,
+        env=clean_env(),
         capture_output=True,
         text=True,
         check=False,
@@ -179,7 +180,12 @@ def prepare(accel: Accel, cases: list[Case], workdir: Path) -> None:
     workdir.mkdir(parents=True, exist_ok=True)
     stdin = "\n".join(c.line() for c in cases) + "\n"
     out = subprocess.run(
-        [str(stim_generator(accel))], input=stdin, capture_output=True, text=True, check=False
+        [str(stim_generator(accel))],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=clean_env(),
     )
     if out.returncode != 0:
         raise SimError(f"stimulus generator failed: {out.stderr[-1000:]}")
@@ -237,7 +243,7 @@ def run(
 ) -> list[CaseResult]:
     """Simulate ``cases`` with ``simulator``, here or on ``remote``."""
     sim = get_simulator(simulator)
-    if remote is None and shutil.which(sim.binary) is None:
+    if remote is None and which(sim.binary) is None:
         raise SimError(
             f"{sim.vendor} {sim.name} ({sim.binary}) is not on the path; run it on a server "
             "with --remote HOST"

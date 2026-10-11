@@ -17,21 +17,21 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 from chipleap.rtl.diag import PARSERS, Diagnostic, relative
-from chipleap.rtl.project import Project
+from chipleap.rtl.project import Project, runs_tools
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import Tool, iverilog, verilator
+from chipleap.verify.tools import Tool, clean_env, iverilog, locate, verilator, which
 
 OPEN = ("icarus", "verilator")
 COMMERCIAL = {"xcelium": "xrun", "vcs": "vcs", "questa": "vsim"}
@@ -98,21 +98,25 @@ def _version_tuple(text: str) -> tuple[int, ...]:
 
 def cocotb_python() -> str | None:
     """A Python that can import cocotb's runner."""
-    env = os.environ.get("CHIPLEAP_COCOTB_PYTHON")
-    if env:
-        return env
+    if os.environ.get("CHIPLEAP_COCOTB_PYTHON"):
+        return locate("python3", "CHIPLEAP_COCOTB_PYTHON")
     if importlib.util.find_spec("cocotb_tools") is not None:
         return sys.executable
-    cfg = shutil.which("cocotb-config")
+    cfg = which("cocotb-config")
     if cfg:
         try:
             out = subprocess.run(
-                [cfg, "--python-bin"], capture_output=True, text=True, timeout=30, check=False
+                [cfg, "--python-bin"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+                env=clean_env(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
         py = out.stdout.strip()
-        return py if out.returncode == 0 and py else None
+        return which(py) if out.returncode == 0 and py else None
     return None
 
 
@@ -124,6 +128,7 @@ def cocotb_version(python: str) -> str:
             text=True,
             timeout=60,
             check=False,
+            env=clean_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -307,27 +312,29 @@ def _tail(path: Path, lines: int = 15) -> str:
     return "\n".join(path.read_text(errors="replace").strip().splitlines()[-lines:])
 
 
-def _env(simulator: str) -> dict[str, str]:
-    env = dict(os.environ)
+def _env(simulator: str, exclude: Iterable[Path] = ()) -> dict[str, str]:
+    """The runner's environment. cocotb finds the simulator on PATH, so the one ChipLeap
+    chose goes first, and the rest of PATH is only absolute directories outside the
+    project (``clean_env``): the runner works in the build directory."""
+    tool = _open_tool(simulator) if simulator in OPEN else None
+    first = [Path(tool.path).parent] if tool is not None and tool.path else []
+    env = clean_env(first, exclude)
     # Under pytest, cocotb's runner changes where it writes results and raises on a
     # failing test instead of returning; the runner must behave the same everywhere.
     env.pop("PYTEST_CURRENT_TEST", None)
     env["COCOTB_ANSI_OUTPUT"] = "0"
-    if simulator in OPEN:
-        tool = _open_tool(simulator)
-        if tool.path:
-            # cocotb finds the simulator on PATH; put the one ChipLeap chose first.
-            env["PATH"] = str(Path(tool.path).parent) + os.pathsep + env.get("PATH", "")
     return env
 
 
-def _run_local(python: str, workdir: Path, simulator: str, timeout: float) -> None:
+def _run_local(
+    python: str, workdir: Path, simulator: str, timeout: float, exclude: Iterable[Path] = ()
+) -> None:
     log = workdir / "runner.log"
     with log.open("w") as fh:
         proc = subprocess.Popen(
             [python, RUNNER, "manifest.json"],
             cwd=workdir,
-            env=_env(simulator),
+            env=_env(simulator, [*exclude, workdir]),
             stdout=fh,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -341,6 +348,7 @@ def _run_local(python: str, workdir: Path, simulator: str, timeout: float) -> No
             raise
 
 
+@runs_tools
 def run_tests(
     project: Project,
     simulator: str = "",
@@ -363,7 +371,7 @@ def run_tests(
     key, why = choose(project, simulator, version or "2")
     if why:
         raise SimUnavailable(why)
-    if key in COMMERCIAL and remote is None and shutil.which(COMMERCIAL[key]) is None:
+    if key in COMMERCIAL and remote is None and which(COMMERCIAL[key]) is None:
         raise SimUnavailable(
             f"{NAMES[key]} ({COMMERCIAL[key]}) is not on the path; run it on a server with "
             "--remote HOST"
@@ -385,7 +393,7 @@ def run_tests(
     (work / RUNNER).write_text(resources.files("chipleap.rtl").joinpath(RUNNER).read_text())
     timeout = float(os.environ.get("CHIPLEAP_SIM_TIMEOUT", "1800"))
     if remote is None:
-        _run_local(python, work, key, timeout)
+        _run_local(python, work, key, timeout, project.roots)
     else:
         try:
             run_steps(
@@ -467,6 +475,7 @@ def summarize(run: SimRun) -> tuple[str, str]:
     return "pass", f"{who}: {n - skipped} of {n} cocotb tests pass{note}"
 
 
+@runs_tools
 def simulate(
     project: Project, simulator: str = "", remote: Remote | None = None, test_filter: str = ""
 ) -> StepResult:

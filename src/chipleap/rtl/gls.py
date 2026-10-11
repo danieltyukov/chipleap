@@ -34,7 +34,7 @@ from typing import Any
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.pnr import routed_run
-from chipleap.rtl.project import Project
+from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.sim import SimError, SimUnavailable, run_tests, sim_data, summarize
 from chipleap.rtl.synth import SynthError, liberty_for, synthesize
 from chipleap.verify.result import StepResult
@@ -156,6 +156,7 @@ def prepare(project: Project, workdir: Path) -> tuple[Project, tuple[str, ...], 
     return gate, args, used
 
 
+@runs_tools
 def gls(project: Project, test_filter: str = "") -> StepResult:
     """The gate-level step: the project's tests on its netlist."""
     if project.tests.dir is None:

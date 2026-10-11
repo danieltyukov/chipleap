@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from chipleap.rtl import builddir
-from chipleap.rtl.project import Project, ProjectError
+from chipleap.rtl.project import Project, ProjectError, runs_tools
 from chipleap.rtl.sim import SimError, SimUnavailable, choose, run_tests, summarize
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
@@ -238,6 +238,7 @@ def gaps(
     }
 
 
+@runs_tools
 def coverage(project: Project, remote: Remote | None = None) -> StepResult:
     """Run the tests on Verilator with coverage and summarise line and toggle coverage."""
     if project.tests.dir is None:

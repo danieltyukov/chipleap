@@ -25,7 +25,7 @@ from pathlib import Path
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.hw.tech import FLOP_OVERHEAD_NS
-from chipleap.verify.tools import ihp_liberty, yosys
+from chipleap.verify.tools import clean_env, ihp_liberty, locate, yosys
 
 SMALL_WORDS = (8, 16)
 # Mapping and gate sizing aim at this delay at the typical corner. Routing and the slow
@@ -56,12 +56,16 @@ class SynthResult:
 
 
 def _sv2v(src: Path, out: Path) -> None:
-    exe = os.environ.get("CHIPLEAP_SV2V") or shutil.which("sv2v")
+    exe = locate("sv2v", "CHIPLEAP_SV2V")
     if exe is None:
         shutil.copy2(src, out)
         return
     res = subprocess.run(
-        [exe, "--exclude=Always", str(src)], capture_output=True, text=True, check=False
+        [exe, "--exclude=Always", str(src)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=clean_env(),
     )
     if res.returncode != 0:
         raise SynthError(f"sv2v failed: {res.stderr.strip()[-800:]}")
@@ -113,6 +117,7 @@ def _run(
         stderr=subprocess.STDOUT,
         text=True,
         cwd=workdir,
+        env=clean_env(exclude=[workdir]),
         start_new_session=True,
     )
     try:

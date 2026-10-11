@@ -29,20 +29,22 @@ and a ``_parse_<name>`` function, a field on ``Project`` with a default, an entr
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import re
 import shlex
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Concatenate, ParamSpec, TypeVar
 
 import yaml
 
 from chipleap.hw.design import SPEC_NAME_MAX, is_safe_name, safe_name
 from chipleap.hw.tech import TECHNOLOGIES
 from chipleap.rtl import builddir
+from chipleap.verify.tools import untrusted
 
 PROJECT_FILE = "project.yaml"
 SCHEMA = "project/v1"
@@ -398,6 +400,26 @@ class Project:
 
 
 # Parsing. Each helper takes the key path it reports in errors.
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def runs_tools(
+    fn: Callable[Concatenate[Project, _P], _R],
+) -> Callable[Concatenate[Project, _P], _R]:
+    """For a step on the project in its first argument: while it runs, no tool is found
+    in the project's directory, and no program it starts gets a PATH entry into it
+    (``chipleap.verify.tools.untrusted``). A repository can ship executables named like
+    the tools, and an absolute PATH entry can lead into it as a relative one does."""
+
+    @functools.wraps(fn)
+    def step(project: Project, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with untrusted(project.root):
+            return fn(project, *args, **kwargs)
+
+    return step
 
 
 def _mapping(value: Any, where: str, keys: Iterable[str]) -> dict[str, Any]:

@@ -31,7 +31,7 @@ from chipleap.hw.tech import FLOP_OVERHEAD_NS, get_tech
 from chipleap.rtl import confine
 from chipleap.rtl import quote as q
 from chipleap.rtl.diag import Diagnostic, parse_sv2v, parse_yosys, relative
-from chipleap.rtl.project import Project
+from chipleap.rtl.project import Project, runs_tools
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import ihp_liberty, sv2v, yosys
 
@@ -170,6 +170,7 @@ def _script(
     )
 
 
+@runs_tools
 def synthesize(project: Project, workdir: Path | None = None) -> RtlSynthResult:
     tool = yosys()
     if not tool.found or tool.path is None:
@@ -273,6 +274,7 @@ def synth_data(project: Project, r: RtlSynthResult) -> dict[str, Any]:
     }
 
 
+@runs_tools
 def synth(project: Project) -> StepResult:
     """The synthesis step: area, cells and an Fmax estimate on the project's technology."""
     try:

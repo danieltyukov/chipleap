@@ -32,7 +32,7 @@ from typing import Any
 
 from chipleap.rtl import builddir, confine
 from chipleap.rtl import quote as q
-from chipleap.rtl.project import FormalCheck, Project, ProjectError, active_low_by_name
+from chipleap.rtl.project import FormalCheck, Project, ProjectError, active_low_by_name, runs_tools
 from chipleap.rtl.vcd import read_trace
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import sby, solver_path
@@ -185,11 +185,12 @@ def parse_log(text: str, project: Project, cwd: Path, name: str) -> dict[str, An
 def _run(cmd: list[str], cwd: Path, project: Project, workdir: Path) -> str:
     """Run SymbiYosys confined; returns its output. A timeout is an error in the output."""
     timeout = float(os.environ.get("CHIPLEAP_FORMAL_TIMEOUT", "1800"))
-    with confine.confined(cmd, [*project.roots, workdir]) as (argv, env):
+    reads = [*project.roots, workdir]
+    with confine.confined(cmd, reads) as (argv, env):
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
-            env={**env, "PATH": solver_path(cmd[0])},
+            env={**env, "PATH": solver_path(cmd[0], exclude=reads)},
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -222,6 +223,7 @@ def _with_traces(result: dict[str, Any], project: Project) -> dict[str, Any]:
     return result
 
 
+@runs_tools
 def run_check(
     project: Project,
     check: FormalCheck,
@@ -258,6 +260,7 @@ def _sources(project: Project) -> list[Path]:
     return [*project.sources, *extra]
 
 
+@runs_tools
 def run_sby_file(project: Project, path: Path, workdir: Path) -> dict[str, Any]:
     """A .sby file of the project's, as it is, from its own directory (its [files] are
     relative to it). The work directory is ChipLeap's."""
@@ -322,6 +325,7 @@ def _describe(r: dict[str, Any]) -> str:
     return f"{label}: every assertion holds"
 
 
+@runs_tools
 def formal(project: Project, only: str = "") -> StepResult:
     """The formal step: every check passes, or the first failure with its counterexample."""
     if project.formal is None:
@@ -489,6 +493,7 @@ def _block(
     return "\n".join(lines)
 
 
+@runs_tools
 def check_assertions(
     project: Project,
     module: str,

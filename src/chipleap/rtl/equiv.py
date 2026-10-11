@@ -47,7 +47,7 @@ from typing import Any
 from chipleap.rtl import builddir, confine
 from chipleap.rtl import quote as q
 from chipleap.rtl.pnr import routed_run
-from chipleap.rtl.project import Project, ProjectError
+from chipleap.rtl.project import Project, ProjectError, runs_tools
 from chipleap.rtl.synth import (
     SynthError,
     front,
@@ -289,7 +289,7 @@ def _run(cmd: list[str], cwd: Path, reads: list[Path]) -> str:
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
-            env={**env, "PATH": solver_path(cmd[0])},
+            env={**env, "PATH": solver_path(cmd[0], exclude=reads)},
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -319,6 +319,7 @@ def _yosys(script: str, workdir: Path, name: str, reads: list[Path]) -> str:
     return (log.read_text(errors="replace") if log.is_file() else "") + out
 
 
+@runs_tools
 def check_pair(project: Project, pair: str, *, gate_netlist: Path | None = None) -> dict[str, Any]:
     """Prove one pair equal, and check what the proof leaves from reset."""
     engine = project.equivalence.engine
@@ -403,6 +404,7 @@ def _describe(r: dict[str, Any]) -> str:
     )
 
 
+@runs_tools
 def equiv(project: Project, only: str = "") -> StepResult:
     """The equivalence step: every pair proved or equal from reset, else the first that
     differs, with its counterexample."""

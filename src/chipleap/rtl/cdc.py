@@ -58,7 +58,7 @@ from typing import Any
 
 from chipleap.rtl import builddir, confine
 from chipleap.rtl import quote as q
-from chipleap.rtl.project import Project
+from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.synth import prepare_verilog, read_commands
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import yosys
@@ -864,6 +864,7 @@ def _match(pattern: str, name: str) -> bool:
     return re.fullmatch(rx, name) is not None
 
 
+@runs_tools
 def netlist(project: Project, workdir: Path) -> dict[str, Any]:
     """The project's top module as Yosys elaborates it, mapped to single-bit gates."""
     tool = yosys()
@@ -913,6 +914,7 @@ def netlist(project: Project, workdir: Path) -> dict[str, Any]:
     return dict(data["modules"][project.top])
 
 
+@runs_tools
 def check(project: Project) -> dict[str, Any]:
     """Domains, crossings, accepted structures and findings, as data."""
     workdir = project.work_dir("cdc", empty=True)
@@ -941,6 +943,7 @@ def check(project: Project) -> dict[str, Any]:
     }
 
 
+@runs_tools
 def cdc(project: Project) -> StepResult:
     """The CDC and RDC step: fails on any error that is not waived."""
     if not yosys().found:

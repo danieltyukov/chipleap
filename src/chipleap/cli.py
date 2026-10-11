@@ -432,9 +432,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from chipleap.verify.xheep import find_checkout
 
     rows = [[t.name, "yes" if t.found else "no", t.version, t.purpose] for t in all_tools()]
-    import shutil
+    from chipleap.verify.tools import which
 
-    sv2v = shutil.which("sv2v")
+    sv2v = which("sv2v")
     rows.append(["sv2v", "yes" if sv2v else "no", "", "SystemVerilog front end for older Yosys"])
     lib = ihp_liberty()
     rows.append(

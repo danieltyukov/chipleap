@@ -29,7 +29,6 @@ import contextlib
 import ctypes
 import json
 import os
-import shutil
 import stat
 import struct
 import sys
@@ -103,13 +102,16 @@ def enabled() -> bool:
     return os.environ.get(ENV, "1") != "0" and abi() > 0
 
 
-def installation(tool: str | Path, _depth: int = 0) -> list[Path]:
+def installation(tool: str | Path, path: str | None = None, _depth: int = 0) -> list[Path]:
     """What a tool reads of its own besides the system: its directory, and its prefix when
     that is a directory of its own. In a shared prefix (the home directory, ~/.local) only
     the tool's own share, lib and libexec directories, so a tool in ~/.local/bin does not
     open the rest of ~/.local; a tool directly in the home directory gets only itself. A
-    script (sby and eqy are Python) also gets the installation of its interpreter."""
-    exe = Path(shutil.which(tool) or tool).resolve()
+    script (sby and eqy are Python) also gets the installation of its interpreter, found
+    on ``path`` (the PATH the tool runs with) as the script's ``env`` line finds it."""
+    from chipleap.verify.tools import which  # not at the top: this is also the launcher
+
+    exe = Path(which(str(tool), path=path) or tool).resolve()
     home = Path.home().resolve()
     if home.is_relative_to(exe.parent):
         out = [exe]
@@ -119,15 +121,17 @@ def installation(tool: str | Path, _depth: int = 0) -> list[Path]:
             out = [exe.parent, *(prefix / d / exe.name for d in ("share", "lib", "libexec"))]
         else:
             out = [exe.parent, prefix]
-    interpreter = _interpreter(exe)
+    interpreter = _interpreter(exe, path)
     if interpreter is not None and _depth < 2:
-        out += installation(interpreter, _depth + 1)
+        out += installation(interpreter, path, _depth + 1)
     return out
 
 
-def _interpreter(exe: Path) -> str | None:
+def _interpreter(exe: Path, path: str | None = None) -> str | None:
     """The program a script's first line names (``#!/usr/bin/env python3`` gives the
-    python3 on the path), or None for a binary."""
+    python3 on ``path``), or None for a binary."""
+    from chipleap.verify.tools import which
+
     try:
         with open(exe, "rb") as fh:
             head = fh.read(256)
@@ -140,7 +144,7 @@ def _interpreter(exe: Path) -> str | None:
         return None
     if Path(words[0]).name == "env":
         names = [w for w in words[1:] if not w.startswith("-")]
-        return shutil.which(names[0]) if names else None
+        return which(names[0], path=path) if names else None
     return words[0]
 
 
@@ -150,16 +154,21 @@ def confined(
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """The command to run ``cmd`` with, and its environment, so that it can read only
     ``read`` (files or directories), the system and its own installation. TMPDIR points
-    at a private directory it may use, removed afterwards. Unchanged when Landlock is not
-    available, CHIPLEAP_CONFINE is 0 or the tool is a container wrapper."""
-    from chipleap.verify.tools import is_wrapper  # not at the top: this is also the launcher
+    at a private directory it may use, removed afterwards. The command is unchanged when
+    Landlock is not available, CHIPLEAP_CONFINE is 0 or the tool is a container wrapper.
+    Either way the environment's PATH has no relative entry and nothing inside ``read``
+    (``chipleap.verify.tools.clean_env``): the tool runs in the project or its build
+    directory, and what it starts by name must not come from there."""
+    from chipleap.verify.tools import clean_env, is_wrapper
 
-    env = dict(os.environ)
+    read = list(read)
+    env = clean_env(exclude=read)
     if not enabled() or is_wrapper(cmd[0]):
         yield list(cmd), env
         return
     with tempfile.TemporaryDirectory(prefix="chipleap-tool-") as tmp:
-        paths = [*SYSTEM, tmp, *map(str, read), *map(str, installation(cmd[0]))]
+        tool_files = installation(cmd[0], env["PATH"])
+        paths = [*SYSTEM, tmp, *map(str, read), *map(str, tool_files)]
         if env.get("VERILATOR_ROOT"):
             paths.append(env["VERILATOR_ROOT"])
         rules = sorted({p for p in paths if os.path.exists(p)})

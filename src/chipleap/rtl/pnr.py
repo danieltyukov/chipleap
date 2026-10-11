@@ -25,7 +25,7 @@ from typing import Any
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.builddir import BuildDirError
-from chipleap.rtl.project import Project
+from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
 from chipleap.verify.pnr import PnrError, PnrResult, parse, run_librelane, signoff
 from chipleap.verify.result import StepResult
@@ -193,6 +193,7 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
     return cfg
 
 
+@runs_tools
 def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     if project.tech != "ihp-sg13g2":
         raise PnrError(f"LibreLane runs on IHP SG13G2, not {project.tech}; use --pnr-tool innovus")
@@ -236,6 +237,7 @@ def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
     }
 
 
+@runs_tools
 def pnr(project: Project) -> StepResult:
     """The place-and-route step: passes when setup is met at the slow corner, hold at every
     corner, and DRC, LVS and antenna checks are clean."""
