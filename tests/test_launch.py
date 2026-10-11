@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+import anyio
 import pytest
 
 from chipleap.hw import Accel, Design
@@ -376,6 +377,55 @@ def test_stop_all_stops_runs_in_other_threads(tmp_path, docker):
     (rec,) = _own(state)
     assert isinstance(raised[0], launch.Cancelled) and raised[0].containers == [rec["id"]]
     assert _survivors([rec["pid"], rec["client"]]) == []
+
+
+def test_cancelling_an_mcp_call_stops_its_run_and_no_other(tmp_path, docker):
+    from chipleap.mcp_server import _stops_its_runs
+
+    _, state, _ = docker
+    tool = _script(tmp_path / "librelane", WRAPPER)
+    mine, other = _dir(tmp_path / "mine"), _dir(tmp_path / "other")
+
+    def verify(out_dir: str) -> dict:
+        launch.run([str(tool)], Path(out_dir), Path(out_dir) / "librelane.log", timeout=600)
+        return {}
+
+    def in_dir(d: Path) -> list[dict]:
+        return [r for r in _own(state) if Path(r["workdir"]) == d.resolve()]
+
+    # Another run, started outside the MCP call, goes on.
+    raised: list[BaseException] = []
+
+    def go() -> None:
+        try:
+            verify(str(other))
+        except BaseException as exc:
+            raised.append(exc)
+
+    t = threading.Thread(target=go)
+    t.start()
+    _wait_for(lambda: bool(in_dir(other)))
+
+    async def call_then_cancel() -> None:
+        with anyio.CancelScope() as scope:
+
+            async def cancel_once_up() -> None:
+                while not in_dir(mine):
+                    await anyio.sleep(0.05)
+                scope.cancel()
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(cancel_once_up)
+                await _stops_its_runs(verify)(out_dir=str(mine))
+
+    anyio.run(call_then_cancel)
+    (rec,) = in_dir(mine)
+    assert _survivors([rec["pid"], rec["client"]], within=30) == []
+    (theirs,) = in_dir(other)
+    assert _alive(theirs["pid"])
+    launch.stop_all(wait=60)
+    t.join(5)
+    assert isinstance(raised[0], launch.Cancelled) and _survivors([theirs["pid"]]) == []
 
 
 SERVER = """
