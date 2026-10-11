@@ -68,6 +68,29 @@ class PnrResult:
         return self._fmax(self.setup_slack_ns)
 
 
+def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[str, Any]:
+    """LibreLane settings every ChipLeap layout shares: the generated accelerator's and an
+    RTL project's (``chipleap.rtl.pnr``)."""
+    return {
+        # Design rules are checked with IHP's own KLayout deck. Magic's IHP rules are a
+        # second, single-threaded opinion that takes longer than the rest of the flow.
+        "RUN_MAGIC_DRC": False,
+        # Let the detailed router fix antenna violations with diodes, as a shuttle requires.
+        "DRT_ANTENNA_REPAIR_ITERS": 5,
+        # Optimise where the design is signed off: gate sizing, buffering, the clock tree and
+        # the repair after global routing all work against the slow corner (1.08 V, 125 C),
+        # instead of LibreLane's default of the typical one. Hold is repaired at every corner.
+        "DEFAULT_CORNER": "nom_slow_1p08V_125C",
+        "RUN_POST_GRT_RESIZER_TIMING": True,
+        # Detailed routing took 0.7 to 1.6 ns of slack away from what global routing
+        # estimated, and nothing repairs timing after it, so the repairs aim well above zero.
+        "PL_RESIZER_SETUP_SLACK_MARGIN": place_margin_ns,
+        "GRT_RESIZER_SETUP_SLACK_MARGIN": route_margin_ns,
+        # IHP's KLayout rule deck is the slowest step; let it use several cores.
+        "KLAYOUT_DRC_THREADS": max(1, min(8, (os.cpu_count() or 2) // 2)),
+    }
+
+
 def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
     """The LibreLane configuration for the accelerator at ``clock_mhz``."""
     p = rtl_params(accel)
@@ -90,22 +113,7 @@ def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
         "CLOCK_PERIOD": round(1000.0 / clock_mhz, 3),
         "FP_CORE_UTIL": 45,
         "PL_TARGET_DENSITY_PCT": 55,
-        # Design rules are checked with IHP's own KLayout deck. Magic's IHP rules are a
-        # second, single-threaded opinion that takes longer than the rest of the flow.
-        "RUN_MAGIC_DRC": False,
-        # Let the detailed router fix antenna violations with diodes, as a shuttle requires.
-        "DRT_ANTENNA_REPAIR_ITERS": 5,
-        # Optimise where the design is signed off: gate sizing, buffering, the clock tree and
-        # the repair after global routing all work against the slow corner (1.08 V, 125 C),
-        # instead of LibreLane's default of the typical one. Hold is repaired at every corner.
-        "DEFAULT_CORNER": "nom_slow_1p08V_125C",
-        "RUN_POST_GRT_RESIZER_TIMING": True,
-        # Detailed routing took 0.7 to 1.6 ns of slack away from what global routing
-        # estimated, and nothing repairs timing after it, so the repairs aim well above zero.
-        "PL_RESIZER_SETUP_SLACK_MARGIN": 0.8,
-        "GRT_RESIZER_SETUP_SLACK_MARGIN": 1.6,
-        # IHP's KLayout rule deck is the slowest step; let it use several cores.
-        "KLAYOUT_DRC_THREADS": max(1, min(8, (os.cpu_count() or 2) // 2)),
+        **signoff(),
     }
 
 
@@ -161,17 +169,15 @@ def parse(metrics: dict[str, Any], clock_mhz: float, gds: Path | None) -> PnrRes
     )
 
 
-def place_and_route(accel: Accel, clock_mhz: float, workdir: Path) -> PnrResult:
+def run_librelane(
+    workdir: Path, cfg: dict[str, Any], tag: str = "chipleap"
+) -> tuple[dict[str, Any], Path | None]:
+    """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
+    Returns the final metrics and the GDS."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
-    workdir.mkdir(parents=True, exist_ok=True)
-    src = workdir / "src"
-    src.mkdir(exist_ok=True)
-    (src / "chipleap_accel.sv").write_text(accel_sv())
-    _sv2v(src / "chipleap_accel.sv", src / "chipleap_accel.v")
-    (workdir / "config.json").write_text(json.dumps(config(accel, clock_mhz), indent=2))
-    tag = "chipleap"
+    (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
     cmd = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", tag, "--overwrite", "config.json"]
     log = workdir / "librelane.log"
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
@@ -186,7 +192,19 @@ def place_and_route(accel: Accel, clock_mhz: float, workdir: Path) -> PnrResult:
     if not metrics_file.is_file():
         raise PnrError(f"LibreLane did not finish (exit {code}):\n{_tail(log)}")
     gds = next(iter(sorted((final / "gds").glob("*.gds"))), None)
-    return parse(json.loads(metrics_file.read_text()), clock_mhz, gds)
+    return json.loads(metrics_file.read_text()), gds
+
+
+def place_and_route(accel: Accel, clock_mhz: float, workdir: Path) -> PnrResult:
+    if not librelane().found:
+        raise PnrError("LibreLane is not installed")
+    workdir.mkdir(parents=True, exist_ok=True)
+    src = workdir / "src"
+    src.mkdir(exist_ok=True)
+    (src / "chipleap_accel.sv").write_text(accel_sv())
+    _sv2v(src / "chipleap_accel.sv", src / "chipleap_accel.v")
+    metrics, gds = run_librelane(workdir, config(accel, clock_mhz))
+    return parse(metrics, clock_mhz, gds)
 
 
 def _timed_out(exc: launch.TimedOut, log: Path) -> str:
