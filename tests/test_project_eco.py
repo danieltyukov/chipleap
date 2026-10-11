@@ -3,6 +3,8 @@ the timing paths to choose changes from; a real ECO when LibreLane runs are allo
 
 import json
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +12,8 @@ from chipleap.rtl import eco as E
 from chipleap.rtl.pnr import SDC_NAME, seal_routed
 from chipleap.rtl.project import EcoChange, load_project
 from chipleap.verify.tools import librelane, openroad
+
+FIXTURE = Path(__file__).parent / "fixtures" / "eco_timing"
 
 STEPS = [
     "Yosys.Synthesis",
@@ -344,3 +348,23 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     ]:
         with pytest.raises(E.EcoError, match=why):
             E._settings(p, bad, sealed)
+
+
+@pytest.mark.pnr
+@pytest.mark.skipif(
+    not (librelane().found and openroad().found), reason="needs LibreLane, OpenROAD"
+)
+@pytest.mark.skipif(not os.environ.get("CHIPLEAP_RUN_PNR"), reason="set CHIPLEAP_RUN_PNR=1")
+def test_a_repair_closes_timing_the_routed_run_missed(tmp_path):
+    """The fixture is routed without timing repair and misses setup at the slow corner;
+    its eco section's repair: setup closes it and signs off clean."""
+    from chipleap.rtl.pnr import pnr
+
+    root = tmp_path / "eco_timing"
+    shutil.copytree(FIXTURE, root, ignore=shutil.ignore_patterns("build"))
+    p = load_project(root)
+    routed_result = pnr(p)
+    assert routed_result.data["setup_slack_ns"] < 0, routed_result.summary
+    r = E.eco(p)
+    assert r.status == "pass", r.summary
+    assert r.data["after"]["setup_slack_ns"] >= 0 and r.data["after"]["lvs_errors"] == 0

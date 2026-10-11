@@ -2,7 +2,9 @@
 signals between them; a real run when OpenROAD, Yosys and the PDK are installed."""
 
 import os
+import shutil
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -139,3 +141,20 @@ def test_placement_check_findings():
     log = "[WARNING DPL-0004] Placed in rows check failed (19).\nCHIPLEAP-UPF check_placement DPL-0033\n"
     assert U.placement_check(log) == "Placed in rows check failed (19)."
     assert U.placement_check("[WARNING DPL-0004] x\nCHIPLEAP-UPF end\n") == ""
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "eco_timing"
+
+
+@pytest.mark.skipif(
+    not (openroad().found and yosys().found and ihp_liberty()), reason="needs OpenROAD, Yosys, PDK"
+)
+@pytest.mark.skipif(not os.environ.get("CHIPLEAP_RUN_IMPL"), reason="set CHIPLEAP_RUN_IMPL=1")
+def test_two_voltages_need_level_shifters(tmp_path):
+    """The fixture's multiplier runs at 1.08 V beside a 1.2 V top: OpenROAD places both
+    domains, and the step fails for the level shifters IHP's library does not have."""
+    root = tmp_path / "eco_timing"
+    shutil.copytree(FIXTURE, root, ignore=shutil.ignore_patterns("build"))
+    r = U.upf(load_project(root))
+    assert r.status == "fail" and "level shifter" in r.summary, r.summary
+    assert any(c["needs_level_shifters"] for c in r.data["crossings"])
