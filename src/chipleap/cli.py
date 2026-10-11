@@ -542,6 +542,17 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _terminal_safe(text: str) -> str:
+    """Neutralise control and bidirectional characters, keeping newlines and tabs:
+    macro check messages quote names and tokens from files someone else wrote."""
+    bidi = {"\u061c", "\u200e", "\u200f", *(chr(c) for c in range(0x202A, 0x202F))}
+    bidi |= {chr(c) for c in range(0x2066, 0x206A)}
+    return "".join(
+        c if c in "\n\t" or not (ord(c) < 0x20 or 0x7F <= ord(c) < 0xA0 or c in bidi) else "\ufffd"
+        for c in text
+    )
+
+
 def cmd_macro(args: argparse.Namespace) -> int:
     from chipleap.macro import check_package, schema_text
 
@@ -556,7 +567,7 @@ def cmd_macro(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(report.to_dict())
     else:
-        print(report.to_text())
+        print(_terminal_safe(report.to_text()))
     failed = not report.passed or (args.strict and report.warnings > 0)
     return 1 if failed else 0
 

@@ -505,6 +505,16 @@ def test_cli_macro_check(capsys):
     assert json.loads(capsys.readouterr().out)["title"].startswith("Macro package manifest")
 
 
+def test_cli_macro_output_is_terminal_safe(tmp_path, capsys):
+    pkg = tmp_path / "tiny_counter.macro"
+    shutil.copytree(FIXTURES / "tiny_counter.macro", pkg)
+    lef = pkg / "tiny_counter.lef"
+    lef.write_text(lef.read_text().replace("DIRECTION OUTPUT", "DIRECTION \x1b[2J\u202eOUT", 1))
+    assert main(["macro", "check", str(pkg)]) == 1
+    out = capsys.readouterr().out
+    assert "lef.direction" in out and "\x1b" not in out and "\u202e" not in out
+
+
 def test_mcp_check_macro_tool(tmp_path):
     out = mcp_server.check_macro(str(FIXTURES / "broken" / "lef-missing-pin" / "tiny_ota.macro"))
     assert out["pass"] is False and out["findings"][0]["rule"] == "lef.missing_pin"
