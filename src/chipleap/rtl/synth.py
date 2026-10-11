@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from chipleap.hw.tech import FLOP_OVERHEAD_NS, get_tech
+from chipleap.rtl import quote as q
 from chipleap.rtl.diag import Diagnostic, parse_sv2v, parse_yosys, relative
 from chipleap.rtl.project import Project
 from chipleap.verify.result import StepResult
@@ -98,45 +101,47 @@ def prepare_verilog(project: Project, workdir: Path) -> tuple[list[Path], bool]:
 def _script(
     project: Project, files: list[Path], raw: bool, liberty: Path, workdir: Path, target_ns: float
 ) -> str:
-    d = f"-D {target_ns * 1000:.0f}"
-    # Map, buffer, size and time in one ABC call (see chipleap.verify.synth for why).
-    abc = workdir / "map.abc"
-    abc.write_text(
-        "\n".join(
-            [
-                "strash",
-                "dretime",
-                f"map {d}",
-                "topo",
-                "stime -p",
-                "buffer -p",
-                f"upsize {d}",
-                f"dnsize {d}",
-                "topo",
-                "stime -p",
-            ]
-        )
-        + "\n"
+    """The Yosys script. Every path and value from the project is a quoted word
+    (``chipleap.rtl.quote``), so none can start a command or end a word early."""
+    d = f"{target_ns * 1000:.0f}"
+    # Map, buffer, size and time in one ABC call (see chipleap.verify.synth for why). The
+    # script goes inline ("+" form, commas for spaces): ABC cannot read a script file
+    # whose path holds a space, and a project directory may.
+    abc = "+" + ";".join(
+        [
+            "strash",
+            "dretime",
+            f"map,-D,{d}",
+            "topo",
+            "stime,-p",
+            "buffer,-p",
+            f"upsize,-D,{d}",
+            f"dnsize,-D,{d}",
+            "topo",
+            "stime,-p",
+        ]
     )
-    opts = ""
+    opts: list[str] = []
     if raw:
-        opts = " ".join(
-            [*(f"-I{i}" for i in project.include_dirs), *(f"-D{x}" for x in project.define_args())]
-        )
-    reads = [f"read_verilog -sv {opts} {f}".replace("  ", " ") for f in files]
-    chparam = " ".join(f"-set {k} {v}" for k, v in project.parameters.items())
+        opts += [f"-I {q.yosys(i)}" for i in project.include_dirs]
+        opts += [f"-D {q.yosys(x)}" for x in project.define_args()]
+    reads = [" ".join(["read_verilog -sv", *opts, q.yosys(f)]) for f in files]
+    chparam = " ".join(f"-set {q.plain(k)} {int(v)}" for k, v in project.parameters.items())
+    top = q.plain(project.top)
+    lib = q.yosys(liberty)
     netlist = workdir / f"{project.top}.synth.v"
     return "\n".join(
         [
             *reads,
-            *([f"chparam {chparam} {project.top}"] if chparam else []),
-            f"hierarchy -check -top {project.top}",
-            f"synth -top {project.top} -flatten",
-            f"dfflibmap -liberty {liberty}",
-            f"abc -liberty {liberty} -script {abc}",
+            *([f"chparam {chparam} {top}"] if chparam else []),
+            f"hierarchy -check -top {top}",
+            f"synth -top {top} -flatten",
+            f"dfflibmap -liberty {lib}",
+            # ChipLeap's own text, no project data: ";" inside quotes stays in the word.
+            f'abc -liberty {lib} -script "{abc}"',
             "opt_clean",
-            f"stat -liberty {liberty}",
-            f"write_verilog -noattr {netlist}",
+            f"stat -liberty {lib}",
+            f"write_verilog -noattr {q.yosys(netlist)}",
         ]
     )
 
@@ -159,21 +164,32 @@ def synthesize(project: Project, workdir: Path | None = None) -> RtlSynthResult:
     clk = project.fastest_clock
     target = (clk.period_ns if clk else DEFAULT_PERIOD_NS) / 2
     script = work / "synth.ys"
-    script.write_text(_script(project, files, raw, lib.resolve(), work, target) + "\n")
-    proc = subprocess.Popen(
-        [str(tool.path), "-s", str(script)],
-        cwd=project.root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        out, _ = proc.communicate(timeout=float(os.environ.get("CHIPLEAP_SYNTH_TIMEOUT", "1800")))
-    except BaseException:
-        os.killpg(proc.pid, signal.SIGKILL)  # ABC is a child of Yosys
-        proc.wait()
-        raise
+    with tempfile.TemporaryDirectory(prefix="chipleap-lib-") as tmp:
+        liberty = lib.resolve()
+        if " " in str(liberty):
+            # ABC cannot read a liberty file whose path holds a space; give it a copy.
+            liberty = Path(tmp) / "cells.lib"
+            shutil.copy2(lib, liberty)
+        try:
+            script.write_text(_script(project, files, raw, liberty, work, target) + "\n")
+        except q.QuoteError as exc:
+            raise SynthError(f"cannot write the Yosys script: {exc}") from exc
+        proc = subprocess.Popen(
+            [str(tool.path), "-s", str(script)],
+            cwd=project.root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            out, _ = proc.communicate(
+                timeout=float(os.environ.get("CHIPLEAP_SYNTH_TIMEOUT", "1800"))
+            )
+        except BaseException:
+            os.killpg(proc.pid, signal.SIGKILL)  # ABC is a child of Yosys
+            proc.wait()
+            raise
     log = out or ""
     (work / "yosys.log").write_text(log)
     diags = relative(parse_yosys(log), project.root)

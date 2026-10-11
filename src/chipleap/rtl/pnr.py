@@ -23,6 +23,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from chipleap.rtl import quote as q
 from chipleap.rtl.project import Project
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
 from chipleap.verify.pnr import PnrError, PnrResult, parse, run_librelane, signoff
@@ -42,14 +43,15 @@ def sdc(project: Project) -> str:
     ]
     if clocks:
         lines += [
-            f"create_clock [get_ports {c.port}] -name {c.port} -period {c.period_ns:g}"
+            f"create_clock [get_ports {q.plain(c.port)}] -name {q.plain(c.port)} "
+            f"-period {float(c.period_ns):g}"
             for c in clocks
         ]
-        ref, period = clocks[0].port, clocks[0].period_ns
+        ref, period = q.plain(clocks[0].port), float(clocks[0].period_ns)
         lines += [
             "set clock_inputs {}",
             "set data_inputs [all_inputs]",
-            f"foreach name {{{' '.join(c.port for c in clocks)}}} {{",
+            f"foreach name {q.tcl_list(c.port for c in clocks)} {{",
             "    set port [get_ports $name]",
             "    lappend clock_inputs $port",
             "    set i [lsearch $data_inputs $port]",
@@ -109,12 +111,7 @@ def _copy_into(project: Project, path: Path, src: Path) -> str:
             f"{path} is outside the project directory; install sv2v, or move it in, so the "
             "flow can copy it into its run directory"
         )
-    dest = src / rel
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_dir():
-        shutil.copytree(path, dest, dirs_exist_ok=True)
-    else:
-        shutil.copy2(path, dest)
+    project.stage(path, src / rel)
     return f"dir::src/{rel}"
 
 

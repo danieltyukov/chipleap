@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from chipleap.rtl.diag import PARSERS, Diagnostic, relative
-from chipleap.rtl.project import SKIP_DIRS, Project
+from chipleap.rtl.project import Project
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import Tool, iverilog, verilator
@@ -175,15 +175,6 @@ def _staged(project: Project, path: Path, area: str) -> str:
     return f"{area}/{rel}"
 
 
-def _copy(src: Path, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if src.is_dir():
-        # Build directories a test directory may hold (cocotb's sim_build) stay behind.
-        shutil.copytree(src, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*SKIP_DIRS))
-    else:
-        shutil.copy2(src, dest)
-
-
 def manifest(
     project: Project,
     simulator: str,
@@ -202,7 +193,9 @@ def manifest(
     def name(p: Path) -> str:
         if stage:
             dest = _staged(project, p, "src")
-            _copy(p, workdir / dest)
+            # Only the project's own files travel (Project.stage), never what a symlink
+            # or a build directory under them points at.
+            project.stage(p, workdir / dest)
             return dest
         return str(p)
 

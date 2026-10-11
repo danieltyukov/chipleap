@@ -8,7 +8,9 @@ reason when its tool is missing. Results go to ``PROJECT/build/verify``: ``verif
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+import subprocess
+import xml.etree.ElementTree as ET
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from chipleap.rtl import commercial
@@ -44,6 +46,17 @@ def steps_from(text: str | Sequence[str]) -> tuple[str, ...]:
     return tuple(items) or DEFAULT_STEPS
 
 
+# What a step can raise when a tool misbehaves: a timeout, a missing program, a truncated
+# results file, a server that went away. The step fails; the others and the reports run.
+STEP_ERRORS = (
+    subprocess.SubprocessError,
+    OSError,
+    ET.ParseError,
+    ValueError,  # JSONDecodeError, QuoteError, UnicodeDecodeError among them
+    RuntimeError,  # SimError, SynthError, PnrError, RemoteError
+)
+
+
 def run_step(
     project: Project,
     step: str,
@@ -52,13 +65,35 @@ def run_step(
     synth_tool: str = "yosys",
     pnr_tool: str = "librelane",
     remote: Remote | None = None,
+    test_filter: str = "",
+) -> StepResult:
+    """One step on the project. A tool that fails in an unexpected way fails the step,
+    with what it raised, instead of stopping the run."""
+    if step not in PROJECT_STEPS:
+        raise ValueError(f"unknown step {step!r}")
+    try:
+        return _run_step(project, step, sim_tool, synth_tool, pnr_tool, remote, test_filter)
+    except STEP_ERRORS as exc:
+        first = (str(exc).strip().splitlines() or [""])[0]
+        msg = f"{type(exc).__name__}: {first}" if first else type(exc).__name__
+        return StepResult(step, "fail", msg, {"error": f"{type(exc).__name__}: {exc}"})
+
+
+def _run_step(
+    project: Project,
+    step: str,
+    sim_tool: str,
+    synth_tool: str,
+    pnr_tool: str,
+    remote: Remote | None,
+    test_filter: str,
 ) -> StepResult:
     if step == "lint":
         return lint(project)
     if step == "sim":
         tool = "" if sim_tool in ("", "auto") else sim_tool
         # Open simulators always run here; only the commercial ones go to the server.
-        return simulate(project, tool, remote if tool in COMMERCIAL else None)
+        return simulate(project, tool, remote if tool in COMMERCIAL else None, test_filter)
     if step == "coverage":
         return coverage(project)
     if step == "synth":
@@ -69,7 +104,7 @@ def run_step(
         if pnr_tool == "innovus":
             return commercial.pnr_step(project, remote)
         return pnr(project)
-    raise ValueError(f"unknown step {step!r}")
+    raise AssertionError(step)  # run_step checked the name
 
 
 def write_reports(project: Project, results: Sequence[StepResult]) -> Path:
@@ -100,9 +135,11 @@ def verify_project(
     synth_tool: str = "yosys",
     pnr_tool: str = "librelane",
     remote: Remote | None = None,
+    allow: Iterable[str | Path] = (),
 ) -> list[StepResult]:
-    """Run ``steps`` on the project at ``path`` and write its reports."""
-    project = load_project(path)
+    """Run ``steps`` on the project at ``path`` and write its reports. ``allow`` names
+    directories outside the project its files may come from (the user's choice)."""
+    project = load_project(path, allow)
     if sim_tool and sim_tool not in SIM_TOOLS:
         raise ValueError(f"sim tool must be one of {', '.join(SIM_TOOLS)}")
     if synth_tool not in SYNTH_TOOLS:

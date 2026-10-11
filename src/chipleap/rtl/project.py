@@ -7,6 +7,17 @@ implementation steps read everything else from the RTL itself. Paths are relativ
 project file. Every key is checked, and an error names the key, so a typo fails with a
 message that says where it is.
 
+A project file may come from someone else's repository, and its values end up in tool
+scripts (Yosys, Tcl), on tool command lines and in results an assistant reads. So:
+
+* Every path must resolve, symlinks followed, to a place inside the project directory,
+  or inside a directory the user allowed (``--allow-path``, ``CHIPLEAP_ALLOW_PATHS``);
+  nothing in the project file can widen that. Environment variables and ``~`` are not
+  expanded.
+* Names (top, ports, parameters, defines) are identifiers, parameter values are integers,
+  define values a short literal; paths may not hold characters a script language reads
+  as syntax. Such values are refused here, not escaped later.
+
 Later milestones add sections (formal properties, macros, a pad ring). Their names are
 reserved here and rejected with a message that says so. To add one: a frozen dataclass
 and a ``_parse_<name>`` function, a field on ``Project`` with a default, an entry in
@@ -20,6 +31,7 @@ import hashlib
 import os
 import re
 import shlex
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,8 +48,18 @@ SIMULATORS = ("auto", "icarus", "verilator")
 HDL_SUFFIXES = (".sv", ".v", ".svh", ".vh")
 # Files an include directory may hold that change what the RTL means.
 INCLUDE_SUFFIXES = (*HDL_SUFFIXES, ".h", ".inc", ".vlt", ".mem", ".hex")
-IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+# Verilog allows "$" in identifiers; Tcl would substitute it, so ChipLeap does not.
+IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 TIME_RE = re.compile(r"(1|10|100)(s|ms|us|ns|ps|fs)")
+# A define's value: a number or a short literal such as 8'hFF, never an option or a script.
+DEFINE_VALUE_RE = re.compile(r"[A-Za-z0-9_.'][A-Za-z0-9_.'+-]*")
+# Characters a path may not hold: control characters, and what a shell, Yosys or Tcl reads
+# as syntax (quotes, backslash, braces, brackets, $, ;, backtick, #) or as a glob.
+UNSAFE_PATH_RE = re.compile(r'[\x00-\x1f\x7f"\\{}\[\]$;`#*?]')
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# A LibreLane value given in the project: plain text that Tcl reads as one word.
+LIBRELANE_VALUE_RE = re.compile(r"[A-Za-z0-9_./:+ -]*")
+ALLOW_ENV = "CHIPLEAP_ALLOW_PATHS"
 # Sections later milestones will read. A file written for them fails clearly here.
 RESERVED = {
     "formal": "D2",
@@ -123,6 +145,8 @@ class Project:
     pnr: PnrConfig = field(default_factory=PnrConfig)
     description: str = ""
     filelists: tuple[Path, ...] = ()  # the filelist and every file it includes
+    # Directories outside the project the user allowed files from (never the project file).
+    allowed: tuple[Path, ...] = ()
 
     @property
     def build_dir(self) -> Path:
@@ -144,23 +168,47 @@ class Project:
         """Defines as ``NAME`` or ``NAME=VALUE``, for a tool's -D or +define+ option."""
         return [k if v is None else f"{k}={v}" for k, v in self.defines.items()]
 
+    def inside(self, path: Path) -> bool:
+        """Whether ``path`` resolves into the project or a directory the user allowed."""
+        return _within(path.resolve(), (self.root, *self.allowed))
+
+    def files_in(self, directory: Path, suffixes: tuple[str, ...] = ()) -> list[Path]:
+        """The files under ``directory`` that a run may read, copy or hash: inside the
+        project (symlinks followed), outside build directories, with safe names."""
+        out = []
+        for p in sorted(directory.rglob("*")):
+            if SKIP_DIRS & set(p.relative_to(directory).parts) or not p.is_file():
+                continue
+            if suffixes and p.suffix not in suffixes:
+                continue
+            if self.inside(p) and not UNSAFE_PATH_RE.search(str(p.resolve())):
+                out.append(p)
+        return out
+
+    def stage(self, path: Path, dest: Path) -> None:
+        """Copy a file, or a directory's ``files_in``, to ``dest``."""
+        if path.is_dir():
+            for f in self.files_in(path):
+                target = dest / f.relative_to(path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, target)
+        elif self.inside(path):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dest)
+        else:
+            raise ProjectError(f"{path} is outside the project directory")
+
     def input_files(self) -> list[Path]:
         """Every file whose content can change a result: the project file, the sources,
         include files, waivers, constraints, the tests and the golden model."""
         files: list[Path] = [self.file, *self.filelists, *self.sources, *self.tests.sources]
         for d in self.include_dirs:
-            files += [
-                p for p in sorted(d.rglob("*")) if p.is_file() and p.suffix in INCLUDE_SUFFIXES
-            ]
+            files += self.files_in(d, INCLUDE_SUFFIXES)
         files += [*self.lint.waivers, *([self.sdc] if self.sdc else [])]
         if self.tests.dir is not None:
-            files += [
-                p
-                for p in sorted(self.tests.dir.rglob("*.py"))
-                if not SKIP_DIRS & set(p.relative_to(self.tests.dir).parts)
-            ]
+            files += self.files_in(self.tests.dir, (".py",))
         if self.golden is not None:
-            files += sorted(self.golden.parent.glob("*.py"))
+            files += [p for p in sorted(self.golden.parent.glob("*.py")) if self.inside(p)]
         seen: dict[Path, None] = {}
         for f in files:
             seen.setdefault(f.resolve(), None)
@@ -268,38 +316,82 @@ def _positive(value: Any, where: str, upper: float | None = None) -> float:
     return float(value)
 
 
-def _expand(text: str, where: str) -> str:
-    """``$VAR`` and ``${VAR}`` from the environment; an unset variable is an error."""
-    out = os.path.expandvars(text)
-    if "$" in out:
-        raise ProjectError(f"{where}: {text!r} uses an environment variable that is not set")
-    return out
+def _within(path: Path, roots: Iterable[Path]) -> bool:
+    return any(path == r or r in path.parents for r in roots)
 
 
-def _path(root: Path, text: str, where: str, *, kind: str = "file") -> Path:
-    p = Path(_expand(text, where)).expanduser()
-    p = p if p.is_absolute() else root / p
-    ok = p.is_dir() if kind == "dir" else p.is_file()
-    if not ok:
-        raise ProjectError(f"{where}: {text} is not a {'directory' if kind == 'dir' else 'file'}")
-    return p
+def allowed_roots(extra: Iterable[str | Path] = ()) -> tuple[Path, ...]:
+    """Directories outside a project its files may come from: the ones given (a command
+    line option) and the ones in ``CHIPLEAP_ALLOW_PATHS``. Both are the user's own choice;
+    a project file cannot add to them."""
+    env = [d for d in os.environ.get(ALLOW_ENV, "").split(os.pathsep) if d]
+    return tuple(dict.fromkeys(Path(d).expanduser().resolve() for d in [*extra, *env]))
 
 
-def _sources(root: Path, items: list[str], where: str) -> list[Path]:
-    """Files, with glob patterns expanded in sorted order."""
-    out: list[Path] = []
-    for item in items:
-        text = _expand(item, where)
-        if any(ch in text for ch in "*?["):
-            pattern = text if Path(text).is_absolute() else str(root / text)
-            matches = sorted(Path(m) for m in glob.glob(pattern, recursive=True))
-            matches = [m for m in matches if m.is_file()]
-            if not matches:
-                raise ProjectError(f"{where}: {item} matches no files")
-            out += matches
-        else:
-            out.append(_path(root, text, where))
-    return out
+class _Paths:
+    """Resolves the paths a project names, and refuses any that leave the project."""
+
+    def __init__(self, root: Path, allowed: Iterable[Path] = ()) -> None:
+        self.root = root.resolve()
+        self.roots = (self.root, *(Path(a).resolve() for a in allowed))
+
+    def _text(self, text: str, where: str) -> None:
+        if CONTROL_RE.search(text):
+            raise ProjectError(f"{where}: {text!r} holds a control character")
+        if "$" in text or text.startswith("~"):
+            raise ProjectError(
+                f"{where}: {text!r}: environment variables and ~ are not expanded; give a "
+                "path relative to the project"
+            )
+
+    def check(self, path: Path, text: str, where: str) -> Path:
+        """``path`` resolved, if it is inside the project (or an allowed directory) and
+        its name is safe to put in a script."""
+        real = path.resolve()
+        if not _within(real, self.roots):
+            raise ProjectError(
+                f"{where}: {text} is outside the project directory; allow its directory "
+                f"with --allow-path DIR or {ALLOW_ENV}"
+            )
+        bad = UNSAFE_PATH_RE.search(str(real))
+        if bad:
+            raise ProjectError(
+                f"{where}: {text}: {bad.group()!r} is not allowed in a path, because tool "
+                "scripts would read it as syntax"
+            )
+        for part in real.relative_to(next(r for r in self.roots if _within(real, [r]))).parts:
+            if part.startswith(("-", "+")):
+                raise ProjectError(
+                    f"{where}: {text}: a name starting with - or + reads as an option"
+                )
+        return real
+
+    def path(self, base: Path, text: str, where: str, kind: str = "file") -> Path:
+        self._text(text, where)
+        p = Path(text)
+        # Confinement first, so an error never says whether a file outside the project exists.
+        real = self.check(p if p.is_absolute() else base / p, text, where)
+        if not (real.is_dir() if kind == "dir" else real.is_file()):
+            raise ProjectError(
+                f"{where}: {text} is not a {'directory' if kind == 'dir' else 'file'}"
+            )
+        return real
+
+    def files(self, base: Path, items: list[str], where: str) -> list[Path]:
+        """Files, with glob patterns expanded in sorted order; every match is checked."""
+        out: list[Path] = []
+        for item in items:
+            self._text(item, where)
+            if any(ch in item for ch in "*?["):
+                pattern = item if Path(item).is_absolute() else str(base / item)
+                matches = sorted(Path(m) for m in glob.glob(pattern, recursive=True))
+                matches = [self.check(m, item, where) for m in matches if m.is_file()]
+                if not matches:
+                    raise ProjectError(f"{where}: {item} matches no files")
+                out += matches
+            else:
+                out.append(self.path(base, item, where))
+        return out
 
 
 @dataclass
@@ -310,10 +402,20 @@ class _Filelist:
     files: list[Path] = field(default_factory=list)
 
 
-def parse_filelist(path: Path, where: str = "filelist", _depth: int = 0) -> _Filelist:
+def parse_filelist(
+    path: Path,
+    where: str = "filelist",
+    *,
+    roots: Iterable[Path] | None = None,
+    _depth: int = 0,
+) -> _Filelist:
     """A simulator filelist: source files, ``-f``/``-F`` (nested, relative to the file
     that names them), ``+incdir+``, ``-I``, ``+define+`` and ``-D``. Comments start with
-    ``//`` or ``#``. Library options (``-v``, ``-y``) are not supported."""
+    ``//`` or ``#``. Library options (``-v``, ``-y``) are not supported. Every file and
+    directory must be inside ``roots`` (the filelist's own directory by default)."""
+    given = list(roots) if roots else [path.parent]
+    paths = _Paths(given[0], given[1:])
+    path = paths.check(path, path.name, where)
     if _depth > 8:
         raise ProjectError(f"{where}: filelists nest more than 8 deep")
     out = _Filelist(files=[path])
@@ -332,18 +434,20 @@ def parse_filelist(path: Path, where: str = "filelist", _depth: int = 0) -> _Fil
             arg = next(it, None)
             if arg is None:
                 raise ProjectError(f"{here}: {w} needs a file")
-            sub = parse_filelist(_path(base, arg, here), where, _depth + 1)
+            sub = parse_filelist(
+                paths.path(base, arg, here), where, roots=paths.roots, _depth=_depth + 1
+            )
             out.sources += sub.sources
             out.include_dirs += sub.include_dirs
             out.defines.update(sub.defines)
             out.files += sub.files
         elif w.startswith("+incdir+"):
             out.include_dirs += [
-                _path(base, d, here, kind="dir") for d in w[len("+incdir+") :].split("+") if d
+                paths.path(base, d, here, kind="dir") for d in w[len("+incdir+") :].split("+") if d
             ]
         elif w.startswith("-I"):
             arg = w[2:] or next(it, "")
-            out.include_dirs.append(_path(base, arg, here, kind="dir"))
+            out.include_dirs.append(paths.path(base, arg, here, kind="dir"))
         elif w.startswith("+define+"):
             for d in w[len("+define+") :].split("+"):
                 if d:
@@ -355,7 +459,8 @@ def parse_filelist(path: Path, where: str = "filelist", _depth: int = 0) -> _Fil
         elif w.startswith(("-", "+")):
             raise ProjectError(f"{here}: option {w} is not supported in a filelist")
         else:
-            out.sources += _sources(base, [w], here)
+            out.sources += paths.files(base, [w], here)
+    out.defines = _parse_defines(out.defines, f"{where} ({path.name}) defines")
     return out
 
 
@@ -382,7 +487,8 @@ def _parse_clocks(value: Any) -> tuple[Clock, ...]:
 
 
 def active_low_by_name(port: str) -> bool:
-    return bool(re.search(r"(_n|_ni|n|_b)$", port))
+    """Whether a reset's name says it is active low: rst_n, rst_ni, RST_N, resetn."""
+    return bool(re.search(r"(?i)(_n|_ni|_b|rstn|resetn)$", port))
 
 
 def _parse_resets(value: Any) -> tuple[Reset, ...]:
@@ -405,7 +511,7 @@ def _parse_resets(value: Any) -> tuple[Reset, ...]:
     return tuple(out)
 
 
-def _parse_defines(value: Any) -> dict[str, str | None]:
+def _parse_defines(value: Any, where: str = "defines") -> dict[str, str | None]:
     if value is None:
         return {}
     if isinstance(value, list):  # [A, B=1] as on a command line
@@ -414,12 +520,17 @@ def _parse_defines(value: Any) -> dict[str, str | None]:
             for v in value
         }
     if not isinstance(value, dict):
-        raise ProjectError("defines must be a mapping of name to value (null for none)")
+        raise ProjectError(f"{where} must be a mapping of name to value (null for none)")
     out: dict[str, str | None] = {}
     for k, v in value.items():
-        _ident(k, f"defines.{k}")
+        _ident(k, f"{where}: a define name")
         if v is not None and (isinstance(v, bool) or not isinstance(v, (str, int, float))):
-            raise ProjectError(f"defines.{k} must be a string, a number or null")
+            raise ProjectError(f"{where}.{k} must be a string, a number or null")
+        if v is not None and not DEFINE_VALUE_RE.fullmatch(str(v)):
+            raise ProjectError(
+                f"{where}.{k}: {str(v)!r} is not a plain value (letters, digits and _ . ' + -, "
+                "not starting with - or +)"
+            )
         out[str(k)] = None if v is None else str(v)
     return out
 
@@ -450,13 +561,13 @@ def _parse_timescale(value: Any) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _parse_tests(value: Any, root: Path, top: str) -> Tests:
+def _parse_tests(value: Any, paths: _Paths, top: str) -> Tests:
     t = _mapping(value, "tests", ("dir", "modules", "simulator", "seed", "toplevel", "sources"))
     if not t:
         return Tests(toplevel=top)
     if "dir" not in t:
         raise ProjectError("tests.dir is required: the directory with the cocotb tests")
-    d = _path(root, str(t["dir"]), "tests.dir", kind="dir")
+    d = paths.path(paths.root, str(t["dir"]), "tests.dir", kind="dir")
     if "modules" in t:
         modules = _str_list(t["modules"], "tests.modules")
         for m in modules:
@@ -475,14 +586,15 @@ def _parse_tests(value: Any, root: Path, top: str) -> Tests:
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ProjectError("tests.seed must be a non-negative integer")
     toplevel = _ident(t.get("toplevel", top), "tests.toplevel")
-    srcs = _sources(root, _str_list(t.get("sources"), "tests.sources"), "tests.sources")
+    srcs = paths.files(paths.root, _str_list(t.get("sources"), "tests.sources"), "tests.sources")
     return Tests(d, tuple(modules), str(sim), seed, toplevel, tuple(srcs))
 
 
-def _parse_lint(value: Any, root: Path) -> LintConfig:
+def _parse_lint(value: Any, paths: _Paths) -> LintConfig:
     lt = _mapping(value, "lint", ("waivers", "slang"))
     waivers = tuple(
-        _path(root, w, "lint.waivers") for w in _str_list(lt.get("waivers"), "lint.waivers")
+        paths.path(paths.root, w, "lint.waivers")
+        for w in _str_list(lt.get("waivers"), "lint.waivers")
     )
     slang = lt.get("slang", True)
     if not isinstance(slang, bool):
@@ -505,6 +617,17 @@ def _parse_pnr(value: Any) -> PnrConfig:
         isinstance(k, str) and re.fullmatch(r"[A-Z][A-Z0-9_]*", k) for k in extra
     ):
         raise ProjectError("pnr.librelane must map LibreLane variable names (UPPER_CASE) to values")
+    for k, v in extra.items():
+        items = v if isinstance(v, list) else [v]
+        for item in items:
+            ok = isinstance(item, (bool, int, float)) or (
+                isinstance(item, str) and LIBRELANE_VALUE_RE.fullmatch(item)
+            )
+            if not ok:
+                raise ProjectError(
+                    f"pnr.librelane.{k}: values are numbers, booleans or plain text (letters, "
+                    "digits, spaces and _ . / : + -), or lists of them"
+                )
     return PnrConfig(util, density, die_um, dict(extra))
 
 
@@ -531,8 +654,11 @@ SECTIONS = (
 )
 
 
-def parse_project(data: Any, root: Path, file: Path | None = None) -> Project:
-    """A project from its YAML mapping; relative paths start at ``root``."""
+def parse_project(
+    data: Any, root: Path, file: Path | None = None, allowed: Iterable[Path] = ()
+) -> Project:
+    """A project from its YAML mapping; relative paths start at ``root`` and must stay in
+    it, or in one of the ``allowed`` directories (see ``allowed_roots``)."""
     if not isinstance(data, dict):
         raise ProjectError("a project file must be a YAML mapping")
     for key in data:
@@ -546,7 +672,8 @@ def parse_project(data: Any, root: Path, file: Path | None = None) -> Project:
     schema = data.get("schema", SCHEMA)
     if schema != SCHEMA:
         raise ProjectError(f"schema {schema!r} is not supported; this ChipLeap reads {SCHEMA}")
-    root = root.resolve()
+    paths = _Paths(root, allowed)
+    root = paths.root
     top = _ident(data.get("top"), "top")
     name = data.get("name", top)
     if not is_safe_name(str(name), SPEC_NAME_MAX):
@@ -557,8 +684,8 @@ def parse_project(data: Any, root: Path, file: Path | None = None) -> Project:
 
     fl = _Filelist()
     if data.get("filelist") is not None:
-        fl = parse_filelist(_path(root, str(data["filelist"]), "filelist"))
-    sources = fl.sources + _sources(root, _str_list(data.get("sources"), "sources"), "sources")
+        fl = parse_filelist(paths.path(root, str(data["filelist"]), "filelist"), roots=paths.roots)
+    sources = fl.sources + paths.files(root, _str_list(data.get("sources"), "sources"), "sources")
     sources = list(dict.fromkeys(s.resolve() for s in sources))
     if not sources:
         raise ProjectError("sources: give at least one file (or a filelist)")
@@ -566,7 +693,7 @@ def parse_project(data: Any, root: Path, file: Path | None = None) -> Project:
         if s.suffix not in HDL_SUFFIXES:
             raise ProjectError(f"sources: {s.name} is not Verilog or SystemVerilog")
     includes = fl.include_dirs + [
-        _path(root, d, "include_dirs", kind="dir")
+        paths.path(root, d, "include_dirs", kind="dir")
         for d in _str_list(data.get("include_dirs"), "include_dirs")
     ]
     defines = {**fl.defines, **_parse_defines(data.get("defines"))}
@@ -576,11 +703,11 @@ def parse_project(data: Any, root: Path, file: Path | None = None) -> Project:
         raise ProjectError(f"tech: {tech!r} is not one of {', '.join(TECHNOLOGIES)}")
     golden = None
     if data.get("golden") is not None:
-        golden = _path(root, str(data["golden"]), "golden")
+        golden = paths.path(root, str(data["golden"]), "golden")
         if golden.suffix != ".py":
             raise ProjectError("golden must be a Python file the tests import")
     cons = _mapping(data.get("constraints"), "constraints", ("sdc",))
-    sdc = _path(root, str(cons["sdc"]), "constraints.sdc") if cons.get("sdc") else None
+    sdc = paths.path(root, str(cons["sdc"]), "constraints.sdc") if cons.get("sdc") else None
     clocks = _parse_clocks(data.get("clocks"))
     resets = _parse_resets(data.get("resets"))
     for r in resets:
@@ -599,13 +726,14 @@ def parse_project(data: Any, root: Path, file: Path | None = None) -> Project:
         clocks=clocks,
         resets=resets,
         tech=tech,
-        tests=_parse_tests(data.get("tests"), root, top),
+        tests=_parse_tests(data.get("tests"), paths, top),
         golden=golden,
-        lint=_parse_lint(data.get("lint"), root),
+        lint=_parse_lint(data.get("lint"), paths),
         sdc=sdc,
         pnr=_parse_pnr(data.get("pnr")),
         description=str(data.get("description", "")),
         filelists=tuple(fl.files),
+        allowed=paths.roots[1:],
     )
 
 
@@ -628,8 +756,9 @@ def find_project(path: str | Path) -> Path | None:
     return None
 
 
-def load_project(path: str | Path) -> Project:
-    """Read and check a project: a project file, or a directory that holds one."""
+def load_project(path: str | Path, allow: Iterable[str | Path] = ()) -> Project:
+    """Read and check a project: a project file, or a directory that holds one. Its files
+    may also come from ``allow`` and the directories in ``CHIPLEAP_ALLOW_PATHS``."""
     p = Path(path)
     f = p / PROJECT_FILE if p.is_dir() else p
     try:
@@ -639,7 +768,7 @@ def load_project(path: str | Path) -> Project:
     except OSError as exc:
         raise ProjectError(f"{f}: {exc.strerror}") from exc
     try:
-        return parse_project(data, f.parent, f)
+        return parse_project(data, f.parent, f, allowed_roots(allow))
     except ProjectError as exc:
         raise ProjectError(f"{f}: {exc}") from exc
 
@@ -665,6 +794,7 @@ def find_sources(directory: Path) -> list[Path]:
         if (
             not p.is_file()
             or p.suffix not in (".sv", ".v")
+            or not _within(p.resolve(), [directory.resolve()])
             or any(part.startswith(".") or part in SKIP_DIRS for part in rel[:-1])
             or any(part in ("test", "tests", "tb", "sim") for part in rel[:-1])
         ):
@@ -745,9 +875,9 @@ def init_project(
     srcs = list(sources)
     if filelist:
         data["filelist"] = filelist
-        paths = parse_filelist(_path(root, filelist, "filelist")).sources
+        paths = parse_filelist(_Paths(root).path(root, filelist, "filelist"), roots=[root]).sources
     elif srcs:
-        paths = _sources(root, srcs, "sources")
+        paths = _Paths(root).files(root, srcs, "sources")
     else:
         paths = find_sources(root)
         if not paths:

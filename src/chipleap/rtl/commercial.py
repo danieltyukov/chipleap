@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from chipleap.hw.tech import get_tech
+from chipleap.rtl import quote as q
 from chipleap.rtl.project import Project
 from chipleap.verify import cpnr, csynth, innovus
 from chipleap.verify.backends import synth_liberty
@@ -40,12 +41,7 @@ def stage_rtl(project: Project, workdir: Path) -> tuple[list[str], list[str]]:
         rel = project.rel(p)
         if Path(rel).is_absolute():
             raise SynthError(f"{p} is outside the project directory and cannot be staged")
-        dest = src / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if p.is_dir():
-            shutil.copytree(p, dest, dirs_exist_ok=True)
-        else:
-            shutil.copy2(p, dest)
+        project.stage(p, src / rel)
         return f"src/{rel}"
 
     return [put(s) for s in project.sources], [put(d) for d in project.include_dirs]
@@ -55,17 +51,19 @@ def _constraints(project: Project, period: float) -> str:
     clocks = project.clocks
     if not clocks:
         return (
-            f"create_clock -name vclk -period {period:g}\n"
+            f"create_clock -name vclk -period {float(period):g}\n"
             "set_input_delay 0 -clock vclk [all_inputs]\n"
             "set_output_delay 0 -clock vclk [all_outputs]\n"
         )
     lines = [
-        f"create_clock -name {c.port} -period {c.period_ns:g} [get_ports {c.port}]" for c in clocks
+        f"create_clock -name {q.tcl(c.port)} -period {float(c.period_ns):g} "
+        f"[get_ports {q.tcl(c.port)}]"
+        for c in clocks
     ]
-    ports = " ".join(c.port for c in clocks)
-    ref = clocks[0].port
+    ports = q.tcl_list(c.port for c in clocks)
+    ref = q.tcl(clocks[0].port)
     lines += [
-        f"set_input_delay 0 -clock {ref} [remove_from_collection [all_inputs] [get_ports {{{ports}}}]]",
+        f"set_input_delay 0 -clock {ref} [remove_from_collection [all_inputs] [get_ports {ports}]]",
         f"set_output_delay 0 -clock {ref} [all_outputs]",
     ]
     return "\n".join(lines) + "\n"
@@ -79,18 +77,20 @@ def genus_script(
     tag: str,
     lefs: tuple[str, ...] = (),
 ) -> str:
-    """Genus on the project: the accelerator's script with the project's design."""
+    """Genus on the project: the accelerator's script with the project's design. Every
+    name, path and value from the project is one brace-quoted Tcl word."""
     clk = project.fastest_clock
     period = clk.period_ns if clk else DEFAULT_PERIOD_NS
     physical = (
-        f"read_physical -lef {{{' '.join(lefs)}}}\nset_db interconnect_mode ple\n" if lefs else ""
+        f"read_physical -lef {q.tcl_list(lefs)}\nset_db interconnect_mode ple\n" if lefs else ""
     )
-    search = f"set_db init_hdl_search_path {{{' '.join(includes)}}}\n" if includes else ""
-    defines = " ".join(project.define_args())
-    define_opt = f" -define {{{defines}}}" if defines else ""
-    params = " ".join(f"{{{k} {v}}}" for k, v in project.parameters.items())
+    search = f"set_db init_hdl_search_path {q.tcl_list(includes)}\n" if includes else ""
+    defines = project.define_args()
+    define_opt = f" -define {q.tcl_list(defines)}" if defines else ""
+    params = " ".join("{" + f"{q.plain(k)} {int(v)}" + "}" for k, v in project.parameters.items())
     param_opt = f" -parameters {{{params}}}" if params else ""
-    top = project.top
+    top = q.plain(project.top)
+    tag = q.plain(tag)
     # Elaborating with parameters names the design after them (uart_CLKS_PER_BIT16); the
     # netlist and Innovus expect the top's own name.
     rename = (
@@ -104,8 +104,8 @@ set_db information_level 1
 # Registers that reset to 1 need an async-preset flop; libraries with only async-reset
 # flops (IHP SG13G2) get one by inverting around a reset flop, as Yosys does.
 set_db lbr_seq_in_out_phase_opto true
-read_libs {{{liberty}}}
-{physical}{search}read_hdl -sv{define_opt} {{{" ".join(files)}}}
+read_libs {q.tcl(liberty)}
+{physical}{search}read_hdl -sv{define_opt} {q.tcl_list(files)}
 elaborate {top}{param_opt}
 {rename}{_constraints(project, period)}syn_generic
 syn_map
@@ -120,24 +120,26 @@ exit
 
 
 def dc_script(project: Project, files: list[str], includes: list[str], db: str, tag: str) -> str:
+    """Design Compiler on the project, quoted as the Genus script is."""
     clk = project.fastest_clock
     period = clk.period_ns if clk else DEFAULT_PERIOD_NS
-    top = project.top
+    top = q.plain(project.top)
+    tag = q.plain(tag)
     search = (
-        f"set_app_var search_path [concat $search_path {{{' '.join(includes)}}}]\n"
+        f"set_app_var search_path [concat $search_path {q.tcl_list(includes)}]\n"
         if includes
         else ""
     )
-    defines = " ".join(project.define_args())
-    define_opt = f" -define {{{defines}}}" if defines else ""
-    params = ",".join(f"{k}={v}" for k, v in project.parameters.items())
-    param_opt = f' -parameters "{params}"' if params else ""
+    defines = project.define_args()
+    define_opt = f" -define {q.tcl_list(defines)}" if defines else ""
+    params = ",".join(f"{q.plain(k)}={int(v)}" for k, v in project.parameters.items())
+    param_opt = f" -parameters {q.tcl(params)}" if params else ""
     # As in Genus: the elaborated design is named after its parameters until renamed.
     rename = f"rename_design [current_design] {top}\n" if params else ""
     return f"""# ChipLeap: Design Compiler synthesis of {top}, run {tag}.
-set_app_var target_library {{{db}}}
-set_app_var link_library {{* {db}}}
-{search}analyze -format sverilog{define_opt} {{{" ".join(files)}}}
+set_app_var target_library {q.tcl(db)}
+set_app_var link_library [list * {q.tcl(db)}]
+{search}analyze -format sverilog{define_opt} {q.tcl_list(files)}
 elaborate {top}{param_opt}
 {rename}current_design {top}
 link
@@ -240,10 +242,9 @@ def synth_step(project: Project, tool: str, remote: Remote | None = None) -> Ste
     return StepResult("synth", "pass", msg, d)
 
 
-def place_route_with(
-    project: Project, workdir: Path, remote: Remote | None = None, utilisation: float = 0.6
-) -> PnrResult:
-    """Genus then Innovus on the project, here or on ``remote``."""
+def place_route_with(project: Project, workdir: Path, remote: Remote | None = None) -> PnrResult:
+    """Genus then Innovus on the project, here or on ``remote``, with the project's
+    utilisation, placement density and die size, as LibreLane gets them."""
     if remote is None and (shutil.which("genus") is None or shutil.which("innovus") is None):
         raise PnrError(
             "Cadence Genus and Innovus are not on the path; run them on a server with --remote HOST"
@@ -272,7 +273,7 @@ def place_route_with(
     except Exception as exc:
         raise PnrError(str(exc)) from exc
     tag = "pnr"
-    top = project.top
+    top = q.plain(project.top)
     (workdir / "synth.tcl").write_text(genus_script(project, files, includes, typ, tag, phys))
     (workdir / "mmmc.tcl").write_text(cpnr.mmmc(typ, slow, f"{top}_{tag}.sdc"))
     (workdir / "pnr.tcl").write_text(
@@ -280,9 +281,11 @@ def place_route_with(
             f"{top}_{tag}.v",
             phys,
             node_nm=tech.node_nm,
-            utilisation=utilisation,
+            utilisation=project.pnr.utilisation / 100,
             slow=bool(slow),
             top=top,
+            density=project.pnr.density / 100,
+            die_um=project.pnr.die_um,
         )
     )
     steps = [

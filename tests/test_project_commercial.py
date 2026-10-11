@@ -31,19 +31,19 @@ def test_genus_script(project, tmp_path):
     assert (tmp_path / "src/rtl/counter.sv").is_file()
     assert (tmp_path / "src/rtl/inc/defs.svh").is_file()
     s = commercial.genus_script(project, files, includes, "lib.lib", "syn", ("t.lef", "c.lef"))
-    assert "set_db init_hdl_search_path {src/rtl/inc}" in s
-    assert "read_hdl -sv -define {FAST N=3} {src/rtl/counter.sv}" in s
+    assert "set_db init_hdl_search_path {{src/rtl/inc}}" in s
+    assert "read_hdl -sv -define {{FAST} {N=3}} {{src/rtl/counter.sv}}" in s
     assert "elaborate counter -parameters {{W 6}}" in s
-    assert "create_clock -name clk_i -period 10 [get_ports clk_i]" in s
-    assert "[remove_from_collection [all_inputs] [get_ports {clk_i}]]" in s
-    assert "read_physical -lef {t.lef c.lef}" in s and "write_hdl > counter_syn.v" in s
+    assert "create_clock -name {clk_i} -period 10 [get_ports {clk_i}]" in s
+    assert "[remove_from_collection [all_inputs] [get_ports {{clk_i}}]]" in s
+    assert "read_physical -lef {{t.lef} {c.lef}}" in s and "write_hdl > counter_syn.v" in s
 
 
 def test_dc_script(project):
     s = commercial.dc_script(project, ["src/rtl/counter.sv"], ["src/rtl/inc"], "lib.db", "syn")
-    assert "set_app_var search_path [concat $search_path {src/rtl/inc}]" in s
-    assert "analyze -format sverilog -define {FAST N=3} {src/rtl/counter.sv}" in s
-    assert 'elaborate counter -parameters "W=6"' in s and "current_design counter" in s
+    assert "set_app_var search_path [concat $search_path {{src/rtl/inc}}]" in s
+    assert "analyze -format sverilog -define {{FAST} {N=3}} {{src/rtl/counter.sv}}" in s
+    assert "elaborate counter -parameters {W=6}" in s and "current_design counter" in s
 
 
 def test_missing_tools_skip_with_a_way_forward(project, monkeypatch):

@@ -66,7 +66,7 @@ def test_own_sdc_and_several_clocks(counter_project, tmp_path):
     p = load_project(counter_project)
     text = sdc(p)
     assert "create_clock [get_ports clk2_i] -name clk2_i -period 5" in text
-    assert "-clock [get_clocks clk_i]" in text and "foreach name {clk_i clk2_i}" in text
+    assert "-clock [get_clocks clk_i]" in text and "foreach name {{clk_i} {clk2_i}}" in text
     cfg = config(p, tmp_path)
     assert cfg["CLOCK_PORT"] == ["clk_i", "clk2_i"] and cfg["CLOCK_PERIOD"] == 5.0
     (counter_project / "own.sdc").write_text("create_clock [get_ports clk_i] -period 7\n")

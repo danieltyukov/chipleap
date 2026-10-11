@@ -317,6 +317,7 @@ def _verify_project(args: argparse.Namespace, path: Path) -> int:
         synth_tool=getattr(args, "synth_tool", None) or "yosys",
         pnr_tool=getattr(args, "pnr_tool", None) or "librelane",
         remote=remote,
+        allow=getattr(args, "allow_path", None) or (),
     )
     code = _print_steps(results, width=8)
     out = path.parent / "build" / "verify"
@@ -398,7 +399,7 @@ def cmd_project(args: argparse.Namespace) -> int:
             print(f"  {n}")
         print(f"Next: chipleap verify {args.dir}")
         return 0
-    p = load_project(args.path)
+    p = load_project(args.path, args.allow_path)
     if args.json:
         _print_json(p.to_dict())
         return 0
@@ -668,6 +669,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["librelane", "innovus"],
         help="place and route: LibreLane (default) or Cadence Genus and Innovus",
     )
+    s.add_argument(
+        "--allow-path",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="let an RTL project use files from this directory outside it (repeatable; "
+        "also CHIPLEAP_ALLOW_PATHS)",
+    )
     s.add_argument("--remote", help="run the simulator and synthesis on this ssh host")
     s.add_argument(
         "--remote-setup",
@@ -695,6 +704,13 @@ def build_parser() -> argparse.ArgumentParser:
     t.set_defaults(func=cmd_project)
     t = psub.add_parser("check", help="read a project and show it with every default filled in")
     t.add_argument("path", nargs="?", default=".")
+    t.add_argument(
+        "--allow-path",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="let the project use files from this directory outside it (repeatable)",
+    )
     t.add_argument("--json", action="store_true")
     t.set_defaults(func=cmd_project)
 
