@@ -377,53 +377,63 @@ def trace_chain(
     nets: Nets,
     name: str,
     scan_in: str,
-    scan_out: str,
+    scan_out: str | Iterable[str],
     *,
     si_pin: str = "SCD",
     q_pins: Iterable[str] = ("Q",),
     through: dict[str, tuple[str, str]] | None = None,
     limit: int = 1_000_000,
 ) -> Chain:
-    """The flip-flops a chain links, from ``scan_in`` to ``scan_out``: each cell's scan
-    input is reached from the previous cell's output. Buffers (cells whose name starts
-    with a key of ``through``, mapped to their input and output pins) are followed, as
-    place and route inserts them, including trees of them. Raises NetlistError when the
-    chain forks, breaks or loops."""
+    """The flip-flops a chain links, from ``scan_in`` to its scan output: each cell's scan
+    input is reached from the previous cell's output. ``scan_out`` is the output bit, or
+    the output bits to look for one in: scan insertion may end a chain on a functional
+    output the last flip-flop already drives. Buffers (cells whose name starts with a key
+    of ``through``, mapped to their input and output pins) are followed, as place and
+    route inserts them, including trees of them. Raises NetlistError when the chain
+    forks, breaks, loops or reaches no output."""
     through = through or {}
     q_pins = tuple(q_pins)
+    outs = [scan_out] if isinstance(scan_out, str) else list(scan_out)
+    targets = {nets.find(o): o for o in outs}
     cells: list[str] = []
     seen: set[str] = set()
     bit = scan_in
     for _ in range(limit):
-        found, at_out = _reach(nets, bit, scan_out, si_pin, through)
+        found, reached = _reach(nets, bit, targets, si_pin, through)
         after = cells[-1] if cells else scan_in
         if len(found) > 1:
             raise NetlistError(
                 f"{name}: the chain forks after {after} ({', '.join(sorted(found)[:3])})"
             )
         if not found:
-            if at_out:
-                return Chain(name, scan_in, scan_out, tuple(cells))
+            if reached:
+                # The first in the order given: a dedicated scan output, or the first port bit.
+                out = next(o for o in outs if nets.find(o) in reached)
+                return Chain(name, scan_in, out, tuple(cells))
             raise NetlistError(f"{name}: the chain breaks after {after}")
         inst = nets.by_name[next(iter(found))]
         if inst.name in seen:
             raise NetlistError(f"{name}: the chain loops at {inst.name}")
         seen.add(inst.name)
         cells.append(inst.name)
-        outs = [inst.pins[q][0] for q in q_pins if inst.pins.get(q)]
-        if not outs:
+        q_bits = [inst.pins[q][0] for q in q_pins if inst.pins.get(q)]
+        if not q_bits:
             raise NetlistError(f"{name}: {inst.name} has no {'/'.join(q_pins)} connected")
-        bit = outs[0]
+        bit = q_bits[0]
     raise NetlistError(f"{name}: longer than {limit} cells")
 
 
 def _reach(
-    nets: Nets, bit: str, scan_out: str, si_pin: str, through: dict[str, tuple[str, str]]
-) -> tuple[set[str], bool]:
-    """The cells whose scan input ``bit`` reaches through buffers, and whether it reaches
-    ``scan_out``."""
+    nets: Nets,
+    bit: str,
+    targets: dict[str, str],
+    si_pin: str,
+    through: dict[str, tuple[str, str]],
+) -> tuple[set[str], set[str]]:
+    """The cells whose scan input ``bit`` reaches through buffers, and the target nets it
+    reaches."""
     found: set[str] = set()
-    at_out = False
+    reached: set[str] = set()
     todo = [bit]
     visited: set[str] = set()
     while todo:
@@ -431,7 +441,8 @@ def _reach(
         if b in visited:
             continue
         visited.add(b)
-        at_out = at_out or nets.same(b, scan_out)
+        if b in targets:
+            reached.add(b)
         for inst, pin in nets.on(b):
             if pin == si_pin:
                 found.add(inst.name)
@@ -439,4 +450,4 @@ def _reach(
             for prefix, (in_pin, out_pin) in through.items():
                 if inst.cell.startswith(prefix) and pin == in_pin and inst.pins.get(out_pin):
                     todo.append(inst.pins[out_pin][0])
-    return found, at_out
+    return found, reached

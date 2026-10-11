@@ -114,3 +114,13 @@ def test_size_limit(monkeypatch):
     monkeypatch.setattr(netlist, "MAX_BYTES", 10)
     with pytest.raises(NetlistError, match="larger than"):
         parse_netlist(SCAN)
+
+
+def test_a_chain_may_end_on_a_functional_output():
+    # Without scan_out_0, the last flip-flop's output port is the scan output.
+    text = SCAN.replace("    scan_out_0);", "    unused);").replace(" output scan_out_0;\n", "")
+    text = text.replace(" assign scan_out_0 = \\u_a.q [1];\n", "")
+    top = parse_netlist(text).top("top")
+    nets = Nets(top)
+    chain = trace_chain(nets, "chain_0", "scan_in_0", top.port_bits("output"), through=BUFFERS)
+    assert chain.cells == ("_10_", "_11_") and chain.scan_out == "q_o[1]"

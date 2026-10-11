@@ -88,8 +88,11 @@ class Cancelled(Stopped):
     """``stop_all`` or a ``stop_when`` event stopped the run."""
 
 
-def run(cmd: list[str], cwd: Path, log: Path, timeout: float) -> int:
-    """Run ``cmd`` in ``cwd`` with its output in ``log`` and return its exit code.
+def run(
+    cmd: list[str], cwd: Path, log: Path, timeout: float, env: dict[str, str] | None = None
+) -> int:
+    """Run ``cmd`` in ``cwd`` with its output in ``log`` and return its exit code. ``env``
+    replaces the environment it starts with (the run's id and docker are added to it).
 
     At the time limit (TimedOut), on a stop request (Cancelled), or on any exception,
     including KeyboardInterrupt and the SystemExit that SIGTERM and SIGHUP raise while
@@ -102,7 +105,7 @@ def run(cmd: list[str], cwd: Path, log: Path, timeout: float) -> int:
     with (
         _registered(stop),
         _one_run_in(cwd),
-        _labelling_docker(cwd, run_id) as env,
+        _labelling_docker(cwd, run_id, env) as run_env,
         _signals_raise(),
         log.open("w") as fh,
     ):
@@ -113,7 +116,7 @@ def run(cmd: list[str], cwd: Path, log: Path, timeout: float) -> int:
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            env=env,
+            env=run_env,
             stdin=subprocess.DEVNULL,
             stdout=fh,
             stderr=subprocess.STDOUT,
@@ -249,11 +252,13 @@ exec {docker} "$@"
 
 
 @contextmanager
-def _labelling_docker(workdir: Path, run_id: str) -> Iterator[dict[str, str]]:
+def _labelling_docker(
+    workdir: Path, run_id: str, base: dict[str, str] | None = None
+) -> Iterator[dict[str, str]]:
     """The run's environment: CHIPLEAP_RUN_ID and, with docker installed, a PATH that
     starts with the labelling docker. It lives in the work directory, not in /tmp, which
     may not allow executables."""
-    env = {**os.environ, "CHIPLEAP_RUN_ID": run_id}
+    env = {**(os.environ if base is None else base), "CHIPLEAP_RUN_ID": run_id}
     real = _docker()
     if real is None:
         yield env
