@@ -29,7 +29,7 @@ from chipleap.gen.rtl import (
 )
 from chipleap.hw.design import Accel
 from chipleap.model.accel import Bandwidth, k_align, plan_tiles, simulate_job
-from chipleap.verify.tools import verilator
+from chipleap.verify.tools import clean_env, verilator
 
 
 class SimError(RuntimeError):
@@ -133,7 +133,9 @@ def build(
         "-j",
         str(jobs or max(1, (os.cpu_count() or 2) // 2)),
     ]
-    out = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
+    out = subprocess.run(
+        cmd, cwd=root, env=clean_env(exclude=[root]), capture_output=True, text=True, check=False
+    )
     if out.returncode != 0 or not binary.exists():
         tail = (out.stdout + out.stderr)[-3000:]
         raise SimError(f"Verilator build failed:\n{tail}")
@@ -191,7 +193,13 @@ def run(
     stdin = "\n".join(c.line() for c in cases) + "\n"
     try:
         out = subprocess.run(
-            [str(exe)], input=stdin, capture_output=True, text=True, timeout=timeout, check=False
+            [str(exe)],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=clean_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise SimError(f"simulation timed out after {timeout:.0f} s") from exc

@@ -101,7 +101,7 @@ def test_full_project(rtl):
     ("change", "message"),
     [
         ({"speed": 1}, "unknown top-level keys: speed"),
-        ({"formal": {}}, "formal: reserved for a later version of ChipLeap (D2)"),
+        ({"macros": {}}, "macros: reserved for a later version of ChipLeap (D3)"),
         ({"chip": {}}, "(D4)"),
         ({"schema": "project/v9"}, "schema 'project/v9' is not supported"),
         ({"top": "2bad"}, "top must be a Verilog identifier"),

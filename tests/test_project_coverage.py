@@ -62,6 +62,32 @@ def test_coverage_run(counter_project):
     assert kinds["line"]["covered"] == kinds["line"]["total"]  # both branches of the counter run
     assert 0 < kinds["toggle"]["covered"] < kinds["toggle"]["total"]  # the top bits never fall
     assert all(u["file"] == "rtl/counter.sv" for u in r.data["uncovered"])
+    assert "newly_covered" not in r.data  # the first run has nothing to compare with
+    # A test that also counts down from all ones reaches the toggles the first run missed.
+    test = counter_project / "test/test_counter.py"
+    test.write_text(
+        test.read_text()
+        + """
+
+@cocotb.test()
+async def wraps_around(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 10, unit="ns").start())
+    dut.rst_ni.value = 0
+    dut.en_i.value = 0
+    await ClockCycles(dut.clk_i, 2)
+    dut.rst_ni.value = 1
+    dut.en_i.value = 1
+    await ClockCycles(dut.clk_i, 70)
+"""
+    )
+    again = coverage(load_project(counter_project))
+    assert again.data["newly_covered"] > 0 and again.data["newly_uncovered"] == 0
+    assert "newly reached since the last run" in again.summary
+    from chipleap.rtl.coverage import gaps
+
+    g = gaps(load_project(counter_project))
+    assert g["stale"] is False and g["gaps_total"] < len(r.data["uncovered"])
+    assert "wraps_around" in g["tests"]["modules"]["test_counter"]
 
 
 def test_coverage_skips_old_verilator(counter_project, monkeypatch):
@@ -71,3 +97,138 @@ def test_coverage_skips_old_verilator(counter_project, monkeypatch):
     monkeypatch.setattr(sim_mod, "cocotb_version", lambda _python: "2.1.0")
     r = coverage(load_project(counter_project))
     assert r.status == "skipped" and "older than 5.036" in r.summary
+
+
+def summary_file(project, uncovered, digest=None):
+    """A last run's summary, as the coverage step writes it."""
+    import json
+
+    from chipleap.rtl.coverage import SUMMARY
+
+    path = project.build_dir / "coverage" / SUMMARY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "inputs_sha256": digest or project.inputs_digest(),
+                "kinds": {"line": {"covered": 3, "total": 4, "percent": 75.0}},
+                "uncovered": [
+                    {
+                        "kind": k,
+                        "file": "rtl/counter.sv",
+                        "line": ln,
+                        "name": n,
+                        "hier": "c",
+                        "count": 0,
+                    }
+                    for k, ln, n in uncovered
+                ],
+            }
+        )
+    )
+
+
+def test_the_delta_against_the_last_run():
+    from chipleap.rtl.coverage import delta
+
+    before = [{"kind": "line", "file": "a.sv", "line": 3, "name": "block", "hier": "t"}]
+    before += [{"kind": "branch", "file": "a.sv", "line": 9, "name": "else", "hier": "t"}]
+    now = [before[1], {"kind": "toggle", "file": "a.sv", "line": 2, "name": "x:0->1", "hier": "t"}]
+    assert delta(before, now) == {"newly_covered": 1, "newly_uncovered": 1}
+    assert delta(None, now) is None
+
+
+def test_gaps_show_the_source_around_each_point(counter_project):
+    from chipleap.rtl.coverage import gaps
+
+    p = load_project(counter_project)
+    with pytest.raises(ValueError, match="run coverage first"):
+        gaps(p)
+    summary_file(
+        p, [("branch", 10, "else"), ("toggle", 6, "en_i:1->0"), ("toggle", 6, "en_i:0->1")]
+    )
+    g = gaps(p, context=1)
+    assert g["stale"] is False and g["gaps_total"] == 2
+    first = g["gaps"][0]
+    assert (first["file"], first["line"]) == ("rtl/counter.sv", 6)
+    assert [x["name"] for x in first["points"]] == ["en_i:0->1", "en_i:1->0"]
+    lines = (counter_project / "rtl/counter.sv").read_text().splitlines()
+    assert first["source"] == {"start": 5, "lines": lines[4:7]}
+    assert g["tests"] == {
+        "dir": "test",
+        "modules": {"test_counter": ["counts_when_enabled", "holds_when_disabled"]},
+    }
+    assert [x["line"] for x in gaps(p, kinds="branch")["gaps"]] == [10]
+    assert gaps(p, file="rtl/other.sv")["gaps"] == []
+    assert len(gaps(p, limit=1)["gaps"]) == 1
+    # After the RTL changes, the last run no longer describes it.
+    (counter_project / "rtl/counter.sv").write_text("\n".join(lines) + "\n// edited\n")
+    assert gaps(load_project(counter_project))["stale"] is True
+
+
+def test_gaps_never_read_outside_the_project(counter_project, tmp_path):
+    from chipleap.rtl.coverage import gaps
+
+    p = load_project(counter_project)
+    (tmp_path / "secret.sv").write_text("TOP SECRET\n")
+    summary_file(p, [])
+    path = p.build_dir / "coverage/summary.json"
+    import json
+
+    data = json.loads(path.read_text())
+    data["uncovered"] = [
+        {
+            "kind": "line",
+            "file": "../secret.sv",
+            "line": 1,
+            "name": "block",
+            "hier": "t",
+            "count": 0,
+        }
+    ]
+    path.write_text(json.dumps(data))
+    g = gaps(p)
+    assert "TOP SECRET" not in json.dumps(g)
+    assert g["gaps"][0]["source"] is None
+
+
+@pytest.mark.parametrize(
+    "kept",
+    [
+        {"uncovered": "x"},
+        [1],
+        {"uncovered": [1]},
+        {"uncovered": [{"kind": "line", "file": "rtl/counter.sv", "name": "b"}]},
+        {"uncovered": [{"kind": "line", "file": 3, "line": 1, "name": "b"}]},
+        {"uncovered": [], "kinds": []},
+    ],
+)
+def test_a_kept_summary_of_another_shape_counts_as_no_run(counter_project, monkeypatch, kept):
+    # build/ can come with the repository, so the kept summary is checked before use: a
+    # malformed one is no last run, for coverage_gaps and for the step, never a TypeError.
+    import json
+
+    from chipleap.rtl import coverage as cov
+    from chipleap.rtl.sim import SimRun, TestResult
+
+    p = load_project(counter_project)
+    path = p.build_dir / "coverage" / cov.SUMMARY
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(kept))
+    with pytest.raises(ValueError, match="run coverage first"):
+        cov.gaps(p)
+
+    def run_tests(project, simulator, *, coverage):
+        work = project.work_dir("coverage", empty=True)
+        src = str(counter_project / "rtl/counter.sv")
+        (work / "coverage.dat").write_text(
+            "# SystemC::Coverage-3\n" + entry(src, 9, "line", "block", 0) + "\n"
+        )
+        test = TestResult("counts", "test_counter", "pass", "", "", 0, 1.0)
+        return SimRun("verilator", "5.052", tests=[test], workdir=work)
+
+    monkeypatch.setattr(cov, "choose", lambda project, key: (key, ""))
+    monkeypatch.setattr(cov, "run_tests", run_tests)
+    r = coverage(p)
+    assert r.status == "pass" and "newly reached" not in r.summary, r.summary
+    assert cov.gaps(load_project(counter_project))["gaps_total"] == 1

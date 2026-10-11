@@ -28,6 +28,7 @@ from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.synth import SMALL_WORDS, SynthError, SynthResult
+from chipleap.verify.tools import which
 
 TOP = "chipleap_accel"
 
@@ -215,7 +216,7 @@ def synthesize(
 ) -> SynthResult:
     """Synthesize ``accel`` at 8 and 16 buffer words with Genus or Design Compiler."""
     st = get_synth_tool(tool)
-    if remote is None and shutil.which(st.binary) is None:
+    if remote is None and which(st.binary) is None:
         raise SynthError(
             f"{st.vendor} {st.name} ({st.binary}) is not on the path; run it on a server "
             "with --remote HOST"

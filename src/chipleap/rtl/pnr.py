@@ -24,13 +24,33 @@ from typing import Any
 
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
-from chipleap.rtl.project import Project
+from chipleap.rtl.builddir import BuildDirError
+from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
 from chipleap.verify.pnr import PnrError, PnrResult, parse, run_librelane, signoff
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane
 
 SDC_NAME = "chipleap.sdc"
+RUN_TAG = "chipleap"
+
+
+def routed_run(project: Project) -> Path | None:
+    """The LibreLane run of ``chipleap verify --steps pnr``, if it finished: its final
+    netlist is there. Equivalence and gate-level simulation read it. A project from
+    someone else's repository can ship ``build`` or ``build/pnr`` as a symlink, so the
+    directories down to the run must be the project's own: one reached through a symlink
+    is refused (BuildDirError), never read."""
+    parts = ("build", "pnr", "runs", RUN_TAG)
+    run = project.root.joinpath(*parts)
+    if not (run / "final" / "nl" / f"{project.top}.nl.v").is_file():
+        return None
+    if run.resolve() != project.root.resolve().joinpath(*parts):
+        raise BuildDirError(
+            f"{'/'.join(parts)} leads through a symlink; ChipLeap reads only a run in the "
+            "project's own build directory: remove the symlink and run place and route again"
+        )
+    return run
 
 
 def sdc(project: Project) -> str:
@@ -173,11 +193,12 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
     return cfg
 
 
+@runs_tools
 def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     if project.tech != "ihp-sg13g2":
         raise PnrError(f"LibreLane runs on IHP SG13G2, not {project.tech}; use --pnr-tool innovus")
-    if not librelane().found:
-        raise PnrError("LibreLane is not installed")
+    if not (ll := librelane()).found:
+        raise PnrError(ll.missing("LibreLane"))
     work = project.work_dir(workdir or "pnr")
     cfg = config(project, work)
     metrics, gds = run_librelane(work, cfg)
@@ -216,6 +237,7 @@ def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
     }
 
 
+@runs_tools
 def pnr(project: Project) -> StepResult:
     """The place-and-route step: passes when setup is met at the slow corner, hold at every
     corner, and DRC, LVS and antenna checks are clean."""

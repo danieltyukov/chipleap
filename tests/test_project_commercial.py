@@ -47,7 +47,8 @@ def test_dc_script(project):
 
 
 def test_missing_tools_skip_with_a_way_forward(project, monkeypatch):
-    monkeypatch.setattr(commercial.shutil, "which", lambda name: None)
+    monkeypatch.setattr(commercial, "which", lambda name: None)
+    monkeypatch.setattr(sim_mod, "which", lambda name: None)
     r = commercial.synth_step(project, "genus")
     assert r.status == "skipped" and "--remote HOST" in r.summary
     r = commercial.pnr_step(project)

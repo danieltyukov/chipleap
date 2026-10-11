@@ -31,9 +31,9 @@ from chipleap.hw.tech import FLOP_OVERHEAD_NS, get_tech
 from chipleap.rtl import confine
 from chipleap.rtl import quote as q
 from chipleap.rtl.diag import Diagnostic, parse_sv2v, parse_yosys, relative
-from chipleap.rtl.project import Project
+from chipleap.rtl.project import Project, runs_tools
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import ihp_liberty, sv2v, yosys
+from chipleap.verify.tools import ihp_liberty, liberty_settings_problem, sv2v, yosys
 
 DEFAULT_PERIOD_NS = 10.0  # for designs without a clock
 _SEQ_CELL = re.compile(r"(?i)(^|_)(s?df|dl|lh|dff|latch)")
@@ -62,6 +62,16 @@ class RtlSynthResult:
     liberty: Path
     netlist: Path
     diagnostics: list[Diagnostic] = field(default_factory=list)
+
+
+def no_liberty(tech_key: str) -> str:
+    """Why there is no liberty for ``tech_key``, and what to do."""
+    if tech_key != "ihp-sg13g2":
+        return f"no liberty file for {tech_key}: add it with chipleap tech add --liberty, or use ihp-sg13g2"
+    why = liberty_settings_problem()
+    return f"no liberty file for {tech_key}: " + (
+        why or "install the open PDK or set CHIPLEAP_LIBERTY"
+    )
 
 
 def liberty_for(tech_key: str) -> Path | None:
@@ -108,6 +118,30 @@ def prepare_verilog(project: Project, workdir: Path) -> tuple[list[Path], bool]:
     return [out], False
 
 
+def read_commands(project: Project, files: list[Path], raw: bool) -> list[str]:
+    """The Yosys commands that read the project: sources, include directories, defines,
+    parameters and the top."""
+    opts: list[str] = []
+    if raw:
+        opts += [f"-I {q.yosys(i)}" for i in project.include_dirs]
+        opts += [f"-D {q.yosys(x)}" for x in project.define_args()]
+    reads = [" ".join(["read_verilog -sv", *opts, q.yosys(f)]) for f in files]
+    chparam = " ".join(f"-set {q.plain(k)} {int(v)}" for k, v in project.parameters.items())
+    top = q.plain(project.top)
+    return [
+        *reads,
+        *([f"chparam {chparam} {top}"] if chparam else []),
+        f"hierarchy -check -top {top}",
+    ]
+
+
+def front(project: Project, files: list[Path], raw: bool) -> list[str]:
+    """The Yosys commands that read the project and synthesize it to generic gates, before
+    flip-flops and cells are mapped to the liberty. Equivalence checking starts from the
+    same commands (``chipleap.rtl.equiv``)."""
+    return [*read_commands(project, files, raw), f"synth -top {q.plain(project.top)} -flatten"]
+
+
 def _script(
     project: Project, files: list[Path], raw: bool, liberty: Path, workdir: Path, target_ns: float
 ) -> str:
@@ -131,21 +165,11 @@ def _script(
             "stime,-p",
         ]
     )
-    opts: list[str] = []
-    if raw:
-        opts += [f"-I {q.yosys(i)}" for i in project.include_dirs]
-        opts += [f"-D {q.yosys(x)}" for x in project.define_args()]
-    reads = [" ".join(["read_verilog -sv", *opts, q.yosys(f)]) for f in files]
-    chparam = " ".join(f"-set {q.plain(k)} {int(v)}" for k, v in project.parameters.items())
-    top = q.plain(project.top)
     lib = q.yosys(liberty)
     netlist = workdir / f"{project.top}.synth.v"
     return "\n".join(
         [
-            *reads,
-            *([f"chparam {chparam} {top}"] if chparam else []),
-            f"hierarchy -check -top {top}",
-            f"synth -top {top} -flatten",
+            *front(project, files, raw),
             f"dfflibmap -liberty {lib}",
             # ChipLeap's own text, no project data: ";" inside quotes stays in the word.
             f'abc -liberty {lib} -script "{abc}"',
@@ -156,18 +180,14 @@ def _script(
     )
 
 
+@runs_tools
 def synthesize(project: Project, workdir: Path | None = None) -> RtlSynthResult:
     tool = yosys()
     if not tool.found or tool.path is None:
-        raise SynthUnavailable("Yosys is not installed")
+        raise SynthUnavailable(tool.missing("Yosys"))
     lib = liberty_for(project.tech)
     if lib is None:
-        hint = (
-            "install the open PDK or set CHIPLEAP_LIBERTY"
-            if project.tech == "ihp-sg13g2"
-            else "add it with chipleap tech add --liberty, or use ihp-sg13g2"
-        )
-        raise SynthUnavailable(f"no liberty file for {project.tech}: {hint}")
+        raise SynthUnavailable(no_liberty(project.tech))
     work = project.work_dir(workdir or "synth")
     files, raw = prepare_verilog(project, work)
     clk = project.fastest_clock
@@ -259,6 +279,7 @@ def synth_data(project: Project, r: RtlSynthResult) -> dict[str, Any]:
     }
 
 
+@runs_tools
 def synth(project: Project) -> StepResult:
     """The synthesis step: area, cells and an Fmax estimate on the project's technology."""
     try:

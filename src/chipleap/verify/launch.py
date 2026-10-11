@@ -40,6 +40,7 @@ from types import FrameType
 from typing import TYPE_CHECKING, Any
 
 from chipleap.rtl import builddir
+from chipleap.verify.tools import clean_env, which
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -253,7 +254,7 @@ def _labelling_docker(workdir: Path, run_id: str) -> Iterator[dict[str, str]]:
     """The run's environment: CHIPLEAP_RUN_ID and, with docker installed, a PATH that
     starts with the labelling docker. It lives in the work directory, not in /tmp, which
     may not allow executables."""
-    env = {**os.environ, "CHIPLEAP_RUN_ID": run_id}
+    env = {**clean_env(exclude=[workdir]), "CHIPLEAP_RUN_ID": run_id}
     real = _docker()
     if real is None:
         yield env
@@ -341,7 +342,7 @@ def _signals_held() -> Iterator[None]:
 
 
 def _docker() -> str | None:
-    return shutil.which("docker")
+    return which("docker")
 
 
 def _run_docker(args: list[str], timeout: float = 30) -> subprocess.CompletedProcess[str] | None:
@@ -353,6 +354,7 @@ def _run_docker(args: list[str], timeout: float = 30) -> subprocess.CompletedPro
     try:
         return subprocess.run(
             [exe, *args],
+            env=clean_env(),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
