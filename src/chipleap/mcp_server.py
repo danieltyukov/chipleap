@@ -54,7 +54,15 @@ RISC-V SoC with an accelerator. Typical flow:
    standalone: Arm, other RISC-V, FPGA); Verilator simulation against a golden model,
    Yosys synthesis on IHP SG13G2, X-HEEP's own config validation for xheep designs.
 All numbers are analytical estimates except those verify_soc measures. Say so when
-reporting them."""
+reporting them.
+
+For a design the user wrote (an RTL project with a project.yaml, see the
+chipleap://project-reference resource): describe_project checks the project file;
+lint_rtl, simulate_rtl, coverage_rtl and synthesize_rtl return structured diagnostics
+(file, line, severity, message, failing test) to fix the RTL in a loop; verify_rtl runs
+the steps and writes the report, place and route included when asked for.
+simulate_rtl, coverage_rtl and verify_rtl run the project's cocotb tests and golden
+model, which are code: use them only on projects the user trusts."""
 
 SPEC_REFERENCE = """# ChipLeap spec reference
 
@@ -134,6 +142,47 @@ accel:                              # or null
   double_buffer: true
 platform: xheep                     # xheep | standalone
 ```
+"""
+
+
+PROJECT_REFERENCE = """# ChipLeap project reference (project.yaml)
+
+A project describes RTL someone wrote. Paths are relative to the project file and must
+stay inside its directory (the user can allow others; a project file cannot). Names are
+identifiers without $, parameter values integers, define values short literals. An
+`include names a quoted relative file without "..", and a $readmemh file given as a
+string must be inside the project. On Linux, lint and Yosys synthesis read only the
+project and their own files (Landlock). Simulation runs the project's cocotb tests and
+golden model, which are code: only for projects the user trusts.
+
+```yaml
+schema: project/v1
+name: uart                    # letters, digits, _ . -
+top: uart_top
+sources: [rtl/uart_tx.sv, rtl/uart_rx.sv, rtl/uart_top.sv]   # globs allowed
+filelist: rtl/files.f         # optional: -f, +incdir+, +define+
+include_dirs: [rtl/include]
+defines: {SYNTHESIS: null, WIDTH: 8}
+parameters: {CLKS_PER_BIT: 16}  # integers, for the top module
+timescale: 1ns/1ps
+clocks: [{port: clk, period_ns: 20}]
+resets: [{port: rst_n, active: low, sync: false}]
+tech: ihp-sg13g2
+tests:                        # cocotb
+  dir: test
+  modules: [test_uart]        # default: every test_*.py
+  simulator: auto             # auto (Icarus, else Verilator) | icarus | verilator
+  seed: 1
+golden: model/uart_model.py   # Python reference model the tests import
+lint: {waivers: [rtl/waivers.vlt], slang: true}
+constraints: {sdc: constraints/uart.sdc}   # optional; else generated from clocks
+pnr: {utilisation: 45, density: 55, die_um: [300, 300], librelane: {}}
+```
+
+`chipleap project init DIR` writes one for existing RTL, guessing the top, clock and
+reset. Steps: lint (Verilator -Wall, slang -Wextra), sim (cocotb), coverage (Verilator
+line, branch and toggle), synth (Yosys on the technology's cells), pnr (LibreLane on
+IHP SG13G2: timing at the slow corner, DRC, LVS, antenna).
 """
 
 
@@ -383,6 +432,103 @@ def verify_soc(
     return {"steps": [{"step": r.name, "status": r.status, "summary": r.summary} for r in res]}
 
 
+def _project(project: str) -> Any:
+    from chipleap.rtl.project import ProjectError, load_project
+
+    try:
+        return load_project(Path(project).expanduser())
+    except ProjectError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _step(result: Any) -> dict[str, Any]:
+    return {"status": result.status, "summary": result.summary, **result.data}
+
+
+def describe_project(project: str) -> dict[str, Any]:
+    """The project with every default filled in, paths relative to it."""
+    p = _project(project)
+    return {**p.to_dict(), "input_files": len(p.input_files())}
+
+
+def lint_rtl(project: str) -> dict[str, Any]:
+    from chipleap.rtl.verify import run_step
+
+    return _step(run_step(_project(project), "lint"))
+
+
+def simulate_rtl(project: str, tests: str = "", simulator: str = "") -> dict[str, Any]:
+    """The project's cocotb tests; ``tests`` is a regular expression on test names."""
+    from chipleap.rtl.sim import NAMES
+    from chipleap.rtl.verify import run_step
+    from chipleap.verify.remote import Remote
+
+    if simulator and simulator not in (*NAMES, "auto"):
+        raise ToolError(f"simulator must be one of auto, {', '.join(NAMES)}")
+    p = _project(project)
+    # run_step sends only a commercial simulator to the user's server.
+    return _step(
+        run_step(p, "sim", sim_tool=simulator, test_filter=tests, remote=Remote.from_env())
+    )
+
+
+def coverage_rtl(project: str, limit: int = 50) -> dict[str, Any]:
+    """Line, branch and toggle coverage, and up to ``limit`` points never reached."""
+    from chipleap.rtl.verify import run_step
+
+    out = _step(run_step(_project(project), "coverage"))
+    if "uncovered" in out:
+        out["uncovered"] = out["uncovered"][: max(0, limit)]
+    return out
+
+
+def synthesize_rtl(project: str, tool: str = "yosys") -> dict[str, Any]:
+    from chipleap.rtl.verify import SYNTH_TOOLS, run_step
+    from chipleap.verify.remote import Remote
+
+    if tool not in SYNTH_TOOLS:
+        raise ToolError(f"tool must be one of {', '.join(SYNTH_TOOLS)}")
+    p = _project(project)
+    remote = Remote.from_env() if tool != "yosys" else None
+    return _step(run_step(p, "synth", synth_tool=tool, remote=remote))
+
+
+def verify_rtl(
+    project: str,
+    steps: str = "lint,sim,coverage,synth",
+    sim_tool: str = "",
+    synth_tool: str = "yosys",
+    pnr_tool: str = "librelane",
+) -> dict[str, Any]:
+    """Run the project's steps and write build/verify/report.html. As for verify_soc, a
+    server and its setup come only from the user's environment."""
+    from chipleap.rtl.verify import PNR_TOOLS, SIM_TOOLS, SYNTH_TOOLS, verify_project
+    from chipleap.verify.remote import Remote
+
+    if sim_tool and sim_tool not in SIM_TOOLS:
+        raise ToolError(f"sim_tool must be one of {', '.join(SIM_TOOLS)}")
+    if synth_tool not in SYNTH_TOOLS:
+        raise ToolError(f"synth_tool must be one of {', '.join(SYNTH_TOOLS)}")
+    if pnr_tool not in PNR_TOOLS:
+        raise ToolError(f"pnr_tool must be one of {', '.join(PNR_TOOLS)}")
+    p = _project(project)
+    try:
+        res = verify_project(
+            p.file,
+            steps=steps,
+            sim_tool=sim_tool,
+            synth_tool=synth_tool,
+            pnr_tool=pnr_tool,
+            remote=Remote.from_env(),
+        )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    return {
+        "steps": [{"step": r.name, "status": r.status, "summary": r.summary} for r in res],
+        "report": p.rel(p.build_dir / "verify" / "report.html"),
+    }
+
+
 def check_tools() -> dict[str, Any]:
     from chipleap.verify.tools import all_tools, commercial, ihp_liberty
 
@@ -407,9 +553,37 @@ TOOLS: dict[str, Callable[..., Any]] = {
     "generate_soc": generate_soc,
     "verify_soc": verify_soc,
     "check_tools": check_tools,
+    "describe_project": describe_project,
+    "lint_rtl": lint_rtl,
+    "simulate_rtl": simulate_rtl,
+    "coverage_rtl": coverage_rtl,
+    "synthesize_rtl": synthesize_rtl,
+    "verify_rtl": verify_rtl,
 }
 # Tools whose results depend on the machine or write files are logged but not replayed.
-SIDE_EFFECTS = {"generate_soc", "verify_soc", "check_tools"}
+SIDE_EFFECTS = {"generate_soc", "verify_soc", "check_tools", "verify_rtl"}
+# Tools that read a project. Their results depend on its files and on the installed tools,
+# so their log entries also carry a digest of every input file and the tool versions, and
+# a replay that differs says which of the two changed.
+PROJECT_TOOLS = {"describe_project", "lint_rtl", "simulate_rtl", "coverage_rtl", "synthesize_rtl"}
+
+
+def project_context(project: str) -> dict[str, Any]:
+    """The inputs digest and tool versions a project tool's result depends on."""
+    from chipleap.rtl.sim import cocotb_python, cocotb_version
+    from chipleap.verify.tools import iverilog, slang, sv2v, verilator, yosys
+
+    try:
+        digest = _project(project).inputs_digest()
+    except ToolError:
+        digest = None
+    py = cocotb_python()
+    tools: dict[str, str | None] = {
+        t.name: t.version if t.found else None
+        for t in (verilator(), slang(), iverilog(), yosys(), sv2v())
+    }
+    tools["cocotb"] = cocotb_version(py) if py else None
+    return {"inputs_sha256": digest, "tools": tools}
 
 
 def _digest(value: Any) -> str:
@@ -436,23 +610,42 @@ class RunLog:
             "result_sha256": _digest(result) if error is None else None,
             "error": error,
         }
+        if tool in PROJECT_TOOLS and isinstance(args.get("project"), str):
+            entry.update(project_context(args["project"]))
         with self.path.open("a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
 
 
-def replay(log: Path) -> tuple[int, int]:
-    """Re-run every replayable call in a run log. Returns (identical, total)."""
-    ok = total = 0
+def replay_calls(log: Path) -> list[dict[str, Any]]:
+    """Re-run every replayable call in a run log. Each call's outcome is ``same``, or why
+    it differs: ``inputs changed`` or ``tools changed`` for a project tool whose files or
+    tool versions are not what they were, else ``differs``."""
+    out = []
     for line in log.read_text().splitlines():
         if not line.strip():
             continue
         entry = json.loads(line)
         if entry["tool"] in SIDE_EFFECTS or entry.get("error"):
             continue
-        total += 1
-        result = TOOLS[entry["tool"]](**entry["args"])
-        ok += _digest(result) == entry["result_sha256"]
-    return ok, total
+        try:
+            result = TOOLS[entry["tool"]](**entry["args"])
+            outcome = "same" if _digest(result) == entry["result_sha256"] else "differs"
+        except Exception as exc:  # a project that moved or broke since the call
+            outcome = f"fails now: {exc}"
+        if outcome != "same" and "inputs_sha256" in entry:
+            now = project_context(entry["args"]["project"])
+            if now["inputs_sha256"] != entry["inputs_sha256"]:
+                outcome = "inputs changed"
+            elif now["tools"] != entry.get("tools"):
+                outcome = "tools changed"
+        out.append({"tool": entry["tool"], "args": entry["args"], "outcome": outcome})
+    return out
+
+
+def replay(log: Path) -> tuple[int, int]:
+    """Re-run every replayable call in a run log. Returns (identical, total)."""
+    calls = replay_calls(log)
+    return sum(c["outcome"] == "same" for c in calls), len(calls)
 
 
 def build_server(log_dir: str | None = None) -> Any:
@@ -589,6 +782,92 @@ def build_server(log_dir: str | None = None) -> Any:
     )
     def check_tools() -> dict[str, Any]:
         return logged("check_tools", TOOLS["check_tools"])()
+
+    @server.tool(
+        description="Read an RTL project (project.yaml, or the directory holding it) and "
+        "return it with every default filled in: top, sources, clocks, resets, tests. "
+        "Errors name the key that is wrong."
+    )
+    def describe_project(project: str) -> dict[str, Any]:
+        return logged("describe_project", TOOLS["describe_project"])(project=project)
+
+    @server.tool(
+        description="Lint an RTL project with Verilator -Wall and slang -Wextra (when "
+        "installed). Returns diagnostics with tool, severity, file, line, column, code and "
+        "message, paths relative to the project. Fix them and call again."
+    )
+    def lint_rtl(project: str) -> dict[str, Any]:
+        return logged("lint_rtl", TOOLS["lint_rtl"])(project=project)
+
+    @server.tool(
+        description="Run an RTL project's cocotb tests (Icarus or Verilator; Xcelium, VCS "
+        "or Questa where the user configured them). Returns every test's status and, for "
+        "failures, the message and the file and line that failed, plus compile errors as "
+        "diagnostics. tests: a regular expression selecting test names. Runs the project's "
+        "tests and golden model, which are code: only for projects the user trusts."
+    )
+    def simulate_rtl(project: str, tests: str = "", simulator: str = "") -> dict[str, Any]:
+        return logged("simulate_rtl", TOOLS["simulate_rtl"])(
+            project=project, tests=tests, simulator=simulator
+        )
+
+    @server.tool(
+        description="Code coverage of an RTL project's design from its cocotb tests on "
+        "Verilator: line, branch and toggle totals per file, and up to limit points the "
+        "tests never reached (file, line, kind, name), to write the tests that reach them. "
+        "Runs the project's tests, which are code: only for projects the user trusts."
+    )
+    def coverage_rtl(project: str, limit: int = 50) -> dict[str, Any]:
+        return logged("coverage_rtl", TOOLS["coverage_rtl"])(project=project, limit=limit)
+
+    @server.tool(
+        description="Synthesize an RTL project on its technology's standard cells (Yosys; "
+        "genus or dc where configured): cell area, cells, flip-flops, critical path and an "
+        "Fmax estimate at the typical corner, with Yosys warnings as diagnostics."
+    )
+    def synthesize_rtl(project: str, tool: str = "yosys") -> dict[str, Any]:
+        return logged("synthesize_rtl", TOOLS["synthesize_rtl"])(project=project, tool=tool)
+
+    @server.tool(
+        description="Verify an RTL project and write build/verify/report.html. Steps: "
+        "lint,sim,coverage,synth by default; add pnr (LibreLane place and route on IHP "
+        "SG13G2, minutes) or use all. Tools run where the user configured them. Runs the "
+        "project's tests and golden model, which are code: only for projects the user trusts."
+    )
+    def verify_rtl(
+        project: str,
+        steps: str = "lint,sim,coverage,synth",
+        sim_tool: str = "",
+        synth_tool: str = "yosys",
+        pnr_tool: str = "librelane",
+    ) -> dict[str, Any]:
+        return logged("verify_rtl", TOOLS["verify_rtl"])(
+            project=project,
+            steps=steps,
+            sim_tool=sim_tool,
+            synth_tool=synth_tool,
+            pnr_tool=pnr_tool,
+        )
+
+    @server.resource(
+        "chipleap://project-reference",
+        name="project-reference",
+        description="RTL project file format (project.yaml)",
+        mime_type="text/markdown",
+    )
+    def project_reference() -> str:
+        return PROJECT_REFERENCE
+
+    @server.prompt(description="Make an RTL project lint clean and pass its tests.")
+    def fix_rtl(project: str) -> str:
+        return (
+            f"Work on the RTL project at {project} with ChipLeap. Call describe_project, then "
+            "lint_rtl and simulate_rtl. For each diagnostic, open the file at the line it names "
+            "and fix the RTL (or the test, if the test is wrong; say which and why). Call the "
+            "tools again until lint is clean and every test passes, then call coverage_rtl and "
+            "say which uncovered points matter, and synthesize_rtl for area and the Fmax "
+            "estimate. Never edit a test only to make it pass."
+        )
 
     @server.resource(
         "chipleap://spec-reference",

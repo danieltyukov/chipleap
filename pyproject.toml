@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "chipleap"
 dynamic = ["version"]
-description = "Architecture exploration from workload to RISC-V SoC: an analytical evaluator, an explainable design agent and an X-HEEP generator with RTL verification."
+description = "From a spec or from your RTL to GDS: architecture exploration with an explainable agent, an X-HEEP accelerator generator, and lint, cocotb simulation, coverage, synthesis and place and route for any RTL."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -20,6 +20,8 @@ keywords = [
   "accelerator",
   "mcp",
   "eda",
+  "rtl",
+  "cocotb",
 ]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -34,7 +36,17 @@ dependencies = ["pyyaml>=6.0", "mcp>=1.10"]
 
 [project.optional-dependencies]
 xheep = ["hjson>=3.0", "mako>=1.2"]
-dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10", "types-PyYAML", "hjson>=3.0", "mako>=1.2"]
+rtl = ["cocotb>=2.0"]
+dev = [
+  "pytest>=8",
+  "pytest-cov>=5",
+  "ruff>=0.6",
+  "mypy>=1.10",
+  "types-PyYAML",
+  "hjson>=3.0",
+  "mako>=1.2",
+  "cocotb>=2.0",
+]
 site = ["pillow>=10"]
 
 [project.scripts]
@@ -82,5 +94,5 @@ strict = true
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = ["mcp.*"]
+module = ["mcp.*", "cocotb_tools.*"]
 ignore_missing_imports = true

@@ -147,7 +147,7 @@ exit
 _NUM = r"(-?\d+(?:\.\d+)?)"
 
 
-def parse_area(tool: str, text: str) -> tuple[float, int]:
+def parse_area(tool: str, text: str, top: str = TOP) -> tuple[float, int]:
     """Cell area and cell count from a report_area."""
     if tool == "dc":
         m = re.search(r"Total cell area:\s*" + _NUM, text)
@@ -157,7 +157,7 @@ def parse_area(tool: str, text: str) -> tuple[float, int]:
         return float(m.group(1)), int(cells.group(1)) if cells else 0
     for line in text.splitlines():
         tok = line.split()
-        if tok and tok[0] == TOP and len(tok) >= 4:
+        if tok and tok[0] == top and len(tok) >= 4:
             nums = [t for t in tok[1:] if re.fullmatch(r"-?\d+(\.\d+)?", t)]
             if len(nums) >= 2:
                 return float(nums[1]), int(float(nums[0]))

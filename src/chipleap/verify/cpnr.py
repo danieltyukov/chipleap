@@ -63,21 +63,32 @@ def script(
     slow: bool = True,
     power: str = "VDD",
     ground: str = "VSS",
+    top: str = TOP,
+    density: float | None = None,
+    die_um: tuple[float, float] | None = None,
 ) -> str:
-    """The Innovus run: floorplan to checks, with the measurements written to a file."""
+    """The Innovus run: floorplan to checks, with the measurements written to a file.
+    ``density`` caps global placement density (0 to 1); ``die_um`` fixes the die size
+    instead of deriving it from ``utilisation``."""
     if not lefs:
         raise PnrError("Innovus needs the technology LEF and the cell LEFs")
     views = ["func_typ", "func_slow"] if slow else ["func_typ"]
+    if die_um:
+        w, h = (float(x) for x in die_um)
+        floorplan = f"floorPlan -d {w:g} {h:g} $margin $margin $margin $margin"
+    else:
+        floorplan = f"floorPlan -r 1.0 {float(utilisation):g} $margin $margin $margin $margin"
+    max_density = f" -place_global_max_density {float(density):g}" if density is not None else ""
     timing = "\n".join(
         f"report_timing -late -view {v} -max_paths 1 > setup_{v}.rpt\n"
         f"report_timing -early -view {v} -max_paths 1 > hold_{v}.rpt"
         for v in views
     )
-    return f"""# ChipLeap: Innovus place and route of the synthesized accelerator.
+    return f"""# ChipLeap: Innovus place and route of the synthesized {top}.
 #   innovus -batch -no_gui -files pnr.tcl -log innovus
 set init_lef_file [list {" ".join(lefs)}]
 set init_verilog {netlist}
-set init_top_cell {TOP}
+set init_top_cell {top}
 set init_pwr_net {power}
 set init_gnd_net {ground}
 set init_mmmc_file mmmc.tcl
@@ -106,7 +117,7 @@ proc rule {{layer attr}} {{ return [lindex [dbGet [dbGet -p head.layers.name $la
 set w [expr {{max(2.0, 4 * max([rule $h minWidth], [rule $v minWidth]))}}]
 set s [expr {{max(1.0, 3 * max([rule $h minSpacing], [rule $v minSpacing]))}}]
 set margin [expr {{2 * $w + 2 * $s + 4.0}}]
-floorPlan -r 1.0 {utilisation:g} $margin $margin $margin $margin
+{floorplan}
 
 globalNetConnect {power} -type pgpin -pin {power} -inst * -verbose
 globalNetConnect {ground} -type pgpin -pin {ground} -inst * -verbose
@@ -118,7 +129,7 @@ addStripe -nets {{{power} {ground}}} -layer $v -direction vertical -width $w -sp
     -set_to_set_distance [expr {{20 * $w + 2 * $s}}] -start_from left -start_offset 20
 sroute -connect {{corePin}} -nets {{{power} {ground}}} -allowJogging 1 -allowLayerChange 1
 
-setPlaceMode -place_global_place_io_pins true -place_global_ignore_scan true
+setPlaceMode -place_global_place_io_pins true -place_global_ignore_scan true{max_density}
 place_opt_design
 
 # Clock-tree cells: some libraries' buffers are not picked up automatically, so name them,
@@ -180,7 +191,7 @@ puts $f "cell_um2 $area"
 puts $f "cells $cells"
 puts $f "power_layers $h $v"
 close $f
-saveDesign {TOP}.enc
+saveDesign {top}.enc
 puts "{DONE}"
 exit
 """

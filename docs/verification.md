@@ -13,6 +13,8 @@ xheep   PASS     X-HEEP validated the configuration (... banks, ... interleaved)
 
 Results go to `DIR/verify/verify.json` and `DIR/verify/VERIFY.md`. Choose steps with `--steps consistency,lint,sim,synth,xheep`; place and route (`pnr`) takes many minutes, so it runs only when named, or with `--steps all`.
 
+This page is about generated bundles. The same command verifies RTL you wrote, given a `project.yaml`: lint with Verilator and slang, your cocotb tests on Icarus or Verilator, coverage, synthesis and place and route with the signoff settings below. [projects.md](projects.md) describes it.
+
 ## Consistency
 
 A bundle gets edited by hand once it leaves ChipLeap. This step re-derives every generated value from `design.yaml` and reports each file that disagrees:
@@ -92,6 +94,8 @@ This needs `hjson` and `mako` in the Python that runs ChipLeap: `pip install "ch
 
 Tests that need Verilator are marked `rtl` and skip themselves when it is missing; tests
 that need a commercial simulator or synthesis tool on the path are marked `commercial`.
+The RTL project tests (`tests/test_project_*.py`) skip themselves without cocotb, Icarus,
+Verilator 5.036 or newer (for coverage), slang, Yosys or LibreLane, whichever they need.
 
 ## Commercial tools
 

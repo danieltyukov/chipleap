@@ -1,0 +1,13 @@
+# A UART (8N1) as an RTL project: chipleap verify examples/uart --steps all
+schema: project/v1
+name: uart
+description: A UART transmitter and receiver (8N1) with cocotb tests against a Python reference model.
+top: uart
+sources: [rtl/uart_tx.sv, rtl/uart_rx.sv, rtl/uart.sv]
+# 16 clock cycles per bit keeps simulation short; 434 is 115200 baud at 50 MHz.
+parameters: {CLKS_PER_BIT: 16}
+clocks: [{port: clk_i, period_ns: 10}]
+resets: [{port: rst_ni, active: low, sync: false}]
+tech: ihp-sg13g2
+tests: {dir: test, seed: 1}
+golden: model/uart_model.py

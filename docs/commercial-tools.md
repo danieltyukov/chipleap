@@ -92,6 +92,10 @@ This is a block-level check of the accelerator, not a sign-off: the foundry's ow
 decks (Calibre or Pegasus) and LVS are the next step for a tape-out, run on the GDS your
 flow streams out with the PDK's layer map.
 
+## Your own RTL
+
+The same options work on an RTL project ([projects.md](projects.md)). `--sim-tool xcelium`, `vcs` or `questa` runs the project's cocotb tests on that simulator through cocotb's own runner; on a server, the project's sources, tests and golden model travel in the work directory, and the server needs a `python3` with cocotb on the path after the setup snippet. `--synth-tool genus` or `dc` synthesizes the project's top with its include directories, defines, parameters and clocks, and `--pnr-tool innovus` runs Genus and Innovus on it with the script above. The project's technology picks the library.
+
 ## Running on a server
 
 `--remote HOST` (or `CHIPLEAP_REMOTE`) copies the step's work directory to a fresh
