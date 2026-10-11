@@ -7,22 +7,34 @@ rule ids and messages; tests/fixtures/macro/expected.json pins both.
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from chipleap.macro.evidence import sha256_file
-from chipleap.macro.gds import GdsError, GdsLibrary, read_gds
+from chipleap.macro.gds import GdsCycleError, GdsError, GdsLibrary, parse_gds
+from chipleap.macro.limits import (
+    LIMITS,
+    FileTooLarge,
+    LimitError,
+    Limits,
+    json_depth,
+    read_capped,
+    toml_depth,
+)
 from chipleap.macro.manifest import (
     MANIFEST,
     OPENADA_SCHEMA,
     SCHEMA_VERSION,
     Manifest,
+    Pin,
+    parse_toml,
 )
 from chipleap.macro.schema import validate_def
-from chipleap.macro.text import fmt_g, plural, quote
+from chipleap.macro.text import fmt_g, names, plural, quote
 from chipleap.macro.views import (
     LefMacro,
     ViewError,
@@ -32,11 +44,6 @@ from chipleap.macro.views import (
     spice_subckt,
     verilog_ports,
 )
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
 
 REPORT_SCHEMA = "macro.check/v1"
 REQUIRED_EVIDENCE = ("drc", "lvs")
@@ -72,14 +79,18 @@ class Report:
     name: str | None = None
     kind: str | None = None
     findings: list[Finding] = field(default_factory=list)
+    # Findings past Limits.findings are counted, not listed; a check.limit warning
+    # at the end of the list says how many.
+    unlisted_errors: int = 0
+    unlisted_warnings: int = 0
 
     @property
     def errors(self) -> int:
-        return sum(f.severity == "error" for f in self.findings)
+        return sum(f.severity == "error" for f in self.findings) + self.unlisted_errors
 
     @property
     def warnings(self) -> int:
-        return sum(f.severity == "warning" for f in self.findings)
+        return sum(f.severity == "warning" for f in self.findings) + self.unlisted_warnings
 
     @property
     def passed(self) -> bool:
@@ -124,8 +135,8 @@ def commits_match(a: str, b: str) -> bool:
     return a.startswith(b) or b.startswith(a)
 
 
-def _read_text(path: Path) -> str:
-    return path.read_bytes().decode("utf-8", errors="replace")
+def _text(data: bytes) -> str:
+    return data.decode("utf-8", errors="replace")
 
 
 def _no_constant(name: str) -> None:
@@ -133,17 +144,74 @@ def _no_constant(name: str) -> None:
     raise ValueError(f"{name} is not a JSON value")
 
 
+def _json_int(s: str) -> int | float:
+    # serde_json keeps an integer that fits in 64 bits and reads others as a float.
+    if s == "-0":
+        return -0.0
+    if len(s.lstrip("-")) <= 20:
+        v = int(s)
+        if -(1 << 63) <= v < (1 << 64):
+            return v
+    return _json_float(s)
+
+
+def _json_float(s: str) -> float:
+    x = float(s)
+    if math.isinf(x):
+        raise ValueError("number out of range")
+    return x
+
+
+def _loads_json(text: str) -> Any:
+    return json.loads(
+        text, parse_constant=_no_constant, parse_int=_json_int, parse_float=_json_float
+    )
+
+
+def _nesting(limit: int, what: str = "tables and arrays") -> str:
+    return f"{what} nest more than {limit} deep"
+
+
 def _sum_text(err: Exception) -> str:
     return str(err).splitlines()[0] if str(err) else type(err).__name__
 
 
+def _unreadable(err: OSError) -> str:
+    # The reason alone: str(err) would put this machine's absolute path in the report.
+    return f"cannot read the file: {err.strerror or _sum_text(err)}"
+
+
 class _Checker:
-    def __init__(self, root: Path, report: Report) -> None:
+    def __init__(self, root: Path, report: Report, limits: Limits) -> None:
         self.root = root
         self.report = report
+        self.limits = limits
+        self.too_large: set[str] = set()  # files reported as too large, once each
+        self.digests: dict[str, str | None] = {}  # package files hashed for evidence
+        self.hash_limit_reported = False
 
     def add(self, rule: str, file: str, message: str, severity: str = "error") -> None:
-        self.report.findings.append(Finding(rule, severity, file, message))
+        if len(self.report.findings) < self.limits.findings:
+            self.report.findings.append(Finding(rule, severity, file, message))
+        elif severity == "error":
+            self.report.unlisted_errors += 1
+        else:
+            self.report.unlisted_warnings += 1
+
+    def read(self, rel: str, limit: int) -> bytes | None:
+        """A package file's bytes, or None after reporting why it cannot be read."""
+        try:
+            return read_capped(self.root / rel, limit)
+        except FileTooLarge as exc:
+            self.report_too_large(rel, str(exc))
+        except OSError as exc:
+            self.add("file.unreadable", rel, _unreadable(exc))
+        return None
+
+    def report_too_large(self, rel: str, message: str) -> None:
+        if rel not in self.too_large:
+            self.too_large.add(rel)
+            self.add("file.too_large", rel, message)
 
     # macro.toml
 
@@ -152,9 +220,20 @@ class _Checker:
         if not path.is_file():
             self.add("file.missing", MANIFEST, "required file is missing")
             return None
+        raw = self.read(MANIFEST, self.limits.manifest_bytes)
+        if raw is None:
+            return None
         try:
-            data = tomllib.loads(path.read_bytes().decode("utf-8"))
-        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            self.add("manifest.syntax", MANIFEST, f"not valid TOML: {_sum_text(exc)}")
+            return None
+        if toml_depth(text) > self.limits.nesting:
+            self.add("manifest.limit", MANIFEST, _nesting(self.limits.nesting))
+            return None
+        try:
+            data = parse_toml(text)
+        except ValueError as exc:
             self.add("manifest.syntax", MANIFEST, f"not valid TOML: {_sum_text(exc)}")
             return None
         version = data.get("schema")
@@ -171,8 +250,16 @@ class _Checker:
         if errors:
             return None
         m = Manifest.from_dict(data)
+        # Every view check walks every pin bit, so a huge bus would stall them all.
+        too_big = False
+        if m.pin_bits() > self.limits.pins:
+            self.add("manifest.limit", MANIFEST, f"the pins have more than {self.limits.pins} bits")
+            too_big = True
+        if len(m.corners) > self.limits.corners:
+            self.add("manifest.limit", MANIFEST, f"more than {self.limits.corners} corners")
+            too_big = True
         self.report.name, self.report.kind = m.name, m.kind
-        return m
+        return None if too_big else m
 
     def semantics(self, m: Manifest) -> None:
         seen: set[str] = set()
@@ -182,14 +269,21 @@ class _Checker:
                     "manifest.duplicate_pin", MANIFEST, f"pin {quote(p.name)} is declared twice"
                 )
             seen.add(p.name)
+        # Lookups by name: a long pin or domain list must not cost its square.
+        by_name: dict[str, Pin] = {}
+        for p in m.pins:
+            by_name.setdefault(p.name, p)
+        listed: dict[str, set[str]] = {"power": set(), "ground": set()}
         domains: set[str] = set()
         for d in m.domains:
             if d.name in domains:
                 self.add("manifest.domain", MANIFEST, f"domain {quote(d.name)} is declared twice")
             domains.add(d.name)
-            for role, names in (("power", d.power), ("ground", d.ground)):
-                for n in names:
-                    pin = m.pin(n)
+            listed["power"].update(d.power)
+            listed["ground"].update(d.ground)
+            for role, pin_names in (("power", d.power), ("ground", d.ground)):
+                for n in pin_names:
+                    pin = by_name.get(n)
                     if pin is None:
                         self.add(
                             "manifest.domain",
@@ -206,10 +300,7 @@ class _Checker:
                         )
         for p in m.pins:
             if p.is_supply:
-                listed = any(
-                    p.name in (d.power if p.kind == "power" else d.ground) for d in m.domains
-                )
-                if not listed:
+                if p.name not in listed[p.kind]:
                     self.add(
                         "manifest.domain", MANIFEST, f"{p.kind} pin {quote(p.name)} is in no domain"
                     )
@@ -252,12 +343,20 @@ class _Checker:
 
     def gds(self, m: Manifest, lef: LefMacro | None) -> None:
         f = m.file("gds")
-        path = self.root / f
-        if not path.is_file():
+        if not (self.root / f).is_file():
+            return
+        data = self.read(f, self.limits.gds_bytes)
+        if data is None:
             return
         try:
-            lib = read_gds(path)
-        except (OSError, GdsError) as exc:
+            lib = parse_gds(data, self.limits)
+        except GdsCycleError as exc:
+            self.add("gds.cycle", f, str(exc))
+            return
+        except LimitError as exc:
+            self.add("gds.limit", f, str(exc))
+            return
+        except GdsError as exc:
             self.add("gds.parse", f, f"cannot read the GDS: {_sum_text(exc)}")
             return
         tops = lib.top_cells()
@@ -265,9 +364,10 @@ class _Checker:
             if m.name in lib.cells:
                 self.add("gds.top_cell", f, f"cell {quote(m.name)} is placed inside another cell")
             else:
-                found = ", ".join(quote(t) for t in tops) or "none"
                 self.add(
-                    "gds.top_cell", f, f"no top cell is named {quote(m.name)}; top cells: {found}"
+                    "gds.top_cell",
+                    f,
+                    f"no top cell is named {quote(m.name)}; top cells: {names(tops)}",
                 )
             return
         for t in tops:
@@ -293,6 +393,9 @@ class _Checker:
     def _gds_bbox(self, m: Manifest, lib: GdsLibrary, f: str, lef: LefMacro | None) -> None:
         try:
             box = lib.bbox(m.name)
+        except LimitError as exc:
+            self.add("gds.limit", f, str(exc))
+            return
         except GdsError as exc:
             self.add("gds.parse", f, f"cannot read the GDS: {_sum_text(exc)}")
             return
@@ -314,27 +417,48 @@ class _Checker:
 
     # LEF
 
-    def read_lef(self, m: Manifest) -> tuple[LefMacro | None, str | None, list[str]]:
-        """(macro, parse error, other macro names) without reporting anything."""
-        path = self.root / m.file("lef")
+    def read_lef(self, m: Manifest) -> tuple[LefMacro | None, tuple[str, str] | None, list[str]]:
+        """(macro, (rule, message) of a problem, macro names), reporting nothing: the GDS
+        check needs the LEF origin, and the LEF's own findings come after the GDS's."""
+        f = m.file("lef")
+        path = self.root / f
         if not path.is_file():
             return None, None, []
         try:
-            macros = parse_lef(_read_text(path))
+            macros = parse_lef(_text(read_capped(path, self.limits.view_bytes)), self.limits)
+        except FileTooLarge as exc:
+            return None, ("file.too_large", str(exc)), []
+        except OSError as exc:
+            return None, ("file.unreadable", _unreadable(exc)), []
+        except LimitError as exc:
+            return None, ("lef.limit", str(exc)), []
         except ViewError as exc:
-            return None, _sum_text(exc), []
+            return None, ("lef.parse", f"cannot read the LEF: {_sum_text(exc)}"), []
         return macros.get(m.name), None, sorted(macros)
 
-    def lef(self, m: Manifest, lef: LefMacro | None, error: str | None, names: list[str]) -> None:
+    def lef(
+        self,
+        m: Manifest,
+        lef: LefMacro | None,
+        problem: tuple[str, str] | None,
+        macro_names: list[str],
+    ) -> None:
         f = m.file("lef")
         if not (self.root / f).is_file():
             return
-        if error is not None:
-            self.add("lef.parse", f, f"cannot read the LEF: {error}")
+        if problem is not None:
+            rule, message = problem
+            if rule == "file.too_large":
+                self.report_too_large(f, message)
+            else:
+                self.add(rule, f, message)
             return
         if lef is None:
-            others = ", ".join(quote(n) for n in names) or "none"
-            self.add("lef.macro", f, f"no MACRO {quote(m.name)}; macros in the file: {others}")
+            self.add(
+                "lef.macro",
+                f,
+                f"no MACRO {quote(m.name)}; macros in the file: {names(macro_names)}",
+            )
             return
         cls = lef.cls.split(" ")[0]
         if cls != "BLOCK":
@@ -399,11 +523,16 @@ class _Checker:
     # Liberty
 
     def liberty(self, m: Manifest, f: str) -> None:
-        path = self.root / f
-        if not path.is_file():
+        if not (self.root / f).is_file():
+            return
+        data = self.read(f, self.limits.liberty_bytes)
+        if data is None:
             return
         try:
-            cells = parse_liberty(_read_text(path))
+            cells = parse_liberty(_text(data), self.limits, cell=m.name)
+        except LimitError as exc:
+            self.add("lib.limit", f, str(exc))
+            return
         except ViewError as exc:
             self.add("lib.parse", f, f"cannot read the liberty file: {_sum_text(exc)}")
             return
@@ -454,10 +583,16 @@ class _Checker:
 
     def verilog(self, m: Manifest) -> None:
         f = m.file("v")
-        path = self.root / f
-        if not path.is_file():
+        if not (self.root / f).is_file():
             return
-        ports = verilog_ports(_read_text(path), m.name)
+        data = self.read(f, self.limits.view_bytes)
+        if data is None:
+            return
+        try:
+            ports = verilog_ports(_text(data), m.name, self.limits)
+        except LimitError as exc:
+            self.add("verilog.limit", f, str(exc))
+            return
         if ports is None:
             self.add("verilog.module", f, f"no module {quote(m.name)}")
             return
@@ -517,10 +652,16 @@ class _Checker:
 
     def spice(self, m: Manifest) -> None:
         f = m.file("spice")
-        path = self.root / f
-        if not path.is_file():
+        if not (self.root / f).is_file():
             return
-        sub = spice_subckt(_read_text(path), m.name)
+        data = self.read(f, self.limits.view_bytes)
+        if data is None:
+            return
+        try:
+            sub = spice_subckt(_text(data), m.name, self.limits)
+        except LimitError as exc:
+            self.add("spice.limit", f, str(exc))
+            return
         if sub is None:
             self.add("spice.subckt", f, f"no .subckt {quote(m.name)}")
             return
@@ -550,12 +691,22 @@ class _Checker:
 
     def specs(self, m: Manifest) -> None:
         f = m.file("specs.toml")
-        path = self.root / f
-        if not path.is_file():
+        if not (self.root / f).is_file():
+            return
+        raw = self.read(f, self.limits.specs_bytes)
+        if raw is None:
             return
         try:
-            data = tomllib.loads(path.read_bytes().decode("utf-8"))
-        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            self.add("specs.parse", f, f"not valid TOML: {_sum_text(exc)}")
+            return
+        if toml_depth(text) > self.limits.nesting:
+            self.add("specs.limit", f, _nesting(self.limits.nesting))
+            return
+        try:
+            data = parse_toml(text)
+        except ValueError as exc:
             self.add("specs.parse", f, f"not valid TOML: {_sum_text(exc)}")
             return
         errors = validate_def("specs_file", data)
@@ -608,15 +759,76 @@ class _Checker:
 
     # Evidence
 
+    def summaries(self, folder: Path) -> list[str] | None:
+        """Names of the summaries in evidence/, sorted; None when there are too many.
+        Names that are not UTF-8 are skipped, as aispice cannot name them either."""
+        if not folder.is_dir():
+            return []
+        found: list[str] = []
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json") or not entry.is_file():
+                    continue
+                try:
+                    os.fsencode(entry.name).decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                found.append(entry.name)
+                if len(found) > self.limits.evidence_files:
+                    return None
+        return sorted(found)
+
+    def digest(self, f: str, base: str) -> str | None:
+        """The SHA-256 of package file ``base``, hashed once per check. A file already
+        found too large for its own check is not read here either."""
+        if base in self.digests:
+            return self.digests[base]
+        if base in self.too_large:
+            return None
+        if len(self.digests) >= self.limits.hashed_files:
+            if not self.hash_limit_reported:
+                self.hash_limit_reported = True
+                self.add(
+                    "evidence.limit",
+                    f,
+                    f"the summaries name more than {self.limits.hashed_files} package files "
+                    "as inputs",
+                )
+            return None
+        digest: str | None = None
+        try:
+            digest = sha256_file(self.root / base, self.limits.gds_bytes)
+        except FileTooLarge as exc:
+            self.report_too_large(base, str(exc))
+        except OSError as exc:
+            self.add("file.unreadable", base, _unreadable(exc))
+        self.digests[base] = digest
+        return digest
+
     def evidence(self, m: Manifest) -> None:
-        folder = self.root / "evidence"
-        files = sorted(p for p in folder.glob("*.json") if p.is_file()) if folder.is_dir() else []
+        files = self.summaries(self.root / "evidence")
+        if files is None:
+            self.add(
+                "evidence.limit",
+                "evidence",
+                f"more than {self.limits.evidence_files} summaries",
+            )
+            return
         seen: set[str] = set()
-        for path in files:
-            f = f"evidence/{path.name}"
+        for name in files:
+            f = f"evidence/{name}"
+            raw = self.read(f, self.limits.evidence_bytes)
+            if raw is None:
+                continue
             try:
-                doc = json.loads(path.read_bytes().decode("utf-8"), parse_constant=_no_constant)
-            except (UnicodeDecodeError, ValueError) as exc:
+                text = raw.decode("utf-8")
+                if json_depth(text) > self.limits.nesting:
+                    self.add(
+                        "evidence.limit", f, _nesting(self.limits.nesting, "objects and arrays")
+                    )
+                    continue
+                doc = _loads_json(text)
+            except ValueError as exc:
                 self.add("evidence.parse", f, f"not valid JSON: {_sum_text(exc)}")
                 continue
             openada = isinstance(doc, dict) and doc.get("schema") == OPENADA_SCHEMA
@@ -640,11 +852,10 @@ class _Checker:
                 if not isinstance(path_in, str) or not isinstance(digest, str):
                     continue
                 base = path_in.replace("\\", "/").rsplit("/", 1)[-1]
-                target = self.root / base
-                if base in ("", ".", "..") or not target.is_file():
+                if base in ("", ".", "..") or not (self.root / base).is_file():
                     continue
-                actual = sha256_file(target)
-                if actual != digest:
+                actual = self.digest(f, base)
+                if actual is not None and actual != digest:
                     self.add(
                         "evidence.stale",
                         f,
@@ -698,28 +909,45 @@ def required_files(m: Manifest) -> list[str]:
     return files
 
 
-def check_package(path: str | Path, pdk: str | None = None) -> Report:
+def check_package(path: str | Path, pdk: str | None = None, limits: Limits = LIMITS) -> Report:
     """Check a macro package directory against macro/v1.
 
     ``pdk`` is the placing chip's PDK, ``NAME`` or ``NAME@COMMIT``. Raises
     ``FileNotFoundError`` when ``path`` is not a directory and ``ValueError`` when
-    ``pdk`` is malformed.
+    ``pdk`` is malformed. ``limits`` exist for tests; the spec fixes their values.
     """
     expected = parse_pdk_option(pdk) if pdk is not None else None
     root = Path(path)
     if not root.is_dir():
         raise FileNotFoundError(f"{path} is not a directory")
     report = Report(str(path))
-    c = _Checker(root, report)
+    c = _Checker(root, report, limits)
+    _check(c, expected)
+    unlisted = report.unlisted_errors + report.unlisted_warnings
+    if unlisted:
+        report.findings.append(
+            Finding(
+                "check.limit",
+                "warning",
+                ".",
+                f"{plural(unlisted, 'more finding')} not listed: "
+                f"{plural(report.unlisted_errors, 'error')}, "
+                f"{plural(report.unlisted_warnings, 'warning')}",
+            )
+        )
+    return report
+
+
+def _check(c: _Checker, expected: tuple[str, str | None] | None) -> None:
     m = c.manifest()
     if m is None:
-        return report
+        return
     c.semantics(m)
     c.dirname(m)
     c.required_files(m)
-    lef, lef_error, lef_names = c.read_lef(m)
+    lef, lef_problem, lef_names = c.read_lef(m)
     c.gds(m, lef)
-    c.lef(m, lef, lef_error, lef_names)
+    c.lef(m, lef, lef_problem, lef_names)
     libs = [m.file("lib")] + [
         x.liberty for x in m.corners if x.liberty and x.liberty != m.file("lib")
     ]
@@ -731,4 +959,3 @@ def check_package(path: str | Path, pdk: str | None = None) -> Report:
     c.evidence(m)
     if expected is not None:
         c.expected_pdk(m, *expected)
-    return report

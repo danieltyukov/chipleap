@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chipleap.macro.limits import LIMITS, LimitError, Limits, read_capped, toml_depth
 from chipleap.macro.schema import validate_def
 
 if sys.version_info >= (3, 11):
@@ -100,6 +102,10 @@ class Manifest:
 
     def pin(self, name: str) -> Pin | None:
         return next((p for p in self.pins if p.name == name), None)
+
+    def pin_bits(self) -> int:
+        """How many bits the pins have: a bus's width, one for a scalar."""
+        return sum(1 if p.width is None else p.width for p in self.pins)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Manifest:
@@ -240,18 +246,46 @@ def _is_table_list(v: Any) -> bool:
     return isinstance(v, list) and bool(v) and all(isinstance(x, dict) for x in v)
 
 
+def parse_toml(text: str) -> dict[str, Any]:
+    """Parse TOML as aispice's toml crate reads it: an integer must fit in 64 bits and a
+    float must not overflow, where tomllib would accept both. Raises
+    ``tomllib.TOMLDecodeError`` or ``ValueError``."""
+    data = tomllib.loads(text, parse_float=_toml_float)
+    stack: list[Any] = [data]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, dict):
+            stack.extend(v.values())
+        elif isinstance(v, list):
+            stack.extend(v)
+        elif isinstance(v, int) and not isinstance(v, bool) and not -(1 << 63) <= v < (1 << 63):
+            raise ValueError("integer does not fit in 64 bits")
+    return data
+
+
+def _toml_float(s: str) -> float:
+    x = float(s)
+    if math.isinf(x) and s.lstrip("+-") != "inf":
+        raise ValueError("floating-point number overflowed")
+    return x
+
+
 def read_toml(path: Path) -> dict[str, Any]:
-    """Parse a TOML file. Raises ``tomllib.TOMLDecodeError`` or ``UnicodeDecodeError``."""
-    return tomllib.loads(path.read_text(encoding="utf-8"))
+    """Parse a TOML file. Raises ``tomllib.TOMLDecodeError``, ``UnicodeDecodeError`` or
+    ``ValueError``."""
+    return parse_toml(path.read_text(encoding="utf-8"))
 
 
-def load_manifest(path: str | Path) -> Manifest:
+def load_manifest(path: str | Path, limits: Limits = LIMITS) -> Manifest:
     """Read macro.toml from a package directory (or the file itself)."""
     p = Path(path)
     if p.is_dir():
         p = p / MANIFEST
     try:
-        data = read_toml(p)
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        text = read_capped(p, limits.manifest_bytes).decode("utf-8")
+        if toml_depth(text) > limits.nesting:
+            raise LimitError(f"tables and arrays nest more than {limits.nesting} deep")
+        data = parse_toml(text)
+    except (OSError, ValueError) as exc:
         raise MacroError(f"cannot read {p}: {exc}") from exc
     return Manifest.from_dict(data)

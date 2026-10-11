@@ -43,3 +43,13 @@ def describe(value: Any) -> str:
 
 def join(path: str, key: str) -> str:
     return f"{path}.{key}" if path else key
+
+
+def names(items: list[str], shown: int = 10) -> str:
+    """Quoted names for a message: "none" for no names, and after the first ``shown``
+    only how many more there are, so a file with a million cells gives a short line."""
+    if not items:
+        return "none"
+    text = ", ".join(quote(x) for x in items[:shown])
+    rest = len(items) - shown
+    return f"{text} and {rest} more" if rest > 0 else text

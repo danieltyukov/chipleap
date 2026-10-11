@@ -7,14 +7,29 @@ import json
 from pathlib import Path
 from typing import Any
 
+from chipleap.macro.limits import FileTooLarge, too_large
 from chipleap.macro.manifest import EVIDENCE_SCHEMA, MacroError, Pdk
 from chipleap.macro.schema import validate_def
 
 STATUSES = ("pass", "fail", "unknown", "not_applicable")
 
 
-def sha256_file(path: str | Path) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def sha256_file(path: str | Path, limit: int | None = None) -> str:
+    """The file's SHA-256, read in chunks. With ``limit``, raises
+    :class:`~chipleap.macro.limits.FileTooLarge` for a larger file before reading it."""
+    p = Path(path)
+    size = p.stat().st_size
+    if limit is not None and size > limit:
+        raise FileTooLarge(too_large(size, limit))
+    h = hashlib.sha256()
+    read = 0
+    with p.open("rb") as f:
+        while chunk := f.read(1 << 20):
+            read += len(chunk)
+            if limit is not None and read > limit:
+                raise FileTooLarge(too_large(read, limit))  # it grew after the stat
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _file_ref(path: Path, package: Path, sha256: str) -> dict[str, str]:

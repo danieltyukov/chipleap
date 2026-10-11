@@ -11,6 +11,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from chipleap.macro.limits import LIMITS, LimitError, Limits
+from chipleap.macro.text import quote
+
 
 class ViewError(ValueError):
     pass
@@ -44,7 +47,20 @@ def _lines(text: str) -> list[str]:
 
 
 def _int(s: str) -> int | None:
-    return int(s) if _INT.fullmatch(s) else None
+    """A signed decimal that fits in 64 bits, as aispice's ``parse_int`` reads it."""
+    if not _INT.fullmatch(s):
+        return None
+    # Leading zeros are allowed; more than 19 other digits never fit, and int() of a
+    # long string is slow or refused.
+    digits = s.lstrip("+-").lstrip("0")
+    if len(digits) > 19:
+        return None
+    v = -int(digits or "0") if s.startswith("-") else int(digits or "0")
+    return v if -(1 << 63) <= v < (1 << 63) else None
+
+
+def _too_many_tokens(what: str, limits: Limits) -> LimitError:
+    return LimitError(f"the {what} has more than {limits.tokens} tokens")
 
 
 # LEF
@@ -68,17 +84,21 @@ class LefMacro:
     pins: dict[str, LefPin] = field(default_factory=dict)
 
 
-def _lef_tokens(text: str) -> list[str]:
+def _lef_tokens(text: str, limits: Limits) -> list[str]:
     toks: list[str] = []
     i, n = 0, len(text)
     while i < n:
         c = text[i]
         if c in WHITESPACE:
             i += 1
-        elif c == "#":
-            while i < n and text[i] != "\n":
-                i += 1
-        elif c == '"':
+            continue
+        if c == "#":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if len(toks) >= limits.tokens:
+            raise _too_many_tokens("LEF", limits)
+        if c == '"':
             j = text.find('"', i + 1)
             j = n if j < 0 else j
             toks.append(text[i + 1 : j])
@@ -122,16 +142,17 @@ def _lef_number(s: str) -> float:
     return float(s)
 
 
-def parse_lef(text: str) -> dict[str, LefMacro]:
-    """Every MACRO in a LEF file, by name. Raises :class:`ViewError` when it is malformed."""
-    toks = _lef_tokens(text)
+def parse_lef(text: str, limits: Limits = LIMITS) -> dict[str, LefMacro]:
+    """Every MACRO in a LEF file, by name. Raises :class:`ViewError` when it is malformed
+    and :class:`LimitError` when it has too many tokens or a macro too many pins."""
+    toks = _lef_tokens(text, limits)
     macros: dict[str, LefMacro] = {}
     i = 0
     while i < len(toks):
         if toks[i] == "MACRO" and i + 1 < len(toks):
             t = _Tokens(toks, f"MACRO {toks[i + 1]}")
             t.i = i + 2
-            m = _lef_macro(t, toks[i + 1])
+            m = _lef_macro(t, toks[i + 1], limits)
             macros.setdefault(m.name, m)
             i = t.i
         else:
@@ -139,8 +160,9 @@ def parse_lef(text: str) -> dict[str, LefMacro]:
     return macros
 
 
-def _lef_macro(t: _Tokens, name: str) -> LefMacro:
+def _lef_macro(t: _Tokens, name: str, limits: Limits) -> LefMacro:
     m = LefMacro(name)
+    pins = 0
     while True:
         kw = t.next()
         if kw == "END":
@@ -160,6 +182,9 @@ def _lef_macro(t: _Tokens, name: str) -> LefMacro:
                 raise ViewError(f"SIZE of {name} is not 'SIZE w BY h'")
             m.size = (_lef_number(args[0]), _lef_number(args[2]))
         elif kw == "PIN":
+            pins += 1
+            if pins > limits.pins:
+                raise LimitError(f"MACRO {quote(name)} has more than {limits.pins} pins")
             pin = _lef_pin(t, t.next())
             m.pins.setdefault(pin.name, pin)
         elif kw in ("OBS", "DENSITY"):
@@ -222,11 +247,19 @@ class _Group:
     groups: list[_Group] = field(default_factory=list)
 
 
-def _lib_tokens(text: str) -> list[tuple[str, bool, bool]]:
+def _lib_tokens(text: str, limits: Limits) -> list[tuple[str, bool, bool]]:
     """(token, starts a line, is a quoted string) for a liberty file."""
     toks: list[tuple[str, bool, bool]] = []
     i, n = 0, len(text)
     line_start = True
+
+    def add(tok: str, quoted: bool) -> None:
+        nonlocal line_start
+        if len(toks) >= limits.tokens:
+            raise _too_many_tokens("liberty file", limits)
+        toks.append((tok, line_start, quoted))
+        line_start = False
+
     while i < n:
         c = text[i]
         if c == "\n":
@@ -253,12 +286,10 @@ def _lib_tokens(text: str) -> list[tuple[str, bool, bool]]:
                 j += 2 if text[j] == "\\" else 1
             if j >= n:
                 raise ViewError("unterminated string")
-            toks.append((text[i + 1 : j], line_start, True))
-            line_start = False
+            add(text[i + 1 : j], True)
             i = j + 1
         elif c in "(){}:;,":
-            toks.append((c, line_start, False))
-            line_start = False
+            add(c, False)
             i += 1
         else:
             j = i
@@ -266,19 +297,18 @@ def _lib_tokens(text: str) -> list[tuple[str, bool, bool]]:
                 if text.startswith("/*", j) or text.startswith("//", j):
                     break
                 j += 1
-            toks.append((text[i:j], line_start, False))
-            line_start = False
+            add(text[i:j], False)
             i = j
     return toks
 
 
-def _lib_parse(toks: list[tuple[str, bool, bool]]) -> list[_Group]:
+def _lib_parse(toks: list[tuple[str, bool, bool]], limits: Limits) -> list[_Group]:
     pos = 0
 
     def peek(k: int = 0) -> tuple[str, bool, bool] | None:
         return toks[pos + k] if pos + k < len(toks) else None
 
-    def body(top: bool) -> list[_Group]:
+    def body(top: bool, depth: int) -> list[_Group]:
         nonlocal pos
         groups: list[_Group] = []
         attrs: dict[str, str] = {}
@@ -331,10 +361,12 @@ def _lib_parse(toks: list[tuple[str, bool, bool]]) -> list[_Group]:
                     args.append(" ".join(cur))
                 t = peek()
                 if t is not None and t[0] == "{" and not t[2]:
+                    if depth >= limits.nesting:
+                        raise LimitError(f"groups nest more than {limits.nesting} deep")
                     pos += 1
                     g = _Group(name, args)
                     stack.append(g)
-                    g.groups = body(False)
+                    g.groups = body(False, depth + 1)
                     stack.pop()
                     groups.append(g)
                 elif t is not None and t[0] == ";" and not t[2]:
@@ -343,16 +375,20 @@ def _lib_parse(toks: list[tuple[str, bool, bool]]) -> list[_Group]:
                 raise ViewError(f"expected : or ( after {name}")
 
     stack: list[_Group] = [_Group("", [])]
-    return body(True)
+    return body(True, 0)
 
 
-def parse_liberty(text: str) -> dict[str, dict[str, LibPin]]:
-    """Pins of every cell in the library group, by cell then pin bit name.
+def parse_liberty(
+    text: str, limits: Limits = LIMITS, cell: str | None = None
+) -> dict[str, dict[str, LibPin]]:
+    """Pins of every cell in the library group (or only of ``cell``), by cell then pin
+    bit name. The first cell of a name counts; later ones are skipped.
 
     Bus bits come from the bus's ``bus_type`` and from ``pin`` groups inside the bus.
-    Raises :class:`ViewError` on a syntax error.
+    Raises :class:`ViewError` on a syntax error and :class:`LimitError` when the file
+    has too many tokens, nests groups too deep or a cell declares too many pins.
     """
-    groups = _lib_parse(_lib_tokens(text))
+    groups = _lib_parse(_lib_tokens(text, limits), limits)
     lib = next((g for g in groups if g.kind == "library"), None)
     if lib is None:
         raise ViewError("no library group")
@@ -364,15 +400,28 @@ def parse_liberty(text: str) -> dict[str, dict[str, LibPin]]:
             if lo is not None and hi is not None:
                 types[g.args[0]] = (lo, hi)
     cells: dict[str, dict[str, LibPin]] = {}
-    for cell in lib.groups:
-        if cell.kind != "cell" or not cell.args:
+    for c in lib.groups:
+        if c.kind != "cell" or not c.args or c.args[0] in cells:
+            continue
+        if cell is not None and c.args[0] != cell:
             continue
         pins: dict[str, LibPin] = {}
-        for g in cell.groups:
+        declared = 0
+
+        def declare(n: int, cell_name: str = c.args[0]) -> None:
+            # Counted before bits are made, so a bus of 2**63 bits costs nothing.
+            nonlocal declared
+            declared += n
+            if declared > limits.pins:
+                raise LimitError(f"cell {quote(cell_name)} has more than {limits.pins} pins")
+
+        for g in c.groups:
             if g.kind == "pg_pin":
+                declare(len(g.args))
                 for name in g.args:
                     pins.setdefault(name, LibPin(name, pg=True, pg_type=g.attrs.get("pg_type", "")))
             elif g.kind == "pin":
+                declare(len(g.args))
                 for name in g.args:
                     pins.setdefault(name, _lib_pin(name, g, "", 0))
             elif g.kind == "bus" and g.args:
@@ -381,11 +430,13 @@ def parse_liberty(text: str) -> dict[str, dict[str, LibPin]]:
                 rng = types.get(g.attrs.get("bus_type", ""))
                 if rng is not None:
                     lo, hi = sorted(rng)
+                    declare(hi - lo + 1)
                     for i in range(lo, hi + 1):
                         bit = f"{g.args[0]}[{i}]"
                         pins.setdefault(bit, LibPin(bit, direction=direction, timing=timing))
                 for inner in g.groups:
                     if inner.kind == "pin":
+                        declare(len(inner.args))
                         for name in inner.args:
                             p = _lib_pin(name, inner, direction, timing)
                             if name in pins:
@@ -393,7 +444,7 @@ def parse_liberty(text: str) -> dict[str, dict[str, LibPin]]:
                                 pins[name].timing = p.timing
                             else:
                                 pins[name] = p
-        cells.setdefault(cell.args[0], pins)
+        cells[c.args[0]] = pins
     return cells
 
 
@@ -438,6 +489,9 @@ _TYPE_WORDS = {
 }
 
 
+_VERILOG_SPECIAL = re.compile(r'[/("]')
+
+
 def _verilog_clean(text: str) -> str:
     """Drop comments, attributes and preprocessor lines; keep both sides of an ifdef."""
     out: list[str] = []
@@ -461,20 +515,27 @@ def _verilog_clean(text: str) -> str:
             out.append('""')
             i = j + 1
         else:
-            out.append(text[i])
-            i += 1
+            # Copy up to the next character that can start a comment, an attribute or
+            # a string, rather than one character at a time.
+            m = _VERILOG_SPECIAL.search(text, i + 1)
+            j = n if m is None else m.start()
+            out.append(text[i:j])
+            i = j
     lines = "".join(out).split("\n")
     return "\n".join(" " if ln.lstrip(WHITESPACE).startswith("`") else ln for ln in lines)
 
 
-def _verilog_tokens(text: str) -> list[str]:
+def _verilog_tokens(text: str, limits: Limits) -> list[str]:
     toks: list[str] = []
     i, n = 0, len(text)
     while i < n:
         c = text[i]
         if c in WHITESPACE:
             i += 1
-        elif (c.isascii() and c.isalnum()) or c in "_$`'":
+            continue
+        if len(toks) >= limits.tokens:
+            raise _too_many_tokens("Verilog file", limits)
+        if (c.isascii() and c.isalnum()) or c in "_$`'":
             j = i
             while j < n and ((text[j].isascii() and text[j].isalnum()) or text[j] in "_$`'"):
                 j += 1
@@ -506,15 +567,19 @@ def _range_width(toks: list[str]) -> int:
     return 0
 
 
-def _types_and_range(toks: list[str], k: int) -> tuple[int, int | None]:
-    """Skip net and data type words and one packed range from ``toks[k]``.
-    Returns the index of the name and the range's width (None without a range)."""
+def _types_and_range(toks: list[str], k: int, end: int) -> tuple[int, int | None]:
+    """Skip net and data type words and one packed range from ``toks[k]``, looking no
+    further than ``toks[end - 1]``, the end of the declaration. Returns the index of the
+    name and the range's width (None without a range)."""
     width: int | None = None
-    while k < len(toks):
+    while k < end:
         if toks[k] in _TYPE_WORDS:
             k += 1
         elif toks[k] == "[" and width is None:
-            j = toks.index("]", k) if "]" in toks[k:] else len(toks)
+            try:
+                j = toks.index("]", k, end)
+            except ValueError:
+                j = end
             width = _range_width(toks[k + 1 : j])
             k = j + 1
         else:
@@ -522,16 +587,17 @@ def _types_and_range(toks: list[str], k: int) -> tuple[int, int | None]:
     return k, width
 
 
-def _split(toks: list[str], seps: str = ",") -> list[list[str]]:
-    """Split tokens at top-level separators (outside brackets and parentheses)."""
+def _split(toks: list[str]) -> list[list[str]]:
+    """Split tokens at top-level commas (outside brackets and parentheses)."""
     items: list[list[str]] = [[]]
     depth = 0
     for t in toks:
-        if t in "([{":
+        # Whole tokens: a lone backslash gives an empty one, and "" is in every string.
+        if t in ("(", "[", "{"):
             depth += 1
-        elif t in ")]}":
+        elif t in (")", "]", "}"):
             depth -= 1
-        if depth == 0 and t in seps:
+        if depth == 0 and t == ",":
             items.append([])
         else:
             items[-1].append(t)
@@ -552,9 +618,11 @@ def _skip_parens(toks: list[str], i: int) -> int:
     return i
 
 
-def verilog_ports(text: str, module: str) -> list[VerilogPort] | None:
-    """The ports of ``module`` in declaration order, or None if the module is absent."""
-    toks = _verilog_tokens(_verilog_clean(text))
+def verilog_ports(text: str, module: str, limits: Limits = LIMITS) -> list[VerilogPort] | None:
+    """The ports of ``module`` in declaration order, or None if the module is absent.
+    Raises :class:`LimitError` when the file has too many tokens or the module too many
+    ports."""
+    toks = _verilog_tokens(_verilog_clean(text), limits)
     start = next(
         (
             k
@@ -581,10 +649,10 @@ def verilog_ports(text: str, module: str) -> list[VerilogPort] | None:
                 k = 0
                 if item[0] in _DIRECTIONS:
                     direction = item[0]
-                    k, width = _types_and_range(item, 1)
+                    k, width = _types_and_range(item, 1, len(item))
                 else:
                     # A port without a direction keyword continues the previous one.
-                    k, own = _types_and_range(item, 0)
+                    k, own = _types_and_range(item, 0, len(item))
                     width = own if own is not None else width
                 if k < len(item):
                     ports.append(VerilogPort(item[k], direction, width))
@@ -592,6 +660,8 @@ def verilog_ports(text: str, module: str) -> list[VerilogPort] | None:
                 ports.append(VerilogPort(item[1]))
             else:
                 ports.append(VerilogPort(item[0]))
+    if len(ports) > limits.pins:
+        raise LimitError(f"module {quote(module)} has more than {limits.pins} ports")
     if ansi:
         return ports
     by_name = {p.name: p for p in ports}
@@ -605,7 +675,7 @@ def verilog_ports(text: str, module: str) -> list[VerilogPort] | None:
             j = i
             while j < len(toks) and toks[j] != ";":
                 j += 1
-            k, width = _types_and_range(toks, i + 1)
+            k, width = _types_and_range(toks, i + 1, j)
             for item in _split(toks[k:j]):
                 if item[0] in by_name:
                     by_name[item[0]].direction = t
@@ -625,15 +695,27 @@ class SpiceSubckt:
     pininfo: dict[str, str]  # lower-cased port -> I, O or B
 
 
-def spice_subckt(text: str, name: str) -> SpiceSubckt | None:
-    """``.subckt name`` with its ports and ``*.PININFO`` directions, or None if absent."""
+def spice_subckt(text: str, name: str, limits: Limits = LIMITS) -> SpiceSubckt | None:
+    """``.subckt name`` with its ports and ``*.PININFO`` directions, or None if absent.
+    Raises :class:`LimitError` when the file has too many lines or the subcircuit too
+    many ports."""
+    count = text.count("\n") + text.count("\r") - text.count("\r\n") + 1
+    if count > limits.tokens:
+        raise LimitError(f"the SPICE file has more than {limits.tokens} lines")
     lines: list[str] = []
+    # The pieces of the line being continued: joined once, since appending to the
+    # same string again and again copies it every time.
+    parts: list[str] | None = None
     for raw in _lines(text):
         s = raw.strip(WHITESPACE)
-        if s.startswith("+") and lines:
-            lines[-1] += " " + s[1:]
-        else:
-            lines.append(s)
+        if s.startswith("+") and parts is not None:
+            parts.append(s[1:])
+            continue
+        if parts is not None:
+            lines.append(" ".join(parts))
+        parts = [s]
+    if parts is not None:
+        lines.append(" ".join(parts))
     for k, line in enumerate(lines):
         ws = words(_spice_code(line))
         if (
@@ -647,6 +729,8 @@ def spice_subckt(text: str, name: str) -> SpiceSubckt | None:
             if ascii_lower(w) == "params:" or "=" in w:
                 break
             ports.append(w)
+        if len(ports) > limits.pins:
+            raise LimitError(f".subckt {quote(ws[1])} has more than {limits.pins} ports")
         info: dict[str, str] = {}
         for later in lines[k + 1 :]:
             if ascii_lower(later).startswith(".ends"):
