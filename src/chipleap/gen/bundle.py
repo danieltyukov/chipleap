@@ -31,6 +31,7 @@ from chipleap.hw.design import Design, DesignError
 from chipleap.report.data import explore_dict, explore_markdown
 from chipleap.report.html import explore_html
 from chipleap.report.text import ip_note
+from chipleap.rtl import builddir
 from chipleap.spec import Spec
 
 
@@ -136,16 +137,14 @@ def write_bundle(
     candidate: Candidate | None = None,
     result: ExploreResult | None = None,
 ) -> list[Path]:
-    """Write a design bundle. Returns the files written."""
+    """Write a design bundle. Returns the files written. ``out`` may not be a symlink, and
+    nothing is written through one inside it (``chipleap.rtl.builddir``)."""
     design.validate()  # among other things, the name becomes a file name here
-    out.mkdir(parents=True, exist_ok=True)
+    builddir.output_dir(out)
     written: list[Path] = []
 
     def put(rel: str, text: str) -> None:
-        path = out / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-        written.append(path)
+        written.append(builddir.write_text(out, rel, text))
 
     put("design.yaml", yaml.safe_dump(design_document(design, weights), sort_keys=False))
     if spec is not None:

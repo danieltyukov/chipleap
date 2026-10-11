@@ -8,6 +8,7 @@ from pathlib import Path
 
 from chipleap.hw.design import Accel
 from chipleap.model.accel import ACC_ROWS
+from chipleap.rtl import builddir
 
 DATAFLOW_ID = {"gemv": 0, "ws": 1, "os": 2}
 # Default base address of the accelerator's registers: X-HEEP's external peripheral
@@ -129,7 +130,8 @@ def write_rtl(
     """Write the accelerator, its wrappers, driver and testbench into ``out``.
 
     ``xheep`` adds the X-HEEP adapter (register interface and OBI); ``standalone`` adds
-    the AXI4 wrapper and its testbench instead, for any host.
+    the AXI4 wrapper and its testbench instead, for any host. Nothing is written through
+    a symlink in ``out`` (``chipleap.rtl.builddir.write_text``).
     """
     p = rtl_params(accel)
     files: dict[Path, str] = {out / "rtl" / "chipleap_accel.sv": accel_sv()}
@@ -150,8 +152,7 @@ def write_rtl(
             out / "tb" / "tb_chipleap.cpp": testbench_cpp(),
         }
     for path, text in files.items():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
+        builddir.write_text(out, path.relative_to(out), text)
     return list(files)
 
 

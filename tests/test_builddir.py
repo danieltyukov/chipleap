@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from chipleap.cli import main
+from chipleap.gen.bundle import write_bundle
+from chipleap.hw import Accel, Design
 from chipleap.rtl import builddir, commercial
 from chipleap.rtl import pnr as pnr_mod
 from chipleap.rtl import sim as sim_mod
@@ -22,10 +24,22 @@ from chipleap.verify import launch
 from chipleap.verify.pnr import PnrError
 from chipleap.verify.remote import Remote, RemoteError
 from chipleap.verify.result import StepResult
+from chipleap.verify.run import verify_bundle
 from chipleap.verify.tools import Tool
 
 SERVER = Remote("server")
 FOUND = Tool("stand-in", "/bin/true", "1", "tests")
+DESIGN = Design(
+    name="demo",
+    tech="generic-28nm",
+    freq_mhz=400,
+    cpu="cv32e40p",
+    bus="NtoM",
+    banks=4,
+    il_banks=4,
+    ext_mem="lpddr4-x16",
+    accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2),
+)
 
 
 @pytest.fixture
@@ -317,3 +331,76 @@ def test_the_run_lock_is_not_created_through_a_symlink(tmp_path, home):
     with pytest.raises(OSError):
         launch.run(["true"], work, work / "run.log", 10)
     assert not (home / "made.lock").exists()
+
+
+# Bundles and files the user names: a new spec, the output directory, a bundle's verify/.
+
+
+@pytest.mark.parametrize("to", ["keep.txt", "new.yaml"])
+def test_init_spec_does_not_write_through_a_symlink(tmp_path, home, to):
+    link(tmp_path / "spec.yaml", home / to)
+    before = tree(home)
+    assert main(["init", str(tmp_path / "spec.yaml"), "--force"]) == 2
+    assert tree(home) == before
+
+
+@pytest.mark.parametrize("at", ["out", "out/rtl", "out/README.md"])
+def test_a_bundle_is_not_written_through_a_symlink(tmp_path, home, at):
+    link(tmp_path / at, home / "keep.txt" if at.endswith(".md") else home)
+    before = tree(home)
+    with pytest.raises(BuildDirError, match="is a symlink"):
+        write_bundle(tmp_path / "out", DESIGN)
+    assert tree(home) == before
+
+
+def test_the_cli_refuses_a_symlinked_output_directory(tmp_path, home, capsys):
+    write_bundle(tmp_path / "first", DESIGN)
+    link(tmp_path / "out", home)
+    before = tree(home)
+    assert main(["generate", str(tmp_path / "first"), "-o", str(tmp_path / "out")]) == 2
+    assert "out is a symlink" in capsys.readouterr().err
+    assert tree(home) == before
+
+
+@pytest.fixture
+def bundle(tmp_path: Path) -> Path:
+    b = tmp_path / "bundle"
+    write_bundle(b, DESIGN)
+    return b
+
+
+# Each bundle step, how verify_bundle is asked for it, and its work directory in verify/.
+BUNDLE_STEPS = {
+    "yosys": ({"steps": ("synth",)}, "synth"),
+    "librelane": ({"steps": ("pnr",)}, "pnr"),
+    "xcelium": ({"steps": ("sim",), "sim_tool": "xcelium", "remote": SERVER}, "xcelium"),
+    "genus": ({"steps": ("synth",), "synth_tool": "genus", "remote": SERVER}, "genus"),
+    "innovus": ({"steps": ("pnr",), "pnr_tool": "innovus", "remote": SERVER}, "innovus"),
+}
+
+
+@pytest.mark.parametrize("name", BUNDLE_STEPS)
+@pytest.mark.parametrize("whole", [True, False], ids=["verify", "verify-step"])
+def test_verifying_a_bundle_refuses_a_symlinked_verify_directory(bundle, home, name, whole):
+    kwargs, step_dir = BUNDLE_STEPS[name]
+    at = "verify" if whole else f"verify/{step_dir}"
+    link(bundle / at, home)
+    before = tree(home)
+    with pytest.raises(BuildDirError, match=f"{at} is a symlink"):
+        verify_bundle(bundle, **kwargs)
+    assert tree(home) == before
+
+
+def test_verifying_a_symlinked_bundle_is_refused(bundle, tmp_path):
+    link(tmp_path / "alias", bundle)
+    with pytest.raises(BuildDirError, match="alias is a symlink"):
+        verify_bundle(tmp_path / "alias", steps=("consistency",))
+    assert not (bundle / "verify").exists()
+
+
+def test_a_bundle_report_that_is_a_symlink_is_replaced(bundle, home):
+    link(bundle / "verify/VERIFY.md", home / "keep.txt")
+    before = tree(home)
+    verify_bundle(bundle, steps=("consistency",))
+    assert tree(home) == before
+    assert "consist" in (bundle / "verify/VERIFY.md").read_text()

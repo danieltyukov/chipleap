@@ -21,6 +21,7 @@ from chipleap.model.bounds import requirements
 from chipleap.model.evaluate import evaluate
 from chipleap.report.data import evaluation_dict, explore_dict, requirements_dict
 from chipleap.report.text import format_evaluation, format_explore, format_requirements, num, table
+from chipleap.rtl import builddir
 from chipleap.spec import Spec, SpecError, load_spec, parse_spec
 from chipleap.workload.llm import PRESETS
 from chipleap.workload.ops import Workload
@@ -537,7 +538,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"{dest} exists; use --force to overwrite", file=sys.stderr)
         return 1
     text = resources.files("chipleap").joinpath("data").joinpath("example-spec.yaml").read_text()
-    dest.write_text(text)
+    # Never through a symlink: --force must not overwrite what one points at.
+    builddir.write_text(dest.parent, dest.name, text)
     print(f"Wrote {dest}. Next: chipleap explore {dest} -o out")
     return 0
 
