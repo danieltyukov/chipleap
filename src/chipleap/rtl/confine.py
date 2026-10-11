@@ -96,19 +96,45 @@ def enabled() -> bool:
     return os.environ.get(ENV, "1") != "0" and abi() > 0
 
 
-def installation(tool: str | Path) -> list[Path]:
+def installation(tool: str | Path, _depth: int = 0) -> list[Path]:
     """What a tool reads of its own besides the system: its directory, and its prefix when
     that is a directory of its own. In a shared prefix (the home directory, ~/.local) only
     the tool's own share, lib and libexec directories, so a tool in ~/.local/bin does not
-    open the rest of ~/.local; a tool directly in the home directory gets only itself."""
+    open the rest of ~/.local; a tool directly in the home directory gets only itself. A
+    script (sby and eqy are Python) also gets the installation of its interpreter."""
     exe = Path(shutil.which(tool) or tool).resolve()
     home = Path.home().resolve()
     if home.is_relative_to(exe.parent):
-        return [exe]
-    prefix = exe.parent.parent
-    if prefix in (home, home / ".local") or home.is_relative_to(prefix):
-        return [exe.parent, *(prefix / d / exe.name for d in ("share", "lib", "libexec"))]
-    return [exe.parent, prefix]
+        out = [exe]
+    else:
+        prefix = exe.parent.parent
+        if prefix in (home, home / ".local") or home.is_relative_to(prefix):
+            out = [exe.parent, *(prefix / d / exe.name for d in ("share", "lib", "libexec"))]
+        else:
+            out = [exe.parent, prefix]
+    interpreter = _interpreter(exe)
+    if interpreter is not None and _depth < 2:
+        out += installation(interpreter, _depth + 1)
+    return out
+
+
+def _interpreter(exe: Path) -> str | None:
+    """The program a script's first line names (``#!/usr/bin/env python3`` gives the
+    python3 on the path), or None for a binary."""
+    try:
+        with open(exe, "rb") as fh:
+            head = fh.read(256)
+    except OSError:
+        return None
+    if not head.startswith(b"#!"):
+        return None
+    words = head[2:].split(b"\n", 1)[0].decode(errors="replace").split()
+    if not words:
+        return None
+    if Path(words[0]).name == "env":
+        names = [w for w in words[1:] if not w.startswith("-")]
+        return shutil.which(names[0]) if names else None
+    return words[0]
 
 
 @contextlib.contextmanager

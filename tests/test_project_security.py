@@ -528,3 +528,24 @@ def test_synthesis_cannot_read_a_memory_file_a_parameter_names(counter_project, 
     )
     r = synth_mod.synth(load_project(counter_project))
     assert r.status == "fail" and "Can not open file" in r.summary, r.summary
+
+
+def test_a_script_tool_can_read_its_interpreter(tmp_path, monkeypatch):
+    # sby and eqy are Python scripts: confined, they still need the Python that runs them.
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    py = home / "tools/py312/bin/python3"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    py.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{py.parent}{os.pathsep}{os.environ['PATH']}")
+    sby = home / ".local/opt/yosyshq/bin/sby"
+    sby.parent.mkdir(parents=True)
+    sby.write_text("#!/usr/bin/env python3\nprint('sby')\n")
+    allowed = confine.installation(sby)
+    assert (home / ".local/opt/yosyshq").resolve() in allowed
+    assert (home / "tools/py312").resolve() in allowed
+    direct = home / ".local/opt/eqy/bin/eqy"
+    direct.parent.mkdir(parents=True)
+    direct.write_text(f"#!{py}\n")
+    assert (home / "tools/py312").resolve() in confine.installation(direct)

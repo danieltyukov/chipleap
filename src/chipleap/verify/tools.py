@@ -91,9 +91,30 @@ def iverilog() -> Tool:
         "iverilog",
         ["-V"],
         r"Icarus Verilog version (\S+)",
-        "four-state simulation of RTL projects (with cocotb)",
+        "four-state simulation of RTL projects (with cocotb); 13 or newer for IHP gate level",
         "CHIPLEAP_IVERILOG",
     )
+
+
+def sby() -> Tool:
+    # SymbiYosys built from a yosys-0.xx tag has no --version; it is listed without one.
+    return find(
+        "sby", ["--help"], r"SBY (\S+)", "formal proofs of a project's properties", "CHIPLEAP_SBY"
+    )
+
+
+def eqy() -> Tool:
+    return find(
+        "eqy",
+        ["--help"],
+        r"EQY (\S+)",
+        "equivalence of RTL, synthesized and routed netlists",
+        "CHIPLEAP_EQY",
+    )
+
+
+def z3() -> Tool:
+    return find("z3", ["--version"], r"Z3 version (\S+)", "SMT solver for formal and equivalence")
 
 
 def slang() -> Tool:
@@ -146,6 +167,9 @@ def all_tools() -> list[Tool]:
         riscv_gcc(),
         iverilog(),
         slang(),
+        sby(),
+        eqy(),
+        z3(),
     ]
 
 
