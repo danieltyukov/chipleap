@@ -63,6 +63,7 @@ def script(
     slow: bool = True,
     power: str = "VDD",
     ground: str = "VSS",
+    top: str = TOP,
 ) -> str:
     """The Innovus run: floorplan to checks, with the measurements written to a file."""
     if not lefs:
@@ -73,11 +74,11 @@ def script(
         f"report_timing -early -view {v} -max_paths 1 > hold_{v}.rpt"
         for v in views
     )
-    return f"""# ChipLeap: Innovus place and route of the synthesized accelerator.
+    return f"""# ChipLeap: Innovus place and route of the synthesized {top}.
 #   innovus -batch -no_gui -files pnr.tcl -log innovus
 set init_lef_file [list {" ".join(lefs)}]
 set init_verilog {netlist}
-set init_top_cell {TOP}
+set init_top_cell {top}
 set init_pwr_net {power}
 set init_gnd_net {ground}
 set init_mmmc_file mmmc.tcl
@@ -180,7 +181,7 @@ puts $f "cell_um2 $area"
 puts $f "cells $cells"
 puts $f "power_layers $h $v"
 close $f
-saveDesign {TOP}.enc
+saveDesign {top}.enc
 puts "{DONE}"
 exit
 """
