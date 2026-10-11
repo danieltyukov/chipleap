@@ -106,7 +106,14 @@ The MCP server has tools for projects ([mcp.md](mcp.md)): `describe_project`, `l
 
 ## Files outside the project
 
-Every path a project names (sources, filelists and what they name, include directories, tests, the golden model, waivers, constraints) must resolve, symlinks followed, to a place inside the project's directory. A project file from someone else's repository therefore cannot point a run at `~/.ssh` or anywhere else on your machine, and what lint, simulation, the reports, the run logs and a copy to a server see is the project's own files. Files under an include or test directory that resolve outside the project, and build directories (`build`, `sim_build`, `runs`, `obj_dir`), are left out of copies and digests.
+Every path a project names (sources, filelists and what they name, include directories, tests, the golden model, waivers, constraints) must resolve, symlinks followed, to a place inside the project's directory. A project file from someone else's repository therefore cannot point a run at `~/.ssh` or anywhere else on your machine, and what lint, simulation, the reports, the run logs and a copy to a server see is the project's own files. In detail:
+
+- A path is checked before ChipLeap looks at it, so an error never says whether a file outside exists, and the resolved, checked path is the one every step uses.
+- Glob patterns may not be absolute or hold `..`, and the walk that expands them never follows a symlink out of the project, so nothing outside is listed.
+- Every `` `include `` in the sources, and in the files they include, is followed through the include directories: its name must be in quotes (not a macro), relative, without `..`, and every place the tools could find it must be inside the project. Name the directory in `include_dirs` instead of writing `../`.
+- Copies (to a server, to the place-and-route run) and the digests in run logs take only files reached without leaving the project, and skip build directories (`build`, `sim_build`, `runs`, `obj_dir`).
+
+ChipLeap assumes the project's files do not change while a run reads them; a symlink swapped in during a run is outside what these checks can see.
 
 To use files from elsewhere, such as shared IP in a sibling checkout, allow their directory yourself:
 
@@ -119,4 +126,6 @@ Nothing in a project file can widen this, and an MCP client cannot either: the s
 
 ## Security
 
-Verifying a project runs its cocotb tests, which are Python, and builds its RTL with the simulator; a project's own SDC is Tcl that OpenROAD runs. That is what the steps are for, so they are not sandboxed: verify projects you trust. What a project cannot do is reach outside its directory (above), or smuggle commands into the scripts ChipLeap writes from its values ([the project file](#the-project-file)). As for bundles, a server and its setup come only from your command line or environment, never from an MCP client.
+**Verifying a project runs its code.** The simulation and coverage steps run the project's cocotb tests and its golden model, which are Python, and simulate its RTL, which can read and write files (`$readmemh`, `$fopen`) and does so again in synthesis (memory initialisation); a project's own SDC is Tcl that OpenROAD runs. None of that is sandboxed. Only verify projects you trust, as you would only run their tests.
+
+What the checks above protect against is disclosure through ChipLeap's own output: a project file cannot make lint, synthesis, the reports, the run logs, the MCP results or a copy to a server read or show files outside its directory, and it cannot smuggle commands into the scripts ChipLeap writes from its values ([the project file](#the-project-file)). They do not stop the project's own code from doing what code can do. As for bundles, a server and its setup come only from your command line or environment, never from an MCP client.
