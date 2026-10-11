@@ -37,6 +37,7 @@ pytest
 - LLM presets come from the model's `config.json`, with the URL, and a published parameter count in `tests/test_workload.py`.
 - Run `python scripts/build_site_data.py` if the change affects what the website shows.
 - `CHANGELOG.md` has an entry under Unreleased for user-visible changes.
+- The macro package format is shared with [aispice](https://github.com/danieltyukov/aispice). `docs/macro-package.md`, `src/chipleap/macro/macro-v1.schema.json` and `tests/fixtures/macro/` have identical copies there (`docs/macro-package.md`, `crates/aispice-core/src/macropkg/macro-v1.schema.json`, `crates/aispice-core/tests/fixtures/macro/`), and both validators must report what `tests/fixtures/macro/expected.json` says. Change them together: edit `tests/fixtures/macro/generate.py` and run it, update `expected.json`, run it again, copy the three to aispice, make the same change to aispice's validator, and update the pinned hashes in `tests/test_macro.py` and aispice's `crates/aispice-core/tests/macro_contract.rs`.
 
 ## Commits and pull requests
 

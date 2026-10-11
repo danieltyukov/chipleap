@@ -51,6 +51,7 @@ If a desktop app cannot find `chipleap` (common with pyenv, nvm-style shims or u
 | `describe_workload` | spec | MACs, weights and KV read per step, resident storage, the matrix multiplies |
 | `generate_soc` | spec, design, out_dir | writes the bundle; returns the file list |
 | `verify_soc` | out_dir, steps, fetch_xheep | consistency, lint, simulation, synthesis and X-HEEP results |
+| `check_macro` | path, optional pdk (`NAME` or `NAME@COMMIT`) | checks a macro package ([macro/v1](macro-package.md)) before a chip places it: every finding with its rule id, severity and file |
 | `list_models`, `catalog`, `check_tools` | none | presets, technology and memory data with sources, installed tools |
 
 For RTL the user wrote (a project with a `project.yaml`, see [projects.md](projects.md)):
@@ -75,7 +76,7 @@ chipleap mcp --log-dir ~/.chipleap/runs
 chipleap replay ~/.chipleap/runs/chipleap-20261010-120000.jsonl
 ```
 
-With `--log-dir`, every tool call is appended to a JSONL file with its arguments, the ChipLeap version and a SHA-256 of the result. `chipleap replay` re-runs the calls that have no side effects and reports whether each result is identical. The tools are deterministic for the same inputs (the explorer takes a seed), so a design session can be audited or reproduced without the assistant that produced it.
+With `--log-dir`, every tool call is appended to a JSONL file with its arguments, the ChipLeap version and a SHA-256 of the result. `chipleap replay` re-runs the calls that have no side effects and do not read files (all but `generate_soc`, `verify_soc`, `check_tools` and `check_macro`) and reports whether each result is identical. The tools are deterministic for the same inputs (the explorer takes a seed), so a design session can be audited or reproduced without the assistant that produced it.
 
 The RTL project tools are replayed too (all but `verify_rtl`, which can run place and route). Their results hold no absolute paths, times or host names, and cocotb runs with the project's seed. Their log entries also carry a SHA-256 over every file the project names (sources, includes, tests, golden model, waivers, constraints) and the versions of Verilator, slang, Icarus, Yosys, sv2v and cocotb, so when a replayed result differs, `chipleap replay` says whether the files or the tools changed since the call was made.
 
