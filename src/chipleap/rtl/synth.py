@@ -109,7 +109,13 @@ def prepare_verilog(project: Project, workdir: Path) -> tuple[list[Path], bool]:
 
 
 def _script(
-    project: Project, files: list[Path], raw: bool, liberty: Path, workdir: Path, target_ns: float
+    project: Project,
+    files: list[Path],
+    raw: bool,
+    liberty: Path,
+    workdir: Path,
+    target_ns: float,
+    flatten: bool = True,
 ) -> str:
     """The Yosys script. Every path and value from the project is a quoted word
     (``chipleap.rtl.quote``), so none can start a command or end a word early."""
@@ -145,7 +151,7 @@ def _script(
             *reads,
             *([f"chparam {chparam} {top}"] if chparam else []),
             f"hierarchy -check -top {top}",
-            f"synth -top {top} -flatten",
+            f"synth -top {top}" + (" -flatten" if flatten else ""),
             f"dfflibmap -liberty {lib}",
             # ChipLeap's own text, no project data: ";" inside quotes stays in the word.
             f'abc -liberty {lib} -script "{abc}"',
@@ -156,7 +162,11 @@ def _script(
     )
 
 
-def synthesize(project: Project, workdir: Path | None = None) -> RtlSynthResult:
+def synthesize(
+    project: Project, workdir: Path | None = None, *, flatten: bool = True
+) -> RtlSynthResult:
+    """Map the project to its technology's cells. ``flatten`` off keeps the module
+    hierarchy, which power domains name (``chipleap.rtl.upf``)."""
     tool = yosys()
     if not tool.found or tool.path is None:
         raise SynthUnavailable("Yosys is not installed")
@@ -180,7 +190,7 @@ def synthesize(project: Project, workdir: Path | None = None) -> RtlSynthResult:
             liberty = Path(tmp) / "cells.lib"
             shutil.copy2(lib, liberty)
         try:
-            script.write_text(_script(project, files, raw, liberty, work, target) + "\n")
+            script.write_text(_script(project, files, raw, liberty, work, target, flatten) + "\n")
         except q.QuoteError as exc:
             raise SynthError(f"cannot write the Yosys script: {exc}") from exc
         cmd = [str(tool.path), "-s", str(script)]
@@ -211,7 +221,9 @@ def synthesize(project: Project, workdir: Path | None = None) -> RtlSynthResult:
             Diagnostic("yosys", "error", log.strip().splitlines()[-1] if log.strip() else "failed")
         ]
         raise SynthError(f"Yosys failed: {errors[0]}", errors)
-    area = re.findall(rf"Chip area for module '\\?{re.escape(project.top)}': ([\d.]+)", log)
+    area = re.findall(
+        rf"Chip area for (?:top )?module '\\?{re.escape(project.top)}': ([\d.]+)", log
+    )
     if not area:
         raise SynthError("Yosys did not report an area", diags)
     cells = re.findall(r"Number of cells:\s+(\d+)", log)
