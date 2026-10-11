@@ -34,7 +34,7 @@ import os
 import re
 import shlex
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -69,13 +69,17 @@ RESERVED = {
     "cdc": "D2",
     "gate_sim": "D2",
     "macros": "D3",
-    "dft": "D3",
-    "power": "D3",
-    "ir_drop": "D3",
-    "upf": "D3",
-    "eco": "D3",
     "chip": "D4",
 }
+# IHP SG13G2's corners by short name: the liberty's suffix.
+CORNERS = {"typ": "typ_1p20V_25C", "slow": "slow_1p08V_125C", "fast": "fast_1p32V_m40C"}
+CLOCK_MIXING = ("no_mix", "clock_mix")
+POWER_NETLISTS = ("auto", "routed", "synth")
+# A hierarchical instance path in a power domain or a simulation scope: u_core/u_alu.
+INSTANCE_PATH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*")
+# Characters a netlist name in an ECO may not hold. Names such as \u_rx.data_q[3] are fine:
+# they reach OpenROAD as data, never as script text, and these keep them one plain word.
+ECO_NAME_BAD = set("\"'{};`$")
 SKIP_DIRS = {"build", "sim_build", "runs", "obj_dir", "__pycache__", "node_modules"}
 
 
@@ -127,6 +131,102 @@ class PnrConfig:
 
 
 @dataclass(frozen=True)
+class DftConfig:
+    """Scan insertion with OpenROAD and ATPG with Fault (``chipleap.rtl.dft``)."""
+
+    max_chain_length: int = 100  # flip-flops per chain
+    max_chains: int = 0  # 0: as many as the length needs
+    clock_mixing: str = "no_mix"
+    insert: bool = True  # place and route the scan netlist
+    atpg: bool = True
+    min_coverage: float | None = None  # percent
+    patterns: int = 8  # ATPG patterns replayed through the chains in simulation
+
+
+@dataclass(frozen=True)
+class PowerConfig:
+    """Gate-level power from the cocotb tests' activity (``chipleap.rtl.power``)."""
+
+    corners: tuple[str, ...] = ("typ",)
+    netlist: str = "auto"  # auto | routed | synth
+    scope: str = ""  # the design's instance in the test top, when the tests wrap it
+    input_activity: float = 0.1  # for the vectorless estimate
+
+
+@dataclass(frozen=True)
+class IrDropConfig:
+    corner: str = "typ"
+    max_drop_pct: float | None = None  # pass threshold, percent of the supply
+
+
+@dataclass(frozen=True)
+class PowerDomain:
+    name: str
+    elements: tuple[str, ...] = ()  # none: the top domain
+    area_um: tuple[float, float, float, float] | None = None
+    voltage: float | None = None
+
+
+@dataclass(frozen=True)
+class UpfConfig:
+    domains: tuple[PowerDomain, ...] = ()
+
+    @property
+    def top(self) -> PowerDomain:
+        return next(d for d in self.domains if not d.elements)
+
+
+@dataclass(frozen=True)
+class EcoChange:
+    """One change to the routed design: ``resize`` an instance to ``cell``, put a
+    ``buffer`` of ``cell`` at an instance's pin, or ``repair`` setup or hold."""
+
+    kind: str  # resize | buffer | repair
+    target: str  # the instance, INSTANCE/PIN, or setup | hold
+    cell: str = ""
+    margin_ns: float | None = None
+
+    @property
+    def instance(self) -> str:
+        return self.target.rpartition("/")[0] if self.kind == "buffer" else self.target
+
+    @property
+    def pin(self) -> str:
+        return self.target.rpartition("/")[2] if self.kind == "buffer" else ""
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {self.kind: self.target}
+        if self.cell:
+            out["cell"] = self.cell
+        if self.margin_ns is not None:
+            out["margin_ns"] = self.margin_ns
+        return out
+
+    @classmethod
+    def parse(cls, text: str) -> EcoChange:
+        """A change written on a command line: ``resize:INST=CELL``, ``buffer:INST/PIN=CELL``,
+        ``repair:setup`` or ``repair:hold@MARGIN_NS``."""
+        kind, _, rest = text.partition(":")
+        item: dict[str, Any]
+        if kind == "repair":
+            what, _, margin = rest.partition("@")
+            item = {"repair": what}
+            if margin:
+                try:
+                    item["margin_ns"] = float(margin)
+                except ValueError:
+                    raise ProjectError(f"{text}: the margin is a number of ns") from None
+        elif kind in ("resize", "buffer"):
+            target, _, cell = rest.partition("=")
+            item = {kind: target, "cell": cell}
+        else:
+            raise ProjectError(
+                f"{text}: give resize:INST=CELL, buffer:INST/PIN=CELL or repair:setup|hold"
+            )
+        return _parse_eco_change(item, text)
+
+
+@dataclass(frozen=True)
 class Project:
     root: Path  # the directory of the project file; relative paths start here
     file: Path
@@ -149,6 +249,11 @@ class Project:
     filelists: tuple[Path, ...] = ()  # the filelist and every file it includes
     # Directories outside the project the user allowed files from (never the project file).
     allowed: tuple[Path, ...] = ()
+    dft: DftConfig | None = None  # None: no scan
+    power: PowerConfig = field(default_factory=PowerConfig)
+    ir_drop: IrDropConfig = field(default_factory=IrDropConfig)
+    upf: UpfConfig | None = None
+    eco: tuple[EcoChange, ...] = ()
 
     @property
     def build_dir(self) -> Path:
@@ -299,6 +404,26 @@ class Project:
             if self.pnr.librelane:
                 p["librelane"] = dict(self.pnr.librelane)
             out["pnr"] = p
+        if self.dft is not None:
+            out["dft"] = {k: v for k, v in asdict(self.dft).items() if v is not None}
+        if self.power != PowerConfig():
+            out["power"] = {**asdict(self.power), "corners": list(self.power.corners)}
+        if self.ir_drop != IrDropConfig():
+            out["ir_drop"] = {k: v for k, v in asdict(self.ir_drop).items() if v is not None}
+        if self.upf is not None:
+            domains = []
+            for d in self.upf.domains:
+                dom: dict[str, Any] = {"name": d.name}
+                if d.elements:
+                    dom["elements"] = list(d.elements)
+                if d.area_um is not None:
+                    dom["area_um"] = list(d.area_um)
+                if d.voltage is not None:
+                    dom["voltage"] = d.voltage
+                domains.append(dom)
+            out["upf"] = {"domains": domains}
+        if self.eco:
+            out["eco"] = [c.to_dict() for c in self.eco]
         return out
 
 
@@ -901,6 +1026,201 @@ def _parse_pnr(value: Any) -> PnrConfig:
     return PnrConfig(util, density, die_um, dict(extra))
 
 
+def _bool(value: Any, where: str) -> bool:
+    if not isinstance(value, bool):
+        raise ProjectError(f"{where} must be true or false")
+    return value
+
+
+def _count(value: Any, where: str, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        kind = "a positive" if minimum > 0 else "a non-negative"
+        raise ProjectError(f"{where} must be {kind} integer")
+    return value
+
+
+def _choice(value: Any, where: str, choices: Iterable[str]) -> str:
+    choices = tuple(choices)
+    if value not in choices:
+        raise ProjectError(f"{where} must be one of {', '.join(choices)}")
+    return str(value)
+
+
+def _parse_dft(value: Any) -> DftConfig:
+    d = _mapping(
+        value,
+        "dft",
+        (
+            "max_chain_length",
+            "max_chains",
+            "clock_mixing",
+            "insert",
+            "atpg",
+            "min_coverage",
+            "patterns",
+        ),
+    )
+    cov = d.get("min_coverage")
+    return DftConfig(
+        max_chain_length=_count(d.get("max_chain_length", 100), "dft.max_chain_length", 1),
+        max_chains=_count(d.get("max_chains", 0), "dft.max_chains", 0),
+        clock_mixing=_choice(d.get("clock_mixing", "no_mix"), "dft.clock_mixing", CLOCK_MIXING),
+        insert=_bool(d.get("insert", True), "dft.insert"),
+        atpg=_bool(d.get("atpg", True), "dft.atpg"),
+        min_coverage=None if cov is None else _positive(cov, "dft.min_coverage", 100),
+        patterns=_count(d.get("patterns", 8), "dft.patterns", 0),
+    )
+
+
+def _corner(value: Any, where: str) -> str:
+    return _choice(value, where, CORNERS)
+
+
+def _parse_power(value: Any) -> PowerConfig:
+    p = _mapping(value, "power", ("corners", "netlist", "scope", "input_activity"))
+    corners = p.get("corners", ["typ"])
+    if isinstance(corners, str):
+        corners = [corners]
+    if not isinstance(corners, list):
+        raise ProjectError("power.corners must be a list of typ, slow, fast")
+    if not corners:
+        raise ProjectError("power.corners needs at least one corner")
+    for c in corners:
+        if c not in CORNERS:
+            raise ProjectError(f"power.corners: {c} is not one of {', '.join(CORNERS)}")
+    scope = p.get("scope", "")
+    if scope and (not isinstance(scope, str) or not INSTANCE_PATH_RE.fullmatch(scope)):
+        raise ProjectError("power.scope must be instance names separated by /, such as tb/u_dut")
+    return PowerConfig(
+        corners=tuple(dict.fromkeys(str(c) for c in corners)),
+        netlist=_choice(p.get("netlist", "auto"), "power.netlist", POWER_NETLISTS),
+        scope=str(scope),
+        input_activity=_positive(p.get("input_activity", 0.1), "power.input_activity", 2),
+    )
+
+
+def _parse_ir_drop(value: Any) -> IrDropConfig:
+    r = _mapping(value, "ir_drop", ("corner", "max_drop_pct"))
+    limit = r.get("max_drop_pct")
+    return IrDropConfig(
+        corner=_corner(r.get("corner", "typ"), "ir_drop.corner"),
+        max_drop_pct=None if limit is None else _positive(limit, "ir_drop.max_drop_pct", 100),
+    )
+
+
+def _parse_domain(value: Any, where: str) -> PowerDomain:
+    d = _mapping(value, where, ("name", "elements", "area_um", "voltage"))
+    name = _ident(d.get("name"), f"{where}.name")
+    elements = _str_list(d.get("elements"), f"{where}.elements")
+    for e in elements:
+        if not INSTANCE_PATH_RE.fullmatch(e):
+            raise ProjectError(
+                f"{where}.elements: {e!r} is not an instance path (names separated by /)"
+            )
+    area = d.get("area_um")
+    area_um = None
+    if area is not None:
+        if not elements:
+            raise ProjectError(f"{where}: the top domain covers the core; it takes no area_um")
+        ok = (
+            isinstance(area, list)
+            and len(area) == 4
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in area)
+            and min(area) >= 0
+            and area[2] > area[0]
+            and area[3] > area[1]
+        )
+        if not ok:
+            raise ProjectError(
+                f"{where}.area_um must be [x0, y0, x1, y1] in um, with x1 > x0 and y1 > y0"
+            )
+        area_um = (float(area[0]), float(area[1]), float(area[2]), float(area[3]))
+    voltage = d.get("voltage")
+    return PowerDomain(
+        name=name,
+        elements=tuple(elements),
+        area_um=area_um,
+        voltage=None if voltage is None else _positive(voltage, f"{where}.voltage", 5),
+    )
+
+
+def _parse_upf(value: Any) -> UpfConfig:
+    u = _mapping(value, "upf", ("domains",))
+    raw = u.get("domains")
+    if raw is None or (isinstance(raw, list) and not raw):
+        raise ProjectError("upf.domains needs at least one domain")
+    if not isinstance(raw, list):
+        raise ProjectError("upf.domains must be a list of {name, elements, area_um, voltage}")
+    domains = [_parse_domain(d, f"upf.domains[{i}]") for i, d in enumerate(raw)]
+    if sum(not d.elements for d in domains) != 1:
+        raise ProjectError(
+            "upf.domains: exactly one domain has no elements: the top, which holds every "
+            "instance the others do not"
+        )
+    seen: set[str] = set()
+    owner: dict[str, str] = {}
+    for d in domains:
+        if d.name in seen:
+            raise ProjectError(f"upf.domains: {d.name} is listed twice")
+        seen.add(d.name)
+        for e in d.elements:
+            if e in owner:
+                raise ProjectError(f"upf.domains: {e} is in two domains")
+            owner[e] = d.name
+    return UpfConfig(tuple(domains))
+
+
+def _eco_name(value: Any, where: str) -> str:
+    """A netlist name: printable, no white space, nothing a script could read as syntax."""
+    ok = (
+        isinstance(value, str)
+        and 0 < len(value) <= 200
+        and all("!" <= c <= "~" for c in value)
+        and not ECO_NAME_BAD.intersection(value)
+    )
+    if not ok:
+        raise ProjectError(f"{where}: {value!r} is not a netlist name")
+    return str(value)
+
+
+def _parse_eco_change(value: Any, where: str) -> EcoChange:
+    if not isinstance(value, dict):
+        raise ProjectError(f"{where} must be a mapping such as {{resize: INST, cell: CELL}}")
+    kinds = [k for k in ("resize", "buffer", "repair") if k in value]
+    if len(kinds) != 1:
+        raise ProjectError(f"{where} is one of resize, buffer or repair")
+    kind = kinds[0]
+    if kind == "repair":
+        c = _mapping(value, where, ("repair", "margin_ns"))
+        what = _choice(c["repair"], f"{where}.repair", ("setup", "hold"))
+        margin = c.get("margin_ns")
+        if margin is not None and (
+            isinstance(margin, bool)
+            or not isinstance(margin, (int, float))
+            or not 0 <= margin <= 10
+        ):
+            raise ProjectError(f"{where}.margin_ns must be between 0 and 10 ns")
+        return EcoChange("repair", what, "", None if margin is None else float(margin))
+    c = _mapping(value, where, (kind, "cell"))
+    if not c.get("cell"):
+        raise ProjectError(f"{where} needs a cell: the library cell to use")
+    cell = _ident(c["cell"], f"{where}.cell")
+    target = _eco_name(c[kind], f"{where}.{kind}")
+    if kind == "buffer":
+        inst, _, pin = target.rpartition("/")
+        if not inst or not IDENT_RE.fullmatch(pin):
+            raise ProjectError(f"{where}.buffer must be INSTANCE/PIN, such as _123_/A")
+    return EcoChange(kind, target, cell)
+
+
+def _parse_eco(value: Any) -> tuple[EcoChange, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ProjectError("eco must be a list of changes ({resize: ...}, {buffer: ...}, ...)")
+    return tuple(_parse_eco_change(c, f"eco[{i}]") for i, c in enumerate(value))
+
+
 # The top-level keys a project file may have. Later milestones add their sections here.
 SECTIONS = (
     "schema",
@@ -921,6 +1241,11 @@ SECTIONS = (
     "lint",
     "constraints",
     "pnr",
+    "dft",
+    "power",
+    "ir_drop",
+    "upf",
+    "eco",
 )
 
 
@@ -1008,6 +1333,12 @@ def parse_project(
         description=str(data.get("description", "")),
         filelists=tuple(fl.files),
         allowed=paths.roots[1:],
+        # A section given with no keys ("dft:") turns the step on with its defaults.
+        dft=_parse_dft(data["dft"]) if "dft" in data else None,
+        power=_parse_power(data.get("power")),
+        ir_drop=_parse_ir_drop(data.get("ir_drop")),
+        upf=_parse_upf(data["upf"]) if "upf" in data else None,
+        eco=_parse_eco(data.get("eco")),
     )
 
 
