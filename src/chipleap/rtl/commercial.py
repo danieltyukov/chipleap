@@ -91,6 +91,14 @@ def genus_script(
     params = " ".join(f"{{{k} {v}}}" for k, v in project.parameters.items())
     param_opt = f" -parameters {{{params}}}" if params else ""
     top = project.top
+    # Elaborating with parameters names the design after them (uart_CLKS_PER_BIT16); the
+    # netlist and Innovus expect the top's own name.
+    rename = (
+        f"set chipleap_design [get_db designs]\n"
+        f'if {{[get_db $chipleap_design .name] ne "{top}"}} {{ rename_obj $chipleap_design {top} }}\n'
+        if params
+        else ""
+    )
     return f"""# ChipLeap: Genus synthesis of {top}, run {tag}.
 set_db information_level 1
 # Registers that reset to 1 need an async-preset flop; libraries with only async-reset
@@ -99,7 +107,7 @@ set_db lbr_seq_in_out_phase_opto true
 read_libs {{{liberty}}}
 {physical}{search}read_hdl -sv{define_opt} {{{" ".join(files)}}}
 elaborate {top}{param_opt}
-{_constraints(project, period)}syn_generic
+{rename}{_constraints(project, period)}syn_generic
 syn_map
 syn_opt
 report_area > area_{tag}.rpt
@@ -124,12 +132,14 @@ def dc_script(project: Project, files: list[str], includes: list[str], db: str, 
     define_opt = f" -define {{{defines}}}" if defines else ""
     params = ",".join(f"{k}={v}" for k, v in project.parameters.items())
     param_opt = f' -parameters "{params}"' if params else ""
+    # As in Genus: the elaborated design is named after its parameters until renamed.
+    rename = f"rename_design [current_design] {top}\n" if params else ""
     return f"""# ChipLeap: Design Compiler synthesis of {top}, run {tag}.
 set_app_var target_library {{{db}}}
 set_app_var link_library {{* {db}}}
 {search}analyze -format sverilog{define_opt} {{{" ".join(files)}}}
 elaborate {top}{param_opt}
-current_design {top}
+{rename}current_design {top}
 link
 {_constraints(project, period)}compile
 report_area > area_{tag}.rpt

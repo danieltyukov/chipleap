@@ -125,3 +125,42 @@ def test_a_simulator_that_stops_early_says_why(project, monkeypatch):
         "Xcelium: no test results: error: Unable to checkout license for the simulation. [NOLICN]"
     )
     assert r.data["diagnostics"][0]["code"] == "NOLICN"
+
+
+def test_reports_take_commercial_results(project):
+    from chipleap.rtl.report import project_html, project_markdown
+    from chipleap.verify.result import StepResult
+
+    synth = StepResult(
+        "synth",
+        "pass",
+        "Genus: ...",
+        {
+            "area_um2": 3527.2,
+            "cells": 142,
+            "slack_ns": 6.1,
+            "critical_path_ns": 3.9,
+            "fmax_mhz_estimate": 256.4,
+        },
+    )
+    pnr = StepResult(
+        "pnr",
+        "pass",
+        "Innovus: ...",
+        {
+            "core_um2": 6000,
+            "utilisation": 0.6,
+            "cells": 150,
+            "setup_slack_ns": 5.0,
+            "setup_slack_typ_ns": 6.0,
+            "hold_slack_ns": 0.1,
+            "fmax_worst_mhz": 200.0,
+            "drc_errors": 0,
+            "connectivity_errors": 0,
+            "antenna_nets": 0,
+        },
+    )
+    md = project_markdown(project, [synth, pnr])
+    assert "| setup slack | +6.100 ns |" in md and "| DRC / LVS / antenna | 0 / 0 / 0 |" in md
+    assert "flip-flops" not in md
+    assert "<h2>Place and route</h2>" in project_html(project, [synth, pnr])

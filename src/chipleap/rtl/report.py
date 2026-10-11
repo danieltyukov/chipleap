@@ -87,13 +87,17 @@ def _kv(r: StepResult) -> list[tuple[str, str]]:
     """The headline numbers of a step, for both report formats."""
     d = r.data
     if r.name == "synth" and "area_um2" in d:
-        return [
-            ("cell area", f"{d['area_um2']:.0f} um2"),
-            ("cells", str(d["cells"])),
-            ("flip-flops", str(d["flops"])),
+        # Yosys reports flip-flops; Genus and Design Compiler report slack at the clock.
+        kv = [("cell area", f"{d['area_um2']:.0f} um2"), ("cells", str(d.get("cells", "")))]
+        if "flops" in d:
+            kv.append(("flip-flops", str(d["flops"])))
+        if "slack_ns" in d:
+            kv.append(("setup slack", f"{d['slack_ns']:+.3f} ns"))
+        kv += [
             ("critical path", f"{d['critical_path_ns']} ns"),
-            ("Fmax estimate (typical)", f"{d['fmax_mhz_estimate']:.0f} MHz"),
+            ("Fmax estimate", f"{d['fmax_mhz_estimate']:.0f} MHz"),
         ]
+        return kv
     if r.name == "pnr" and "core_um2" in d:
         return [
             ("core", f"{d['core_um2'] / 1e6:.4f} mm2"),
