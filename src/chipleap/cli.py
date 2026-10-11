@@ -428,13 +428,21 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    from chipleap.verify.tools import all_tools, ihp_liberty
+    from chipleap.verify.tools import all_tools, ihp_liberty, liberty_settings_problem
     from chipleap.verify.xheep import find_checkout
 
-    rows = [[t.name, "yes" if t.found else "no", t.version, t.purpose] for t in all_tools()]
-    import shutil
+    rows = [
+        [
+            t.name,
+            "yes" if t.found else "no",
+            t.version,
+            t.purpose + (f"; {t.note}" if t.note else ""),
+        ]
+        for t in all_tools()
+    ]
+    from chipleap.verify.tools import which
 
-    sv2v = shutil.which("sv2v")
+    sv2v = which("sv2v")
     rows.append(["sv2v", "yes" if sv2v else "no", "", "SystemVerilog front end for older Yosys"])
     lib = ihp_liberty()
     rows.append(
@@ -442,7 +450,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "IHP SG13G2",
             "yes" if lib else "no",
             "",
-            str(lib) if lib else "open PDK for synthesis (set CHIPLEAP_LIBERTY)",
+            str(lib)
+            if lib
+            else liberty_settings_problem() or "open PDK for synthesis (set CHIPLEAP_LIBERTY)",
         ]
     )
     co = find_checkout()
@@ -714,8 +724,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--steps",
         default=None,
         help="comma-separated steps; for a bundle consistency,lint,sim,synth,xheep, for a "
-        "project lint,sim,coverage,synth; pnr (place and route) and the steps after it (eco, "
-        "dft, power, ir_drop, upf) are opt-in, and all runs every step",
+        "project lint,sim,coverage,formal,cdc,synth,equiv; pnr (place and route), gls "
+        "(gate-level simulation of its netlist) and the steps after it (eco, dft, power, "
+        "ir_drop, upf) are opt-in, and all runs every step",
     )
     s.add_argument("--xheep", help="X-HEEP checkout (default: CHIPLEAP_XHEEP_DIR or the cache)")
     s.add_argument("--fetch-xheep", action="store_true", help="clone the tested X-HEEP commit")

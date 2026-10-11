@@ -11,6 +11,11 @@ resets: [{port: rst_ni, active: low, sync: false}]
 tech: ihp-sg13g2
 tests: {dir: test, seed: 1}
 golden: model/uart_model.py
+# The transmitter's line in each state, proved for every cycle (rtl/uart_tx.sv, FORMAL).
+# abc pdr proves without a depth bound and without an SMT solver.
+formal: {checks: [{name: prove, mode: prove, engine: abc pdr}]}
+# rx_i comes from another chip's clock; the receiver synchronizes it with two flops.
+cdc: {async_inputs: [rx_i]}
 # Scan chains of at most 20 flip-flops, with Fault's ATPG; place and route routes the scan
 # netlist.
 dft: {max_chain_length: 20}

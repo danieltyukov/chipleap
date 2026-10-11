@@ -29,20 +29,22 @@ and a ``_parse_<name>`` function, a field on ``Project`` with a default, an entr
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import re
 import shlex
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Concatenate, ParamSpec, TypeVar
 
 import yaml
 
 from chipleap.hw.design import SPEC_NAME_MAX, is_safe_name, safe_name
 from chipleap.hw.tech import TECHNOLOGIES
 from chipleap.rtl import builddir
+from chipleap.verify.tools import untrusted
 
 PROJECT_FILE = "project.yaml"
 SCHEMA = "project/v1"
@@ -64,10 +66,6 @@ LIBRELANE_VALUE_RE = re.compile(r"[A-Za-z0-9_./:+ -]*")
 ALLOW_ENV = "CHIPLEAP_ALLOW_PATHS"
 # Sections later milestones will read. A file written for them fails clearly here.
 RESERVED = {
-    "formal": "D2",
-    "equivalence": "D2",
-    "cdc": "D2",
-    "gate_sim": "D2",
     "macros": "D3",
     "chip": "D4",
 }
@@ -81,6 +79,19 @@ INSTANCE_PATH_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*
 # they reach OpenROAD as data, never as script text, and these keep them one plain word.
 ECO_NAME_BAD = set("\"'{};`$")
 SKIP_DIRS = {"build", "sim_build", "runs", "obj_dir", "__pycache__", "node_modules"}
+FORMAL_MODES = ("prove", "bmc", "cover")
+# SymbiYosys engines that work with the Yosys 0.33 toolchain. smtbmc with Boolector is left
+# out: its induction step crashes there. abc pdr needs yices to write a counterexample.
+FORMAL_ENGINES = ("smtbmc z3", "smtbmc yices", "smtbmc bitwuzla", "abc pdr")
+FORMAL_DEPTH_MAX = 1000
+EQUIV_CHECKS = ("rtl-synth", "synth-pnr")
+EQUIV_ENGINES = ("yosys", "eqy")
+GLS_NETLISTS = ("routed", "synth")
+GLS_DELAYS = ("min", "typ", "max")
+# A LibreLane corner name, as its SDF directories are named.
+CORNER_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
+# A register name pattern in a CDC waiver: names after flattening, "*" the only wildcard.
+WAIVE_RE = re.compile(r"[A-Za-z0-9_.*\[\]/]{1,200}")
 
 
 class ProjectError(ValueError):
@@ -227,6 +238,53 @@ class EcoChange:
 
 
 @dataclass(frozen=True)
+class FormalCheck:
+    """One SymbiYosys run: a mode, a depth, the module to prove and an engine."""
+
+    name: str
+    mode: str = "prove"
+    depth: int = 20
+    top: str = ""  # the project's top when empty
+    engine: str = "smtbmc z3"
+
+
+@dataclass(frozen=True)
+class FormalConfig:
+    sources: tuple[Path, ...] = ()  # property files or a wrapper top, read with -formal
+    checks: tuple[FormalCheck, ...] = (FormalCheck("prove"),)
+    sby: tuple[Path, ...] = ()  # the project's own .sby files, run as they are
+
+
+@dataclass(frozen=True)
+class EquivConfig:
+    checks: tuple[str, ...] = ()  # empty: rtl-synth, and synth-pnr when a routed run exists
+    engine: str = "yosys"  # the prover: Yosys's equiv passes or EQY
+    depth: int = 40  # cycles from reset of the bounded check of what induction leaves
+
+
+@dataclass(frozen=True)
+class CdcWaiver:
+    source: str  # register name patterns, "*" a wildcard
+    dest: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class CdcConfig:
+    async_inputs: tuple[str, ...] = ()  # inputs no clock samples safely
+    input_domains: dict[str, str] = field(default_factory=dict)  # input port -> clock port
+    reset_synchronized: tuple[str, ...] = ()  # resets synchronized outside the design
+    waive: tuple[CdcWaiver, ...] = ()
+
+
+@dataclass(frozen=True)
+class GateSimConfig:
+    netlist: str = "routed"  # routed: LibreLane's final netlist with SDF; synth: Yosys's
+    corner: str = ""  # the SDF corner; empty: the typical one
+    delays: str = "typ"  # which value of the SDF triples
+
+
+@dataclass(frozen=True)
 class Project:
     root: Path  # the directory of the project file; relative paths start here
     file: Path
@@ -245,6 +303,10 @@ class Project:
     lint: LintConfig = field(default_factory=LintConfig)
     sdc: Path | None = None
     pnr: PnrConfig = field(default_factory=PnrConfig)
+    formal: FormalConfig | None = None  # None: the project has no formal section
+    equivalence: EquivConfig = field(default_factory=EquivConfig)
+    cdc: CdcConfig = field(default_factory=CdcConfig)
+    gate_sim: GateSimConfig = field(default_factory=GateSimConfig)
     description: str = ""
     filelists: tuple[Path, ...] = ()  # the filelist and every file it includes
     # Directories outside the project the user allowed files from (never the project file).
@@ -330,6 +392,8 @@ class Project:
         for d in self.include_dirs:
             files += self.files_in(d, INCLUDE_SUFFIXES)
         files += [*self.lint.waivers, *([self.sdc] if self.sdc else [])]
+        if self.formal is not None:
+            files += [*self.formal.sources, *self.formal.sby]
         if self.tests.dir is not None:
             files += self.files_in(self.tests.dir, (".py",))
         if self.golden is not None:
@@ -404,6 +468,39 @@ class Project:
             if self.pnr.librelane:
                 p["librelane"] = dict(self.pnr.librelane)
             out["pnr"] = p
+        if self.formal is not None:
+            f: dict[str, Any] = {
+                "checks": [
+                    {
+                        "name": c.name,
+                        "mode": c.mode,
+                        "depth": c.depth,
+                        **({"top": c.top} if c.top else {}),
+                        "engine": c.engine,
+                    }
+                    for c in self.formal.checks
+                ]
+            }
+            if self.formal.sources:
+                f["sources"] = [self.rel(x) for x in self.formal.sources]
+            if self.formal.sby:
+                f["sby"] = [self.rel(x) for x in self.formal.sby]
+            out["formal"] = f
+        if self.equivalence != EquivConfig():
+            e = self.equivalence
+            out["equivalence"] = {"checks": list(e.checks), "engine": e.engine, "depth": e.depth}
+        if self.cdc != CdcConfig():
+            out["cdc"] = {
+                "async_inputs": list(self.cdc.async_inputs),
+                "input_domains": dict(self.cdc.input_domains),
+                "reset_synchronized": list(self.cdc.reset_synchronized),
+                "waive": [
+                    {"from": w.source, "to": w.dest, "reason": w.reason} for w in self.cdc.waive
+                ],
+            }
+        if self.gate_sim != GateSimConfig():
+            g = self.gate_sim
+            out["gate_sim"] = {"netlist": g.netlist, "corner": g.corner, "delays": g.delays}
         if self.dft is not None:
             out["dft"] = {k: v for k, v in asdict(self.dft).items() if v is not None}
         if self.power != PowerConfig():
@@ -428,6 +525,27 @@ class Project:
 
 
 # Parsing. Each helper takes the key path it reports in errors.
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def runs_tools(
+    fn: Callable[Concatenate[Project, _P], _R],
+) -> Callable[Concatenate[Project, _P], _R]:
+    """For a step on the project in its first argument: while it runs, no tool is found
+    in the project's directory or a directory the user allowed files from, and no program
+    it starts gets a PATH entry into one (``chipleap.verify.tools.untrusted``). A
+    repository can ship executables named like the tools, and an absolute PATH entry can
+    lead into it as a relative one does."""
+
+    @functools.wraps(fn)
+    def step(project: Project, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with untrusted(*project.roots):
+            return fn(project, *args, **kwargs)
+
+    return step
 
 
 def _mapping(value: Any, where: str, keys: Iterable[str]) -> dict[str, Any]:
@@ -1039,7 +1157,7 @@ def _count(value: Any, where: str, minimum: int) -> int:
     return value
 
 
-def _choice(value: Any, where: str, choices: Iterable[str]) -> str:
+def _one_of(value: Any, where: str, choices: Iterable[str]) -> str:
     choices = tuple(choices)
     if value not in choices:
         raise ProjectError(f"{where} must be one of {', '.join(choices)}")
@@ -1064,7 +1182,7 @@ def _parse_dft(value: Any) -> DftConfig:
     return DftConfig(
         max_chain_length=_count(d.get("max_chain_length", 100), "dft.max_chain_length", 1),
         max_chains=_count(d.get("max_chains", 0), "dft.max_chains", 0),
-        clock_mixing=_choice(d.get("clock_mixing", "no_mix"), "dft.clock_mixing", CLOCK_MIXING),
+        clock_mixing=_one_of(d.get("clock_mixing", "no_mix"), "dft.clock_mixing", CLOCK_MIXING),
         insert=_bool(d.get("insert", True), "dft.insert"),
         atpg=_bool(d.get("atpg", True), "dft.atpg"),
         min_coverage=None if cov is None else _positive(cov, "dft.min_coverage", 100),
@@ -1073,7 +1191,7 @@ def _parse_dft(value: Any) -> DftConfig:
 
 
 def _corner(value: Any, where: str) -> str:
-    return _choice(value, where, CORNERS)
+    return _one_of(value, where, CORNERS)
 
 
 def _parse_power(value: Any) -> PowerConfig:
@@ -1093,7 +1211,7 @@ def _parse_power(value: Any) -> PowerConfig:
         raise ProjectError("power.scope must be instance names separated by /, such as tb/u_dut")
     return PowerConfig(
         corners=tuple(dict.fromkeys(str(c) for c in corners)),
-        netlist=_choice(p.get("netlist", "auto"), "power.netlist", POWER_NETLISTS),
+        netlist=_one_of(p.get("netlist", "auto"), "power.netlist", POWER_NETLISTS),
         scope=str(scope),
         input_activity=_positive(p.get("input_activity", 0.1), "power.input_activity", 2),
     )
@@ -1192,7 +1310,7 @@ def _parse_eco_change(value: Any, where: str) -> EcoChange:
     kind = kinds[0]
     if kind == "repair":
         c = _mapping(value, where, ("repair", "margin_ns"))
-        what = _choice(c["repair"], f"{where}.repair", ("setup", "hold"))
+        what = _one_of(c["repair"], f"{where}.repair", ("setup", "hold"))
         margin = c.get("margin_ns")
         if margin is not None and (
             isinstance(margin, bool)
@@ -1221,6 +1339,124 @@ def _parse_eco(value: Any) -> tuple[EcoChange, ...]:
     return tuple(_parse_eco_change(c, f"eco[{i}]") for i, c in enumerate(value))
 
 
+def _depth(value: Any, where: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ProjectError(f"{where} must be a positive integer")
+    if value > FORMAL_DEPTH_MAX:
+        raise ProjectError(f"{where} must be at most {FORMAL_DEPTH_MAX}")
+    return value
+
+
+def _choice(value: Any, choices: tuple[str, ...], where: str) -> str:
+    if value not in choices:
+        raise ProjectError(f"{where} must be one of {', '.join(choices)}, not {value!r}")
+    return str(value)
+
+
+def _parse_formal(value: Any, paths: _Paths) -> FormalConfig | None:
+    if value is None:
+        return None
+    f = _mapping(value, "formal", ("sources", "checks", "sby"))
+    sources = paths.files(
+        paths.root, _str_list(f.get("sources"), "formal.sources"), "formal.sources"
+    )
+    for s in sources:
+        if s.suffix not in HDL_SUFFIXES:
+            raise ProjectError(f"formal.sources: {s.name} is not Verilog or SystemVerilog")
+    sby = [paths.path(paths.root, x, "formal.sby") for x in _str_list(f.get("sby"), "formal.sby")]
+    for x in sby:
+        if x.suffix != ".sby":
+            raise ProjectError(f"formal.sby: {_shown(x, paths.roots)} is not a .sby file")
+    raw = f.get("checks")
+    if raw is None:
+        return FormalConfig(tuple(sources), sby=tuple(sby))
+    if not isinstance(raw, list) or not raw:
+        raise ProjectError("formal.checks must be a list of {name, mode, depth, top, engine}")
+    checks: list[FormalCheck] = []
+    for i, c in enumerate(raw):
+        where = f"formal.checks[{i}]"
+        c = _mapping(c, where, ("name", "mode", "depth", "top", "engine"))
+        name = c.get("name")
+        if not isinstance(name, str) or not IDENT_RE.fullmatch(name):
+            raise ProjectError(f"{where}.name must be an identifier, not {name!r}")
+        if name in {x.name for x in checks}:
+            raise ProjectError(f"formal.checks: {name} is listed twice")
+        mode = _choice(c.get("mode", "prove"), FORMAL_MODES, f"{where}.mode")
+        engine = _choice(c.get("engine", "smtbmc z3"), FORMAL_ENGINES, f"{where}.engine")
+        if engine == "abc pdr" and mode != "prove":
+            raise ProjectError(f"{where}: abc pdr only proves; use smtbmc for {mode}")
+        top = _ident(c["top"], f"{where}.top") if "top" in c else ""
+        checks.append(
+            FormalCheck(name, mode, _depth(c.get("depth", 20), f"{where}.depth"), top, engine)
+        )
+    return FormalConfig(tuple(sources), tuple(checks), tuple(sby))
+
+
+def _parse_equivalence(value: Any) -> EquivConfig:
+    e = _mapping(value, "equivalence", ("checks", "engine", "depth"))
+    checks = _str_list(e.get("checks"), "equivalence.checks")
+    for c in checks:
+        if c not in EQUIV_CHECKS:
+            raise ProjectError(f"equivalence.checks: {c!r} is not one of {', '.join(EQUIV_CHECKS)}")
+    engine = _choice(e.get("engine", "yosys"), EQUIV_ENGINES, "equivalence.engine")
+    return EquivConfig(
+        tuple(dict.fromkeys(checks)), engine, _depth(e.get("depth", 40), "equivalence.depth")
+    )
+
+
+def _parse_cdc(value: Any, clocks: tuple[Clock, ...], resets: tuple[Reset, ...]) -> CdcConfig:
+    c = _mapping(value, "cdc", ("async_inputs", "input_domains", "reset_synchronized", "waive"))
+    clock_ports = {k.port for k in clocks}
+    async_inputs = []
+    for i, port in enumerate(_str_list(c.get("async_inputs"), "cdc.async_inputs")):
+        _ident(port, f"cdc.async_inputs[{i}]")
+        if port in clock_ports:
+            raise ProjectError(f"cdc.async_inputs: {port} is a clock")
+        async_inputs.append(port)
+    domains = c.get("input_domains") or {}
+    if not isinstance(domains, dict):
+        raise ProjectError("cdc.input_domains must map input ports to clock ports")
+    for port, clock in domains.items():
+        _ident(port, "cdc.input_domains: a port")
+        if not isinstance(clock, str) or clock not in clock_ports:
+            raise ProjectError(f"cdc.input_domains.{port}: {clock} is not one of the clocks")
+    synced = _str_list(c.get("reset_synchronized"), "cdc.reset_synchronized")
+    for r in synced:
+        if r not in {x.port for x in resets}:
+            raise ProjectError(f"cdc.reset_synchronized: {r} is not one of the resets")
+    waive = []
+    raw = c.get("waive") or []
+    if not isinstance(raw, list):
+        raise ProjectError("cdc.waive must be a list of {from, to, reason}")
+    for i, w in enumerate(raw):
+        where = f"cdc.waive[{i}]"
+        w = _mapping(w, where, ("from", "to", "reason"))
+        for key in ("from", "to"):
+            pat = w.get(key, "*")
+            if not isinstance(pat, str) or not WAIVE_RE.fullmatch(pat):
+                raise ProjectError(
+                    f"{where}.{key} must be a register name pattern (letters, digits, _ . / "
+                    f"[ ] and * for any text), not {pat!r}"
+                )
+        reason = w.get("reason")
+        if not isinstance(reason, str) or not reason.strip() or CONTROL_RE.search(reason):
+            raise ProjectError(f"{where} needs a reason: a line saying why the finding is safe")
+        waive.append(CdcWaiver(w.get("from", "*"), w.get("to", "*"), reason.strip()[:200]))
+    return CdcConfig(tuple(async_inputs), dict(domains), tuple(synced), tuple(waive))
+
+
+def _parse_gate_sim(value: Any) -> GateSimConfig:
+    g = _mapping(value, "gate_sim", ("netlist", "corner", "delays"))
+    netlist = _choice(g.get("netlist", "routed"), GLS_NETLISTS, "gate_sim.netlist")
+    corner = g.get("corner", "")
+    if corner and (not isinstance(corner, str) or not CORNER_RE.fullmatch(corner)):
+        raise ProjectError(
+            f"gate_sim.corner must be a corner name such as nom_typ_1p20V_25C, not {corner!r}"
+        )
+    delays = _choice(g.get("delays", "typ"), GLS_DELAYS, "gate_sim.delays")
+    return GateSimConfig(netlist, str(corner), delays)
+
+
 # The top-level keys a project file may have. Later milestones add their sections here.
 SECTIONS = (
     "schema",
@@ -1241,6 +1477,10 @@ SECTIONS = (
     "lint",
     "constraints",
     "pnr",
+    "formal",
+    "equivalence",
+    "cdc",
+    "gate_sim",
     "dft",
     "power",
     "ir_drop",
@@ -1310,8 +1550,12 @@ def parse_project(
             raise ProjectError(f"resets: {r.port} is also a clock")
     tests = _parse_tests(data.get("tests"), paths, top)
     lint = _parse_lint(data.get("lint"), paths)
+    formal = _parse_formal(data.get("formal"), paths)
     include_dirs = list(dict.fromkeys(d.resolve() for d in includes))
-    paths.check_references([*sources, *tests.sources, *lint.waivers], include_dirs)
+    paths.check_references(
+        [*sources, *tests.sources, *lint.waivers, *(formal.sources if formal else ())],
+        include_dirs,
+    )
     return Project(
         root=root,
         file=(file or root / PROJECT_FILE).resolve(),
@@ -1330,6 +1574,10 @@ def parse_project(
         lint=lint,
         sdc=sdc,
         pnr=_parse_pnr(data.get("pnr")),
+        formal=formal,
+        equivalence=_parse_equivalence(data.get("equivalence")),
+        cdc=_parse_cdc(data.get("cdc"), clocks, resets),
+        gate_sim=_parse_gate_sim(data.get("gate_sim")),
         description=str(data.get("description", "")),
         filelists=tuple(fl.files),
         allowed=paths.roots[1:],

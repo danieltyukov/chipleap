@@ -20,6 +20,10 @@ STEP_TITLES = {
     "coverage": "Coverage",
     "synth": "Synthesis",
     "pnr": "Place and route",
+    "formal": "Formal properties",
+    "cdc": "Clock and reset domain crossings",
+    "equiv": "Equivalence",
+    "gls": "Gate-level simulation",
     "eco": "Engineering change order",
     "dft": "Design for test",
     "power": "Gate-level power",
@@ -172,9 +176,108 @@ def _kv(r: StepResult) -> list[tuple[str, str]]:
         return [
             (k, f"{v['percent']}% ({v['covered']}/{v['total']})") for k, v in d["kinds"].items()
         ]
-    if r.name == "sim" and "tests" in d:
+    if r.name in ("sim", "gls") and "tests" in d:
         return [("passed", str(d["passed"])), ("failed", str(d["failed"]))]
+    if r.name == "formal" and "checks" in d:
+        return [("checks passed", str(d["passed"])), ("checks failed", str(d["failed"]))]
+    if r.name == "cdc" and "domains" in d:
+        return [
+            ("clock domains", str(len(d["domains"]))),
+            ("crossings", str(d["crossings"])),
+            ("errors", str(d["errors"])),
+            ("warnings", str(d["warnings"])),
+        ]
     return []
+
+
+def _tables(r: StepResult) -> list[tuple[list[str], list[list[str]]]]:
+    """Detail tables of the verification-depth steps, for both report formats."""
+    d = r.data
+    out: list[tuple[list[str], list[list[str]]]] = []
+    if r.name == "formal":
+        out.append(
+            (
+                ["check", "mode", "depth", "status", "failures", "covers reached"],
+                [
+                    [
+                        c["name"],
+                        c["mode"],
+                        str(c["depth"] or ""),
+                        c["status"],
+                        str(len(c["failures"])),
+                        f"{sum(x['reached'] for x in c['covers'])}/{len(c['covers'])}"
+                        if c["covers"]
+                        else "",
+                    ]
+                    for c in d.get("checks", [])
+                ],
+            )
+        )
+        fails = [(c["name"], f) for c in d.get("checks", []) for f in c["failures"]]
+        if fails:
+            out.append(
+                (
+                    ["check", "property", "where", "step", "counterexample"],
+                    [
+                        [name, f["property"], _loc(f), str(f["step"]), f["trace"]]
+                        for name, f in fails
+                    ],
+                )
+            )
+    if r.name == "cdc":
+        findings = d.get("findings", [])
+        if findings:
+            out.append(
+                (
+                    ["rule", "severity", "from", "to", "message"],
+                    [
+                        [
+                            f["rule"],
+                            f"waived: {f['waived']}" if f.get("waived") else f["severity"],
+                            f"{f['from']} ({f['from_domain']})",
+                            f"{f['to']} ({f['to_domain']})",
+                            _line(f["message"]),
+                        ]
+                        for f in findings
+                    ],
+                )
+            )
+        accepted = d.get("accepted", [])
+        if accepted:
+            out.append(
+                (
+                    ["accepted as", "from", "to", "bits"],
+                    [
+                        [
+                            a["rule"],
+                            f"{a['from']} ({a['from_domain']})",
+                            f"{a['to']} ({a['to_domain']})",
+                            str(a.get("bits", "")),
+                        ]
+                        for a in accepted
+                    ],
+                )
+            )
+    if r.name == "equiv":
+        out.append(
+            (
+                ["pair", "status", "points proved", "netlist", "detail"],
+                [
+                    [
+                        x["pair"],
+                        x["status"],
+                        f"{x['proved']}/{x['points']}" if "points" in x else "",
+                        x.get("gate", ""),
+                        x.get("reason")
+                        or x.get("error")
+                        or x.get("trace")
+                        or ", ".join(x.get("unproven", [])[:5]),
+                    ]
+                    for x in d.get("pairs", [])
+                ],
+            )
+        )
+    return out
 
 
 def _test_rows(r: StepResult) -> list[list[str]]:
@@ -206,7 +309,7 @@ def _num(value: Any, fmt: str = ".3g") -> str:
     return "" if value is None else format(value, fmt)
 
 
-def _tables(r: StepResult) -> list[tuple[str, list[str], list[list[str]]]]:
+def _impl_tables(r: StepResult) -> list[tuple[str, list[str], list[list[str]]]]:
     """The implementation steps' tables: (caption, head, rows)."""
     d = r.data
     out: list[tuple[str, list[str], list[list[str]]]] = []
@@ -342,12 +445,14 @@ def project_markdown(p: Project, results: Sequence[StepResult]) -> str:
         kv = _kv(r)
         if kv:
             lines += [md_table(["", ""], [[k, v] for k, v in kv]), ""]
-        if r.name == "sim" and r.data.get("tests"):
+        if r.name in ("sim", "gls") and r.data.get("tests"):
             lines += [md_table(["test", "status", "sim ns", "message"], _test_rows(r)), ""]
         if r.name == "coverage" and r.data.get("files"):
             head, rows = _coverage_rows(r)
             lines += [md_table(head, rows), ""]
-        for caption, head, rows in _tables(r):
+        for head, rows in _tables(r):
+            lines += [md_table(head, rows), ""]
+        for caption, head, rows in _impl_tables(r):
             lines += [f"{caption}:", "", md_table(head, rows), ""]
         for net in (
             (n for n in r.data.get("nets", []) if n.get("map")) if r.name == "ir_drop" else []
@@ -398,8 +503,10 @@ def project_html(p: Project, results: Sequence[StepResult]) -> str:
         kv = _kv(r)
         if kv:
             parts.append(_kpis(kv))
-        if r.name == "sim" and r.data.get("tests"):
+        if r.name in ("sim", "gls") and r.data.get("tests"):
             parts.append(_table(["test", "status", "sim ns", "message"], _test_rows(r)))
+        for head, rows in _tables(r):
+            parts.append(_table(head, rows))
         if r.name == "coverage" and r.data.get("files"):
             head, rows = _coverage_rows(r)
             parts.append(_table(head, rows))
@@ -414,7 +521,7 @@ def project_html(p: Project, results: Sequence[StepResult]) -> str:
                         [[_loc(u), u["kind"], u["name"]] for u in unc[:50]],
                     )
                 )
-        for caption, head, rows in _tables(r):
+        for caption, head, rows in _impl_tables(r):
             parts.append(f"<p>{esc(caption)}:</p>")
             parts.append(_table(head, rows))
         for net, svg in _maps(p, r):

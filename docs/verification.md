@@ -15,7 +15,7 @@ Results go to `DIR/verify/verify.json` and `DIR/verify/VERIFY.md`. Choose steps 
 
 A bundle may come from someone else, so ChipLeap never writes through a symlink in it. `DIR` itself (like the directory you give `explore` and `generate` with `-o`) may not be a symlink, and neither may `verify/` or a step's directory in it (`verify/synth`, `verify/pnr`, `verify/genus` and so on): the run stops with an error that names it. A symlink further inside a step's directory is removed before the step writes there, and nothing it points at is touched. On Windows a directory junction, or any other reparse point, counts as a symlink. A directory that `-o` creates gets a `.chipleap` file that says ChipLeap made it, and ChipLeap never empties an output directory without one.
 
-This page is about generated bundles. The same command verifies RTL you wrote, given a `project.yaml`: lint with Verilator and slang, your cocotb tests on Icarus or Verilator, coverage, synthesis and place and route with the signoff settings below. [projects.md](projects.md) describes it.
+This page is about generated bundles. The same command verifies RTL you wrote, given a `project.yaml`: lint with Verilator and slang, your cocotb tests on Icarus or Verilator, coverage, formal proofs of your properties with SymbiYosys, clock and reset domain crossing checks, synthesis, equivalence of the RTL and its netlists, place and route with the signoff settings below, and your tests again on the routed netlist with SDF delays. [projects.md](projects.md) describes it.
 
 ## Consistency
 
@@ -114,10 +114,20 @@ This needs `hjson` and `mako` in the Python that runs ChipLeap: `pip install "ch
 Tests that need Verilator are marked `rtl` and skip themselves when it is missing; tests
 that need a commercial simulator or synthesis tool on the path are marked `commercial`.
 The RTL project tests (`tests/test_project_*.py`) skip themselves without cocotb, Icarus,
-Verilator 5.036 or newer (for coverage), slang, Yosys or LibreLane, whichever they need.
+Verilator 5.036 or newer (for coverage), slang, Yosys, SymbiYosys and z3, EQY, Icarus 13
+(for gate level) or LibreLane, whichever they need. Each verification check has a passing
+and a failing case: SymbiYosys proves a FIFO's properties and finds the counterexample in a
+broken one; CDC passes two- and three-flop synchronizers, a handshake and a FIFO with gray
+pointers and flags a missing synchronizer, logic before one, binary pointers, an
+unsynchronized asynchronous input and a reset domain crossing; equivalence proves the
+counter's netlist equal to its RTL and catches one changed gate, with Yosys and with EQY;
+the UART's cocotb tests pass on its routed netlist with SDF (from a real LibreLane run kept
+in `tests/fixtures/uart_routed`, since CI cannot route) and fail with one gate changed.
+`tests/test_tool_path.py` plants programs named like the tools in a project and puts `""`
+and `.` on `PATH`, and checks that every step runs the real tools or skips.
 The real runs of the implementation steps need OpenROAD, Fault, Quaigh and Icarus 13 and
-run with `CHIPLEAP_RUN_IMPL=1` (seconds on the fixtures); the ECO test places and routes
-first and runs with `CHIPLEAP_RUN_PNR=1`.
+run with `CHIPLEAP_RUN_IMPL=1` (seconds on the fixtures); the ECO tests place and route
+first and run with `CHIPLEAP_RUN_PNR=1`.
 
 ## Commercial tools
 

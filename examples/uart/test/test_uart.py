@@ -1,5 +1,6 @@
 """cocotb tests for the UART, against the reference model in model/uart_model.py."""
 
+import json
 import os
 import random
 
@@ -21,10 +22,9 @@ async def start(dut):
     await ClockCycles(dut.clk_i, 3)
     dut.rst_ni.value = 1
     await ClockCycles(dut.clk_i, 2)
-    # A gate-level netlist has no parameters; ChipLeap passes them in the environment.
-    if os.environ.get("GATES"):
-        return int(os.environ["CHIPLEAP_PARAM_CLKS_PER_BIT"])
-    return int(dut.CLKS_PER_BIT.value)
+    # A gate-level netlist has no parameters left; ChipLeap passes the project's values.
+    params = json.loads(os.environ.get("CHIPLEAP_PARAMETERS", "{}"))
+    return int(params["CLKS_PER_BIT"]) if "CLKS_PER_BIT" in params else int(dut.CLKS_PER_BIT.value)
 
 
 async def send(dut, byte):

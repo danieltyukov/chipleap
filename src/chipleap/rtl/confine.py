@@ -29,7 +29,6 @@ import contextlib
 import ctypes
 import json
 import os
-import shutil
 import stat
 import struct
 import sys
@@ -38,7 +37,14 @@ from collections.abc import Iterable, Iterator, Sequence
 from functools import lru_cache
 from pathlib import Path
 
+try:
+    import resource
+except ImportError:  # Windows
+    resource = None  # type: ignore[assignment]
+
 ENV = "CHIPLEAP_CONFINE"
+MEMORY_ENV = "CHIPLEAP_SOLVER_MEMORY_MB"
+SOLVER_MEMORY_MB = 8192
 # Landlock's system calls have the same numbers on every Linux architecture.
 _CREATE_RULESET, _ADD_RULE, _RESTRICT_SELF = 444, 445, 446
 _CREATE_RULESET_VERSION = 1
@@ -96,42 +102,97 @@ def enabled() -> bool:
     return os.environ.get(ENV, "1") != "0" and abi() > 0
 
 
-def installation(tool: str | Path) -> list[Path]:
+def installation(tool: str | Path, path: str | None = None, _depth: int = 0) -> list[Path]:
     """What a tool reads of its own besides the system: its directory, and its prefix when
     that is a directory of its own. In a shared prefix (the home directory, ~/.local) only
     the tool's own share, lib and libexec directories, so a tool in ~/.local/bin does not
-    open the rest of ~/.local; a tool directly in the home directory gets only itself."""
-    exe = Path(shutil.which(tool) or tool).resolve()
+    open the rest of ~/.local; a tool directly in the home directory gets only itself. A
+    script (sby and eqy are Python) also gets the installation of its interpreter, found
+    on ``path`` (the PATH the tool runs with) as the script's ``env`` line finds it."""
+    from chipleap.verify.tools import which  # not at the top: this is also the launcher
+
+    exe = Path(which(str(tool), path=path) or tool).resolve()
     home = Path.home().resolve()
     if home.is_relative_to(exe.parent):
-        return [exe]
-    prefix = exe.parent.parent
-    if prefix in (home, home / ".local") or home.is_relative_to(prefix):
-        return [exe.parent, *(prefix / d / exe.name for d in ("share", "lib", "libexec"))]
-    return [exe.parent, prefix]
+        out = [exe]
+    else:
+        prefix = exe.parent.parent
+        if prefix in (home, home / ".local") or home.is_relative_to(prefix):
+            out = [exe.parent, *(prefix / d / exe.name for d in ("share", "lib", "libexec"))]
+        else:
+            out = [exe.parent, prefix]
+    interpreter = _interpreter(exe, path)
+    if interpreter is not None and _depth < 2:
+        out += installation(interpreter, path, _depth + 1)
+    return out
+
+
+def _interpreter(exe: Path, path: str | None = None) -> str | None:
+    """The program a script's first line names (``#!/usr/bin/env python3`` gives the
+    python3 on ``path``), or None for a binary."""
+    from chipleap.verify.tools import which
+
+    try:
+        with open(exe, "rb") as fh:
+            head = fh.read(256)
+    except OSError:
+        return None
+    if not head.startswith(b"#!"):
+        return None
+    words = head[2:].split(b"\n", 1)[0].decode(errors="replace").split()
+    if not words:
+        return None
+    if Path(words[0]).name == "env":
+        names = [w for w in words[1:] if not w.startswith("-")]
+        return which(names[0], path=path) if names else None
+    return words[0]
 
 
 @contextlib.contextmanager
 def confined(
-    cmd: Sequence[str], read: Iterable[Path]
+    cmd: Sequence[str], read: Iterable[Path], path: str | None = None
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """The command to run ``cmd`` with, and its environment, so that it can read only
     ``read`` (files or directories), the system and its own installation. TMPDIR points
-    at a private directory it may use, removed afterwards. Unchanged when Landlock is not
-    available, CHIPLEAP_CONFINE is 0 or the tool is a container wrapper."""
-    from chipleap.verify.tools import is_wrapper  # not at the top: this is also the launcher
+    at a private directory it may use, removed afterwards. The command is unchanged when
+    Landlock is not available, CHIPLEAP_CONFINE is 0 or the tool is a container wrapper.
+    Either way the environment's PATH has no relative entry and nothing inside ``read``
+    (``chipleap.verify.tools.clean_env``): the tool runs in the project or its build
+    directory, and what it starts by name must not come from there. ``path`` is the PATH
+    to start from instead of this process's (a solver's directory first, say); the
+    interpreter of a script tool is looked up on the same PATH it will run with."""
+    from chipleap.verify.tools import clean_env, is_wrapper
 
-    env = dict(os.environ)
+    read = list(read)
+    env = clean_env(exclude=read, base={**os.environ, **({"PATH": path} if path else {})})
     if not enabled() or is_wrapper(cmd[0]):
         yield list(cmd), env
         return
     with tempfile.TemporaryDirectory(prefix="chipleap-tool-") as tmp:
-        paths = [*SYSTEM, tmp, *map(str, read), *map(str, installation(cmd[0]))]
+        tool_files = installation(cmd[0], env["PATH"])
+        paths = [*SYSTEM, tmp, *map(str, read), *map(str, tool_files)]
         if env.get("VERILATOR_ROOT"):
             paths.append(env["VERILATOR_ROOT"])
         rules = sorted({p for p in paths if os.path.exists(p)})
         launcher = [sys.executable, "-I", "-S", str(Path(__file__).resolve())]
         yield [*launcher, json.dumps(rules), "--", *cmd], {**env, "TMPDIR": tmp}
+
+
+def limit_memory(pid: int) -> None:
+    """Cap the address space of a process that runs solvers, and so of every process it
+    starts afterwards (SymbiYosys starts its solvers after Yosys has prepared the model).
+    A solver can grow without end on a proof: z3 4.8.12 took 14 GB for each of the base
+    case and the induction of the UART example's proof within ten minutes, and two of
+    them can take a workstation down. ``CHIPLEAP_SOLVER_MEMORY_MB`` sets the cap per
+    process (0 for none); a solver that reaches it stops and the run reports an error.
+    Linux only: elsewhere nothing is capped."""
+    megabytes = int(os.environ.get(MEMORY_ENV, SOLVER_MEMORY_MB))
+    prlimit = getattr(resource, "prlimit", None)
+    if megabytes <= 0 or prlimit is None:
+        return
+    limit = megabytes * 1024 * 1024
+    with contextlib.suppress(OSError):  # gone already: nothing to cap
+        prlimit(pid, resource.RLIMIT_AS, (limit, limit))
 
 
 def _restrict(paths: Iterable[str]) -> None:

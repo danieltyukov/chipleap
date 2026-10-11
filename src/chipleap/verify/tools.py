@@ -1,14 +1,4 @@
-"""Find the open-source tools the verification steps use.
-
-A tool is found by an absolute path, never through the current directory. The search
-path is ``PATH`` without its empty and relative entries (an empty entry is the current
-directory, which during a step is the project or a work directory in its ``build/``),
-and a ``CHIPLEAP_<TOOL>`` variable must name an absolute path or a command on that
-search path. While a step runs on a project (``excluding``), neither a tool nor any
-entry of the search paths ChipLeap hands its tools (``tool_env``: ``PATH``,
-``PYTHONPATH``, ``LD_LIBRARY_PATH``) may lie inside the project, so a repository cannot
-ship its own ``vvp``, ``fault`` or Python package and have a step run it.
-"""
+"""Find the open-source tools the verification steps use."""
 
 from __future__ import annotations
 
@@ -16,93 +6,12 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Iterator
+import tempfile
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-
-# Directories no tool may come from while a step runs: the project's.
-_EXCLUDED: ContextVar[tuple[Path, ...]] = ContextVar("chipleap_tools_excluded", default=())
-# Search paths a tool reads from its environment: an empty or relative entry in any of
-# them is resolved against the tool's working directory.
-SEARCH_PATHS = ("PATH", "PYTHONPATH", "LD_LIBRARY_PATH")
-
-
-@contextmanager
-def excluding(*dirs: Path) -> Iterator[None]:
-    """Within the block, in this thread, find no tool in ``dirs`` and leave them out of
-    every search path given to a tool. A step wraps its work in this with the project's
-    directory, which holds ``build/``."""
-    added = tuple(Path(d).resolve() for d in dirs)
-    token = _EXCLUDED.set((*_EXCLUDED.get(), *added))
-    try:
-        yield
-    finally:
-        _EXCLUDED.reset(token)
-
-
-def excluded(path: str | Path) -> bool:
-    """Whether ``path`` is relative, or inside a directory excluded here."""
-    if not os.path.isabs(path):
-        return True
-    try:
-        real = Path(path).resolve()
-    except (OSError, RuntimeError):
-        return True
-    return any(real == d or real.is_relative_to(d) for d in _EXCLUDED.get())
-
-
-def trusted_entries(value: str | None) -> list[str]:
-    """The entries of a search path (``PATH`` and the like) that a tool may use: absolute,
-    and outside the excluded directories; empty and relative ones are dropped."""
-    out: list[str] = []
-    for entry in (value or "").split(os.pathsep):
-        if entry and not excluded(entry) and entry not in out:
-            out.append(entry)
-    return out
-
-
-def search_path() -> str:
-    """``PATH`` as ChipLeap searches it for a tool."""
-    return os.pathsep.join(trusted_entries(os.environ.get("PATH")))
-
-
-def which(name: str) -> str | None:
-    """The absolute path of the command ``name``: a path is taken as it is when it is
-    absolute, executable and not excluded, a bare name is looked up on ``search_path``."""
-    if not name:
-        return None
-    if os.sep in name or (os.altsep is not None and os.altsep in name):
-        ok = not excluded(name) and os.path.isfile(name) and os.access(name, os.X_OK)
-        return name if ok else None
-    found = shutil.which(name, path=search_path())
-    return found if found is not None and not excluded(found) else None
-
-
-def from_env(var: str) -> str | None:
-    """The tool a ``CHIPLEAP_<TOOL>`` variable names, through ``which``: None when the
-    variable is unset or names nothing ChipLeap would run."""
-    value = os.environ.get(var, "")
-    return which(value) if value else None
-
-
-def tool_env(base: dict[str, str] | None = None, prepend: tuple[str, ...] = ()) -> dict[str, str]:
-    """The environment for a tool: ``base`` (the process's own by default) with every
-    search path reduced to its trusted entries, ``prepend`` first on ``PATH``. A search
-    path left with no entry is removed."""
-    env = dict(os.environ if base is None else base)
-    for var in SEARCH_PATHS:
-        extra = [*prepend] if var == "PATH" else []
-        entries = trusted_entries(os.pathsep.join([*extra, env.get(var, "")]))
-        if entries:
-            env[var] = os.pathsep.join(entries)
-        else:
-            env.pop(var, None)
-    home = env.get("PYTHONHOME")
-    if home is not None and excluded(home):
-        env.pop("PYTHONHOME")
-    return env
 
 
 @dataclass(frozen=True)
@@ -111,25 +20,150 @@ class Tool:
     path: str | None
     version: str
     purpose: str
+    # Why a tool that seems to be there is not used: a relative CHIPLEAP_<TOOL>, or a copy
+    # found only where ChipLeap does not run tools from.
+    note: str = ""
 
     @property
     def found(self) -> bool:
         return self.path is not None
 
+    def missing(self, label: str) -> str:
+        """``label is not installed``, with the reason a copy that is there was not used."""
+        return f"{label} is not installed" + (f" ({self.note})" if self.note else "")
 
-def _version(cmd: list[str], pattern: str) -> str:
-    # Out of the project, with the trusted search paths: a version probe runs nothing a
-    # repository put there.
+
+# Directories no tool may come from in this context: the project a step runs on (see
+# ``untrusted``). A context variable, so that MCP calls on two projects in two threads
+# each keep their own.
+_UNTRUSTED: ContextVar[tuple[Path, ...]] = ContextVar("chipleap_untrusted", default=())
+
+
+@contextmanager
+def untrusted(*dirs: str | Path) -> Iterator[None]:
+    """Within the block, ``search_path``, ``which`` and ``clean_env`` also leave out
+    ``dirs`` and everything below them. A step wraps its run in this with its project's
+    directory (``chipleap.rtl.project.runs_tools``), so a tool the project ships is not
+    found even through an absolute PATH entry that leads into it."""
+    token = _UNTRUSTED.set((*_UNTRUSTED.get(), *(Path(os.path.realpath(d)) for d in dirs)))
     try:
-        out = subprocess.run(
+        yield
+    finally:
+        _UNTRUSTED.reset(token)
+
+
+def _banned(exclude: Iterable[str | Path]) -> list[Path]:
+    return [*_UNTRUSTED.get(), *(Path(os.path.realpath(e)) for e in exclude)]
+
+
+def search_path(exclude: Iterable[str | Path] = (), path: str | None = None) -> str:
+    """``path`` (this process's PATH by default) cut down to the directories a tool may
+    be found in: absolute ones outside ``exclude`` and ``untrusted`` directories. An
+    empty entry, ``.`` or any other relative entry names the current directory or one
+    below it, and during a run that is a project or its build directory: a project that
+    ships its own z3, yosys or sby would have it run in place of the real one. An
+    absolute entry inside the project does the same."""
+    raw = os.environ.get("PATH", os.defpath) if path is None else path
+    banned = _banned(exclude)
+    keep: list[str] = []
+    for entry in raw.split(os.pathsep):
+        if not entry or not os.path.isabs(entry) or entry in keep:
+            continue
+        if any(Path(os.path.realpath(entry)).is_relative_to(b) for b in banned):
+            continue
+        keep.append(entry)
+    return os.pathsep.join(keep)
+
+
+def which(name: str, exclude: Iterable[str | Path] = (), path: str | None = None) -> str | None:
+    """The absolute path of the program ``name`` on ``search_path``, or None. A name with
+    a directory in it is taken as it is when absolute and refused when relative, since
+    a relative one is looked up from wherever ChipLeap happens to run."""
+    exclude = list(exclude)
+    if os.sep in name or (os.altsep and os.altsep in name):
+        found = shutil.which(name) if os.path.isabs(name) else None
+    else:
+        found = shutil.which(name, path=_usable_path(exclude, path))
+    # shutil.which tries the current directory first on Windows; never take that.
+    if found is None or not os.path.isabs(found):
+        return None
+    if any(Path(os.path.realpath(found)).is_relative_to(b) for b in _banned(exclude)):
+        return None
+    return found
+
+
+def _usable_path(exclude: Iterable[str | Path], path: str | None) -> str:
+    """``search_path``, or the system's default directories when nothing is left: an empty
+    PATH would make a program started by name resolve in its working directory."""
+    exclude = list(exclude)
+    return search_path(exclude, path) or search_path(exclude, os.defpath)
+
+
+# Search paths other than PATH that a tool resolves an empty or relative entry of against
+# its working directory: Python's module path and the dynamic loader's.
+LIBRARY_PATHS = ("PYTHONPATH", "LD_LIBRARY_PATH")
+
+
+def clean_env(
+    prepend: Iterable[str | Path] = (),
+    exclude: Iterable[str | Path] = (),
+    base: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """``base`` (this process's environment by default) with PATH made of ``prepend``
+    (directories ChipLeap chose) and ``search_path(exclude)``, both held to the same
+    rule. Every program ChipLeap starts gets an environment from here, so a tool that
+    starts another by name (SymbiYosys starts yosys and z3, cocotb starts the simulator,
+    a script's ``#!/usr/bin/env python3`` starts Python) never finds one in its working
+    directory or the project. ``PYTHONPATH`` and ``LD_LIBRARY_PATH`` are held to the same
+    rule (one left empty is removed, since an empty one means the current directory), so
+    a project's ``sitecustomize`` or shared library is not loaded either, and a
+    ``PYTHONHOME`` inside the project is dropped."""
+    exclude = list(exclude)
+    env = dict(os.environ if base is None else base)
+    first = search_path(exclude, os.pathsep.join(str(d) for d in prepend))
+    rest = _usable_path(exclude, env.get("PATH", os.defpath))
+    env["PATH"] = os.pathsep.join(p for p in (first, rest) if p)
+    for var in LIBRARY_PATHS:
+        if var in env:
+            kept = search_path(exclude, env[var])
+            if kept:
+                env[var] = kept
+            else:
+                del env[var]
+    home = env.get("PYTHONHOME")
+    if home is not None and excluded(home, exclude):
+        del env["PYTHONHOME"]
+    return env
+
+
+def excluded(path: str | Path, exclude: Iterable[str | Path] = ()) -> bool:
+    """Whether ``path`` is relative, or inside ``exclude`` or an ``untrusted`` directory."""
+    if not os.path.isabs(path):
+        return True
+    real = Path(os.path.realpath(path))
+    return any(real.is_relative_to(b) for b in _banned(exclude))
+
+
+def probe(cmd: list[str], timeout: float = 20) -> subprocess.CompletedProcess[str]:
+    """Run a short query of a tool (its version, where its Python is) in an empty
+    directory of its own: run in a project, ``python -c "import cocotb"`` would import a
+    ``cocotb`` package the project ships, since Python looks in the current directory
+    first."""
+    with tempfile.TemporaryDirectory(prefix="chipleap-probe-") as empty:
+        return subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=timeout,
             check=False,
-            cwd=os.sep,
-            env=tool_env(),
+            cwd=empty,
+            env=clean_env(exclude=[empty]),
         )
+
+
+def _version(cmd: list[str], pattern: str) -> str:
+    try:
+        out = probe(cmd)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     m = re.search(pattern, out.stdout + out.stderr)
@@ -147,12 +181,39 @@ def is_wrapper(path: str) -> bool:
     return head.startswith(b"#!") and b"docker" in head
 
 
+def locate(name: str, env: str | None = None) -> str | None:
+    """Where the program ``name`` is: the absolute path the variable ``env`` names, else
+    ``which(name)``. A variable that holds a bare name is looked up the same way; one
+    that holds a relative path is not used (``located`` says why)."""
+    return located(name, env)[0]
+
+
+def located(name: str, env: str | None = None) -> tuple[str | None, str]:
+    """``locate``, and when it finds nothing although something is there, why."""
+    given = os.environ.get(env, "") if env else ""
+    if given and not os.path.isabs(given) and os.sep in given:
+        return None, f"{env} is a relative path, {given}; give an absolute one"
+    path = which(given or name)
+    if path is not None:
+        return path, ""
+    if given and os.path.isabs(given) and shutil.which(given):
+        return None, f"{env} names {given}, inside the project, where ChipLeap runs no tools"
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        copy = Path(entry or os.curdir) / (given or name)
+        if copy.is_file() and os.access(copy, os.X_OK):
+            return None, (
+                f"the only {copy.name} found is {copy}, from a PATH entry ChipLeap does not "
+                "run tools from: relative, or inside the project"
+            )
+    return None, ""
+
+
 def find(
     name: str, version_args: list[str], pattern: str, purpose: str, env: str | None = None
 ) -> Tool:
-    path = (from_env(env) if env and os.environ.get(env) else which(name)) or ""
-    if not path:
-        return Tool(name, None, "", purpose)
+    path, note = located(name, env)
+    if path is None:
+        return Tool(name, None, "", purpose, note)
     if is_wrapper(path):
         return Tool(name, path, "container wrapper", purpose)
     return Tool(name, path, _version([path, *version_args], pattern), purpose)
@@ -177,7 +238,7 @@ def openroad() -> Tool:
         "openroad",
         ["-version"],
         r"(\S+)",
-        "timing, scan insertion, power, IR drop, UPF and ECO (OpenROAD)",
+        "static timing, scan insertion, power, IR drop, UPF and ECO (OpenROAD)",
         "CHIPLEAP_OPENROAD",
     )
 
@@ -201,9 +262,44 @@ def iverilog() -> Tool:
         "iverilog",
         ["-V"],
         r"Icarus Verilog version (\S+)",
-        "four-state simulation of RTL projects (with cocotb)",
+        "four-state simulation of RTL projects (with cocotb); 13 or newer for IHP gate level",
         "CHIPLEAP_IVERILOG",
     )
+
+
+def sby() -> Tool:
+    # SymbiYosys built from a yosys-0.xx tag has no --version; it is listed without one.
+    return find(
+        "sby", ["--help"], r"SBY (\S+)", "formal proofs of a project's properties", "CHIPLEAP_SBY"
+    )
+
+
+def eqy() -> Tool:
+    return find(
+        "eqy",
+        ["--help"],
+        r"EQY (\S+)",
+        "equivalence of RTL, synthesized and routed netlists",
+        "CHIPLEAP_EQY",
+    )
+
+
+def solver_path(tool: str | None, exclude: Iterable[str | Path] = ()) -> str:
+    """The search path a formal tool's run gets: the tool's own directory first, where
+    scripts/install_formal_tools.sh puts a z3 newer than the distributions' (z3 4.8.12,
+    in Ubuntu 22.04 and 24.04, ran out of memory on the UART example's proof, which z3
+    4.15 finishes in a second), then ``search_path(exclude)``."""
+    first = [str(Path(tool).parent)] if tool and os.path.isabs(tool) else []
+    return clean_env(first, exclude, {"PATH": os.environ.get("PATH", os.defpath)})["PATH"]
+
+
+def z3() -> Tool:
+    """The z3 SymbiYosys runs with: the one beside it, else the one on the path."""
+    path = which("z3", path=solver_path(locate("sby", "CHIPLEAP_SBY")))
+    purpose = "SMT solver for formal and equivalence"
+    if path is None:
+        return Tool("z3", None, "", purpose)
+    return Tool("z3", path, _version([path, "--version"], r"Z3 version (\S+)"), purpose)
 
 
 def slang() -> Tool:
@@ -233,16 +329,18 @@ GL_PURPOSE = "gate-level simulation of IHP cells: scan patterns and power activi
 def gl_iverilog() -> Tool:
     """An Icarus Verilog that simulates IHP SG13G2's cell models. Icarus 12 elaborates
     them but leaves every flip-flop at X, so it needs 13 or newer: ``CHIPLEAP_GL_IVERILOG``,
-    else ``iverilog`` on the path when it is new enough. Its ``vvp`` is the one beside it."""
+    else the ``iverilog`` ChipLeap uses (``CHIPLEAP_IVERILOG`` or the path) when it is new
+    enough. Its ``vvp`` is the one beside it."""
     name = "iverilog-gl"
-    var = "CHIPLEAP_GL_IVERILOG"
-    path = (from_env(var) if os.environ.get(var) else which("iverilog")) or ""
-    if not path:
-        return Tool(name, None, "", GL_PURPOSE)
+    path, note = located("iverilog", "CHIPLEAP_GL_IVERILOG")
+    if path is None and not os.environ.get("CHIPLEAP_GL_IVERILOG"):
+        path, note = located("iverilog", "CHIPLEAP_IVERILOG")
+    if path is None:
+        return Tool(name, None, "", GL_PURPOSE, note)
     version = _version([path, "-V"], r"Icarus Verilog version (\S+)")
     numbers = tuple(int(x) for x in re.findall(r"\d+", version)[:1])
     if numbers < GL_ICARUS_MIN:
-        return Tool(name, None, version, GL_PURPOSE)
+        return Tool(name, None, version, GL_PURPOSE, f"{path} is Icarus {version or '?'}")
     return Tool(name, path, version, GL_PURPOSE)
 
 
@@ -268,21 +366,21 @@ def nl2bench() -> Tool:
 
 
 def fault() -> Tool:
-    var = "CHIPLEAP_FAULT"
-    path = (from_env(var) if os.environ.get(var) else which("fault")) or ""
+    path, note = located("fault", "CHIPLEAP_FAULT")
     purpose = "ATPG and stuck-at fault coverage (Fault, with Quaigh)"
-    if not path:
-        return Tool("fault", None, "", purpose)
+    if path is None:
+        return Tool("fault", None, "", purpose, note)
     try:
-        out = subprocess.run(
-            [path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-            cwd=os.sep,
-            env=fault_env(path),
-        )
+        with tempfile.TemporaryDirectory(prefix="chipleap-probe-") as empty:
+            out = subprocess.run(
+                [path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+                cwd=empty,
+                env=fault_env(path),
+            )
     except (OSError, subprocess.TimeoutExpired):
         return Tool("fault", path, "", purpose)
     m = re.search(r"^(\d+\.\d+\.\d+)\s*$", out.stdout, re.M)
@@ -307,19 +405,19 @@ def _interpreter(script: str) -> str | None:
     return which(exe) if "python" in Path(exe).name else None
 
 
-def fault_env(fault_path: str, base: dict[str, str] | None = None) -> dict[str, str]:
+def fault_env(fault_path: str, base: Mapping[str, str] | None = None) -> dict[str, str]:
     """The environment Fault needs. Fault from PyPI embeds Python and does not see the
     virtual environment it was installed in, so its packages go on ``PYTHONPATH`` (and
-    the base installation in ``PYTHONHOME``). It also runs ``vvp`` from the path, which
-    must match the ``iverilog`` that compiled the testbench, so both are named; and
-    Quaigh goes first on the path."""
+    the base installation in ``PYTHONHOME``), asked of the interpreter Fault is installed
+    with, in isolated mode (``-I``: no current directory, user site or ``PYTHON*``
+    variables). It also runs ``vvp`` from the path, which must match the ``iverilog``
+    that compiled the testbench, so both are named; and Quaigh goes first on the path.
+    Everything goes through ``clean_env``."""
     env = dict(os.environ if base is None else base)
     py = _interpreter(fault_path)
     if py is not None:
-        # Isolated (-I): no current directory, user site or PYTHON* variables, so only the
-        # interpreter's own installation answers.
         try:
-            out = subprocess.run(
+            out = probe(
                 [
                     py,
                     "-I",
@@ -327,12 +425,7 @@ def fault_env(fault_path: str, base: dict[str, str] | None = None) -> dict[str, 
                     "import sys, sysconfig; print(sysconfig.get_paths()['purelib']); "
                     "print(sys.base_prefix)",
                 ],
-                capture_output=True,
-                text=True,
                 timeout=60,
-                check=False,
-                cwd=os.sep,
-                env=tool_env(base),
             )
             lines = out.stdout.splitlines()
             if out.returncode == 0 and len(lines) >= 2 and not excluded(lines[1]):
@@ -350,7 +443,7 @@ def fault_env(fault_path: str, base: dict[str, str] | None = None) -> dict[str, 
     q = quaigh()
     if q.path:
         first.append(str(Path(q.path).parent))
-    return tool_env(env, tuple(first))
+    return clean_env(first, base=env)
 
 
 def riscv_gcc() -> Tool:
@@ -383,6 +476,9 @@ def all_tools() -> list[Tool]:
         riscv_gcc(),
         iverilog(),
         slang(),
+        sby(),
+        eqy(),
+        z3(),
         gl_iverilog(),
         fault(),
         quaigh(),
@@ -418,23 +514,48 @@ PDK_ROOTS = (
 def pdk_roots() -> tuple[Path, ...]:
     """Where PDKs live on this machine: ``PDK_ROOT`` and the usual install directories,
     resolved. Files the implementation steps take from a PDK must be under one of them,
-    or beside the liberty ``CHIPLEAP_LIBERTY`` names."""
-    roots = [os.environ.get("PDK_ROOT", ""), *PDK_ROOTS]
+    or beside the liberty ``CHIPLEAP_LIBERTY`` names. Relative settings count for
+    nothing (``liberty_settings_problem``)."""
+    pdk_root = os.environ.get("PDK_ROOT", "")
+    roots = [pdk_root if os.path.isabs(pdk_root) else "", *PDK_ROOTS]
     out = [Path(r).expanduser().resolve() for r in roots if r and Path(r).expanduser().is_dir()]
     env = os.environ.get("CHIPLEAP_LIBERTY")
-    if env and Path(env).is_file():
+    if env and os.path.isabs(env) and Path(env).is_file():
         # libs.ref/<library>/lib/<file>.lib: the library's own directory holds its views.
         out.append(Path(env).resolve().parent.parent)
     return tuple(dict.fromkeys(out))
 
 
+def liberty_settings_problem() -> str:
+    """What is wrong with CHIPLEAP_LIBERTY or PDK_ROOT, if anything: a relative path would
+    be read from wherever ChipLeap runs, which may be a project, so neither is used."""
+    for var in ("CHIPLEAP_LIBERTY", "PDK_ROOT"):
+        value = os.environ.get(var, "")
+        if value and not os.path.isabs(value):
+            return f"{var} is a relative path, {value}; give an absolute one"
+    lib = os.environ.get("CHIPLEAP_LIBERTY", "")
+    if lib and not Path(lib).is_file():
+        return f"CHIPLEAP_LIBERTY names {lib}, which is not a file"
+    return ""
+
+
 def ihp_liberty() -> Path | None:
-    """The IHP SG13G2 typical-corner standard-cell library, if a PDK is installed."""
+    """The IHP SG13G2 typical-corner standard-cell library, if a PDK is installed.
+    CHIPLEAP_LIBERTY and PDK_ROOT count only as absolute paths
+    (``liberty_settings_problem``)."""
     candidates = []
     env = os.environ.get("CHIPLEAP_LIBERTY")
     if env:
-        return Path(env) if Path(env).is_file() else None
-    roots = [os.environ.get("PDK_ROOT", ""), *(str(Path(r).expanduser()) for r in PDK_ROOTS)]
+        return Path(env) if os.path.isabs(env) and Path(env).is_file() else None
+    pdk_root = os.environ.get("PDK_ROOT", "")
+    roots = [
+        pdk_root if os.path.isabs(pdk_root) else "",
+        str(Path.home() / ".volare"),
+        str(Path.home() / ".ciel"),
+        str(Path.home() / ".local/share/pdk"),
+        "/usr/local/share/pdk",
+        "/opt/pdk",
+    ]
     name = "sg13g2_stdcell_typ_1p20V_25C.lib"
     for root in roots:
         if not root or not Path(root).is_dir():

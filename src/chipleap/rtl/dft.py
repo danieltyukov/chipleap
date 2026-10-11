@@ -65,14 +65,14 @@ from chipleap.rtl.synth import SynthError, synthesize
 from chipleap.verify import launch
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import (
-    excluding,
+    clean_env,
     fault,
     fault_env,
     gl_iverilog,
     gl_vvp,
     nl2bench,
     quaigh,
-    tool_env,
+    untrusted,
 )
 
 # IHP SG13G2's cells as the scan steps see them.
@@ -989,7 +989,7 @@ def simulate_patterns(
     bench = _bench(scan, top, clocks, [r.port for r in project.resets])
     t_flush, _ = write_bench_data(bench, patterns, work)
     builddir.write_text(work, "tb.v", testbench(project, top, scan, bench, t_flush, len(patterns)))
-    env = tool_env()
+    env = clean_env()
     compile_cmd = [
         tool.path,
         "-g2012",
@@ -1164,7 +1164,7 @@ def dft(project: Project) -> StepResult:
     if project.dft is None:
         return StepResult("dft", "skipped", "no dft section in the project")
     try:
-        with excluding(project.root):
+        with untrusted(*project.roots):
             scan, atpg, sim, routed, notes = run_dft(project)
     except OpenroadUnavailable as exc:
         return StepResult("dft", "skipped", str(exc))

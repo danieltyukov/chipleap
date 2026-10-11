@@ -58,11 +58,11 @@ Point ChipLeap at a directory of Verilog or SystemVerilog with cocotb tests:
 
 ```sh
 chipleap project init path/to/rtl       # writes project.yaml: top, sources, clock, reset, tests
-chipleap verify path/to/rtl             # lint, simulation, coverage, synthesis
-chipleap verify path/to/rtl --steps all # and place and route to a GDS
+chipleap verify path/to/rtl             # lint, simulation, coverage, formal, CDC, synthesis, equivalence
+chipleap verify path/to/rtl --steps all # and place and route to a GDS, then the tests on the routed netlist
 ```
 
-Lint runs Verilator and slang, simulation runs the cocotb tests on Icarus or Verilator, coverage reports line, branch and toggle coverage, synthesis maps to the IHP SG13G2 cells, and LibreLane routes it with the same slow-corner signoff as the accelerators. With `--steps all` it also inserts scan chains with OpenROAD and generates stuck-at patterns with Fault, which it simulates through the chains; measures power from the activity of your own tests on the gate-level netlist and IR drop on the routed power grid; places UPF power domains with OpenROAD; and applies ECO changes to the routed design and signs it off again without placing it again. Failing tests come back by name, and every problem with its file and line, which is also what an assistant gets through MCP to fix the RTL in a loop. [examples/uart](examples/uart) is a UART that routes to a clean GDS; [docs/projects.md](docs/projects.md) describes the project file.
+Lint runs Verilator and slang, simulation runs the cocotb tests on Icarus or Verilator, coverage reports line, branch and toggle coverage, SymbiYosys proves the design's own assertions, a structural checker finds unsynchronized clock and reset domain crossings, synthesis maps to the IHP SG13G2 cells, equivalence shows the netlist implements the RTL, LibreLane routes it with the same slow-corner signoff as the accelerators, and the tests run again on the routed netlist with its SDF delays. With `--steps all` it also inserts scan chains with OpenROAD and generates stuck-at patterns with Fault, which it simulates through the chains; measures power from the activity of your own tests on the gate-level netlist and IR drop on the routed power grid; places UPF power domains with OpenROAD; and applies ECO changes to the routed design and signs it off again without placing it again. Failing tests come back by name, every problem with its file and line, and a failing property or netlist with its counterexample, which is also what an assistant gets through MCP to fix the RTL in a loop. [examples/uart](examples/uart) is a UART that routes to a clean GDS; [docs/projects.md](docs/projects.md) describes the project file.
 
 ## Ask your AI assistant
 
@@ -115,7 +115,7 @@ chipleap macro check tiny_ota.macro --pdk ihp-sg13g2
 | Guide | What it covers |
 |---|---|
 | [Spec format](docs/spec.md) | Workloads, targets, constraints and what the explorer may change |
-| [Your own RTL](docs/projects.md) | The project file, and lint, simulation, coverage, synthesis, place and route, DFT, power, IR drop, UPF and ECO on your design |
+| [Your own RTL](docs/projects.md) | The project file, and lint, simulation, coverage, formal, CDC, synthesis, equivalence, place and route, gate-level simulation, DFT, power, IR drop, UPF and ECO on your design |
 | [The model](docs/model.md) | Timing, energy and area, with sources |
 | [Verification](docs/verification.md) | Simulation, synthesis, place and route, the steps after it, X-HEEP checks |
 | [Platforms](docs/platforms.md) | X-HEEP or AXI4 IP, and how to integrate each |

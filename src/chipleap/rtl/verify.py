@@ -14,9 +14,13 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from chipleap.rtl import builddir, commercial
+from chipleap.rtl.cdc import cdc
 from chipleap.rtl.coverage import coverage
 from chipleap.rtl.dft import dft
 from chipleap.rtl.eco import eco
+from chipleap.rtl.equiv import equiv
+from chipleap.rtl.formal import formal
+from chipleap.rtl.gls import gls
 from chipleap.rtl.irdrop import ir_drop
 from chipleap.rtl.lint import lint
 from chipleap.rtl.pnr import pnr
@@ -28,24 +32,30 @@ from chipleap.rtl.synth import synth
 from chipleap.rtl.upf import upf
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import excluding
+from chipleap.verify.tools import untrusted
 
+# Equivalence and gate-level simulation come after place and route, so they see its
+# netlist. The ECO comes right after place and route too, so that equivalence, gate-level
+# simulation, DFT's check of the routed chains, power and IR drop see the changed layout.
 PROJECT_STEPS = (
     "lint",
     "sim",
     "coverage",
+    "formal",
+    "cdc",
     "synth",
     "pnr",
     "eco",
+    "equiv",
+    "gls",
     "dft",
     "power",
     "ir_drop",
     "upf",
 )
-# Place and route takes minutes, so it and the steps that read its result run only when
-# named or with "all". The ECO comes right after it, so that DFT's check of the routed
-# chains, power and IR drop see the changed layout.
-DEFAULT_STEPS = ("lint", "sim", "coverage", "synth")
+# Place and route takes minutes, so it and the steps that read its result (gate-level
+# simulation, ECO, DFT, power, IR drop, UPF) run only when named or with "all".
+DEFAULT_STEPS = ("lint", "sim", "coverage", "formal", "cdc", "synth", "equiv")
 SIM_TOOLS = ("auto", "icarus", "verilator", *COMMERCIAL)
 SYNTH_TOOLS = ("yosys", "genus", "dc")
 PNR_TOOLS = ("librelane", "innovus")
@@ -92,7 +102,7 @@ def run_step(
         raise ValueError(f"unknown step {step!r}")
     try:
         # No tool from the project's own directory, whatever PATH holds.
-        with excluding(project.root):
+        with untrusted(*project.roots):
             return _run_step(project, step, sim_tool, synth_tool, pnr_tool, remote, test_filter)
     except STEP_ERRORS as exc:
         first = (str(exc).strip().splitlines() or [""])[0]
@@ -117,6 +127,14 @@ def _run_step(
         return simulate(project, tool, remote if tool in COMMERCIAL else None, test_filter)
     if step == "coverage":
         return coverage(project)
+    if step == "formal":
+        return formal(project)
+    if step == "cdc":
+        return cdc(project)
+    if step == "equiv":
+        return equiv(project)
+    if step == "gls":
+        return gls(project, test_filter)
     if step == "synth":
         if synth_tool != "yosys":
             return commercial.synth_step(project, synth_tool, remote)

@@ -104,7 +104,7 @@ def test_the_fixture_is_hostile(hostile):
 
 
 def test_tools_are_found_outside_the_project(hostile, monkeypatch):
-    with tools.excluding(hostile.root):
+    with tools.untrusted(hostile.root):
         for name in (*PLANTED, *PLANTED_PY):
             found = tools.which(name)
             assert found is None or not Path(found).resolve().is_relative_to(hostile.root)
@@ -122,9 +122,9 @@ def test_tools_are_found_outside_the_project(hostile, monkeypatch):
 
 
 def test_tool_environments_hold_only_trusted_entries(hostile):
-    with tools.excluding(hostile.root):
+    with tools.untrusted(hostile.root):
         envs = [
-            tools.tool_env(),
+            tools.clean_env(),
             tools.fault_env(str(hostile.trusted / "fault")),
             tools.fault_env(executable(hostile.trusted / "pyfault", "")),
         ]
@@ -138,7 +138,7 @@ def test_tool_environments_hold_only_trusted_entries(hostile):
         )
         envs.append(logged)
     for env in envs:
-        for var in tools.SEARCH_PATHS:
+        for var in ("PATH", *tools.LIBRARY_PATHS):
             for entry in env.get(var, "").split(os.pathsep) if var in env else []:
                 assert os.path.isabs(entry), (var, entry)
                 if not entry.endswith(".chipleap-bin"):  # the run's own docker shim
@@ -166,7 +166,7 @@ def test_atpg_and_chain_simulation_run_nothing_from_the_project(hostile):
     work = p.work_dir("dft")
     scan = recorded_scan(work)
     views = orr.pdk_views(p)
-    with tools.excluding(p.root):
+    with tools.untrusted(p.root):
         with pytest.raises(D.DftError, match="fault cut failed"):
             D.run_atpg(p, scan, views, work)
         with pytest.raises(D.DftError, match="Icarus could not compile"):
@@ -191,7 +191,7 @@ def test_gate_level_tests_run_nothing_from_the_project(hostile):
     p = load_project(hostile.root)
     netlist = hostile.root.parent / "counter.nl.v"
     netlist.write_text(SCAN_NETLIST)
-    with tools.excluding(p.root):
+    with tools.untrusted(p.root):
         run = P.gate_level_run(p, netlist, orr.pdk_views(p), p.work_dir("power"), False)
     assert run.vcd is None
     assert not hostile.sentinel.exists()

@@ -27,10 +27,11 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from chipleap.verify.tools import clean_env, which
 
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
 HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._-]*)?")
@@ -115,7 +116,9 @@ class Remote:
     def _ssh(self, command: str, timeout: float) -> subprocess.CompletedProcess[str]:
         cmd = ["ssh", *SSH_OPTS, "--", self.host, command]
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+            out = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, check=False, env=clean_env()
+            )
         except subprocess.TimeoutExpired as exc:
             raise RemoteError(f"{self.host}: no answer within {timeout:.0f} s") from exc
         if out.returncode == 255:
@@ -158,11 +161,13 @@ class Remote:
 
     def _copy(self, src: str, dst: str) -> None:
         ssh = "ssh " + " ".join(SSH_OPTS)
-        if shutil.which("rsync"):
+        if which("rsync"):
             cmd = ["rsync", "-a", "-e", ssh, "--", src, dst]
         else:  # scp copies a directory's contents with the trailing "/."
             cmd = ["scp", *SSH_OPTS, "-r", "-q", "--", src.rstrip("/") + "/.", dst.rstrip("/")]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, check=False)
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=1800, check=False, env=clean_env()
+        )
         if out.returncode != 0:
             raise RemoteError(f"copy {src} -> {dst} failed: {out.stderr.strip()[-500:]}")
 
@@ -185,17 +190,30 @@ def run_steps(
 ) -> subprocess.CompletedProcess[str]:
     """Run tool steps in ``workdir``, here or on ``remote``, stopping at the first failure.
 
-    Locally each step runs from its argument vector with no shell in between. The output
-    of steps without a log file is returned, as a remote run returns it."""
+    Locally each step runs from its argument vector with no shell in between. A program
+    named by itself is found on a PATH of absolute directories outside ``workdir``
+    (``clean_env``), so a file in the work directory never stands in for a tool; one
+    named with a directory (``obj_dir/tb``, which a step before built) is taken in the
+    work directory. The output of steps without a log file is returned, as a remote run
+    returns it."""
     if remote is not None:
         return remote.run(workdir, steps, timeout)
     stdout: list[str] = []
     code = 0
+    env = clean_env(exclude=[workdir])
     for step in steps:
+        name = step.argv[0]
+        if "/" in name or os.sep in name:
+            exe: str | None = str(workdir.resolve() / name)
+        else:
+            exe = which(name, exclude=[workdir], path=env["PATH"])
+        if exe is None:
+            raise RemoteError(f"{name} is not on the path")
         try:
             res = subprocess.run(
-                list(step.argv),
+                [exe, *step.argv[1:]],
                 cwd=workdir,
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

@@ -57,7 +57,7 @@ from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.verify import launch
 from chipleap.verify.pnr import PnrError, PnrResult, parse
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import excluding, librelane
+from chipleap.verify.tools import librelane, untrusted
 
 RESUME_AT = "OpenROAD.DetailedRouting"
 # Before routing again: the edited DEF into LibreLane's database, legal placement, and
@@ -581,7 +581,7 @@ def eco(project: Project, changes: list[EcoChange] | None = None) -> StepResult:
     if not todo:
         return StepResult("eco", "skipped", "no eco changes in the project")
     try:
-        with excluding(project.root):
+        with untrusted(*project.roots):
             r = apply_eco(project, todo)
     except OpenroadUnavailable as exc:
         return StepResult("eco", "skipped", str(exc))
@@ -684,7 +684,7 @@ def timing_paths(
         raise ValueError(f"corner must be one of {', '.join(CORNERS)}")
     if kind not in ("setup", "hold"):
         raise ValueError("kind must be setup or hold")
-    with excluding(project.root):
+    with untrusted(*project.roots):
         work = project.work_dir("paths")
         views = routed_views(project)
         pdk = pdk_views(project, views.run)

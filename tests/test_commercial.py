@@ -154,7 +154,7 @@ def _fake_ssh(calls, scratch="/tmp/chipleap-abcd1234"):
 def test_remote_run_copies_runs_and_cleans_up(tmp_path, monkeypatch):
     calls: list[list[str]] = []
     monkeypatch.setattr(remote.subprocess, "run", _fake_ssh(calls))
-    monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/bin/rsync")
+    monkeypatch.setattr(remote, "which", lambda name: "/usr/bin/rsync")
     r = remote.Remote("server", "source /tools/setup.csh")
     out = r.run(tmp_path, [remote.Step(("xrun", "-q", "tb.sv"))])
     assert out.stdout == "ok\n"
@@ -379,7 +379,7 @@ def test_commercial_tools_are_listed_without_starting_them():
 
 
 def test_missing_tool_says_how_to_run_remotely(tmp_path, monkeypatch):
-    monkeypatch.setattr(csynth.shutil, "which", lambda name: None)
+    monkeypatch.setattr(csynth, "which", lambda name: None)
     with pytest.raises(csynth.SynthError, match="--remote"):
         csynth.synthesize(ACCEL, "genus", "lib.lib", tmp_path)
 

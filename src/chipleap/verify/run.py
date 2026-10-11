@@ -26,7 +26,7 @@ from chipleap.rtl import builddir
 from chipleap.verify import backends, pnr, sim, synth, xheep
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import verilator
+from chipleap.verify.tools import clean_env, verilator
 
 
 def consistency(design: Design, bundle: Path) -> StepResult:
@@ -67,7 +67,7 @@ def lint(design: Design, bundle: Path) -> StepResult:
         *rtl_params(design.accel).verilator_args(),
         *(str(f) for f in files),
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    out = subprocess.run(cmd, capture_output=True, text=True, check=False, env=clean_env())
     msgs = [ln for ln in (out.stdout + out.stderr).splitlines() if ln.startswith("%")]
     if out.returncode == 0 and not msgs:
         return StepResult("lint", "pass", "Verilator -Wall reports no warnings", {"warnings": 0})

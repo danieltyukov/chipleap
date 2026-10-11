@@ -37,7 +37,7 @@ from chipleap.rtl.openroad import (
 from chipleap.rtl.project import PowerDomain, Project, UpfConfig
 from chipleap.rtl.synth import SynthError, synthesize
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import excluding
+from chipleap.verify.tools import untrusted
 
 SITE = "CoreSite"  # IHP SG13G2's standard-cell site
 ROW_UM = 3.78
@@ -367,7 +367,7 @@ def upf(project: Project) -> StepResult:
     if project.upf is None:
         return StepResult("upf", "skipped", "no upf section in the project")
     try:
-        with excluding(project.root):
+        with untrusted(*project.roots):
             r = analyze(project)
     except OpenroadUnavailable as exc:
         return StepResult("upf", "skipped", str(exc))

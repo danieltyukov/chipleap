@@ -35,7 +35,7 @@ from chipleap.rtl.openroad import (
 from chipleap.rtl.power import activity
 from chipleap.rtl.project import CORNERS, Project
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import excluding
+from chipleap.verify.tools import untrusted
 
 BINS = 48  # most map cells along the longer side
 ROW_UM = 3.78  # IHP SG13G2's standard-cell row
@@ -335,7 +335,7 @@ def ir_data(project: Project, r: IrResult) -> dict[str, Any]:
 def ir_drop(project: Project) -> StepResult:
     """The IR drop step: worst drop per supply net on the routed grid at a corner."""
     try:
-        with excluding(project.root):
+        with untrusted(*project.roots):
             r = analyze(project)
     except OpenroadUnavailable as exc:
         return StepResult("ir_drop", "skipped", str(exc))

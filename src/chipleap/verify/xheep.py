@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from chipleap.verify.sim import cache_dir
+from chipleap.verify.tools import clean_env, locate, which
 
 XHEEP_URL = "https://github.com/esl-epfl/x-heep.git"
 # The X-HEEP commit ChipLeap's generated configurations are tested against.
@@ -78,7 +79,7 @@ def fetch(dest: Path | None = None, commit: str = XHEEP_COMMIT) -> Path:
     if (target / "util" / "xheep_gen" / "mcu_gen.py").is_file():
         return target
     target.mkdir(parents=True, exist_ok=True)
-    git = shutil.which("git")
+    git = which("git")
     if git is None:
         raise XheepError("git is needed to fetch X-HEEP")
     for args in (
@@ -87,20 +88,24 @@ def fetch(dest: Path | None = None, commit: str = XHEEP_COMMIT) -> Path:
         ["fetch", "-q", "--depth", "1", "origin", commit],
         ["checkout", "-q", "FETCH_HEAD"],
     ):
-        out = subprocess.run([git, *args], cwd=target, capture_output=True, text=True, check=False)
+        out = subprocess.run(
+            [git, *args], cwd=target, env=clean_env(), capture_output=True, text=True, check=False
+        )
         if out.returncode != 0 and args[0] != "remote":
             raise XheepError(f"git {' '.join(args)} failed: {out.stderr.strip()}")
     return target
 
 
 def _python() -> str:
-    return os.environ.get("CHIPLEAP_XHEEP_PYTHON", sys.executable)
+    given = locate("python3", "CHIPLEAP_XHEEP_PYTHON")
+    return given if given and os.environ.get("CHIPLEAP_XHEEP_PYTHON") else sys.executable
 
 
 def validate(config: Path, checkout: Path) -> XheepResult:
     out = subprocess.run(
         [_python(), "-c", _VALIDATE, str(config.resolve())],
         cwd=checkout,
+        env=clean_env(),
         capture_output=True,
         text=True,
         timeout=300,
@@ -140,7 +145,7 @@ def render(config: Path, checkout: Path, keep: Path | None = None) -> XheepResul
         " ".join(templates),
     ]
     out = subprocess.run(
-        cmd, cwd=checkout, capture_output=True, text=True, timeout=600, check=False
+        cmd, cwd=checkout, env=clean_env(), capture_output=True, text=True, timeout=600, check=False
     )
     rendered = [
         str(Path(t).with_suffix("").relative_to(work))

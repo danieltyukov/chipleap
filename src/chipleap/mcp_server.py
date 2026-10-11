@@ -61,8 +61,14 @@ chipleap://project-reference resource): describe_project checks the project file
 lint_rtl, simulate_rtl, coverage_rtl and synthesize_rtl return structured diagnostics
 (file, line, severity, message, failing test) to fix the RTL in a loop; verify_rtl runs
 the steps and writes the report, place and route included when asked for.
-simulate_rtl, coverage_rtl and verify_rtl run the project's cocotb tests and golden
-model, which are code: use them only on projects the user trusts.
+For verification depth: prove_rtl proves the project's properties and check_assertions
+proposed ones (counterexamples come back as values per step); equivalence_rtl checks the
+synthesized and routed netlists against the RTL; cdc_rtl checks clock and reset domain
+crossings; gate_sim_rtl runs the tests on the routed netlist with SDF; coverage_gaps shows
+what the tests never reached, with source lines, to write tests that reach it.
+simulate_rtl, coverage_rtl, gate_sim_rtl and verify_rtl run the project's cocotb tests and
+golden model, and prove_rtl a .sby file the project names, which are code: use them only
+on projects the user trusts.
 
 After place and route: dft_rtl (scan chains, ATPG coverage, patterns simulated),
 power_rtl (gate-level power from the tests, at corners), ir_drop_rtl (worst supply drop),
@@ -191,6 +197,17 @@ golden: model/uart_model.py   # Python reference model the tests import
 lint: {waivers: [rtl/waivers.vlt], slang: true}
 constraints: {sdc: constraints/uart.sdc}   # optional; else generated from clocks
 pnr: {utilisation: 45, density: 55, die_um: [300, 300], librelane: {}}
+formal:                       # SymbiYosys on the RTL's own assertions (immediate ones)
+  sources: [formal/props.sv]  # optional: property files or a wrapper top
+  checks: [{name: prove, mode: prove, depth: 20, engine: smtbmc z3}]   # mode: prove | bmc | cover
+  sby: [formal/extra.sby]     # optional: run as they are (code)
+equivalence: {checks: [rtl-synth, synth-pnr], engine: yosys, depth: 40}
+cdc:
+  async_inputs: [rx]          # inputs no clock samples safely
+  input_domains: {cfg_i: clk_b}   # inputs of a clock other than the first
+  reset_synchronized: [rst_n] # resets synchronized outside the design
+  waive: [{from: "dbg_*", to: "*", reason: set before the clock starts}]
+gate_sim: {netlist: routed, corner: nom_typ_1p20V_25C, delays: typ}   # netlist: routed | synth
 dft: {max_chain_length: 100, insert: true, min_coverage: 90, patterns: 8}
 power: {corners: [typ, slow, fast], netlist: auto}   # typ 1.2 V 25 C, slow 1.08 V 125 C
 ir_drop: {corner: typ, max_drop_pct: 5}
@@ -206,13 +223,15 @@ eco:                                               # changes to the routed desig
 
 `chipleap project init DIR` writes one for existing RTL, guessing the top, clock and
 reset. Steps: lint (Verilator -Wall, slang -Wextra), sim (cocotb), coverage (Verilator
-line, branch and toggle), synth (Yosys on the technology's cells), pnr (LibreLane on
-IHP SG13G2: timing at the slow corner, DRC, LVS, antenna; the scan netlist when dft
-inserts one), eco (the eco changes on the routed design, signed off again), dft
-(OpenROAD scan chains, Fault ATPG coverage, the patterns simulated through the chains),
-power (OpenROAD power from the cocotb tests' VCD on the gate-level netlist, beside the
-vectorless figure), ir_drop (PDNSim on the routed grid), upf (OpenROAD reads the power
-domains and places them; no open tool simulates power intent).
+line, branch and toggle), formal (SymbiYosys), cdc (clock and reset domain crossings),
+synth (Yosys on the technology's cells), pnr (LibreLane on IHP SG13G2: timing at the slow
+corner, DRC, LVS, antenna; the scan netlist when dft inserts one), eco (the eco changes on
+the routed design, signed off again), equiv (RTL, synthesized and routed netlists), gls
+(the tests on the routed netlist with SDF, Icarus 13), dft (OpenROAD scan chains, Fault
+ATPG coverage, the patterns simulated through the chains), power (OpenROAD power from the
+cocotb tests' VCD on the gate-level netlist, beside the vectorless figure), ir_drop
+(PDNSim on the routed grid), upf (OpenROAD reads the power domains and places them; no
+open tool simulates power intent).
 """
 
 
@@ -525,7 +544,7 @@ def synthesize_rtl(project: str, tool: str = "yosys") -> dict[str, Any]:
 
 def verify_rtl(
     project: str,
-    steps: str = "lint,sim,coverage,synth",
+    steps: str = "lint,sim,coverage,formal,cdc,synth,equiv",
     sim_tool: str = "",
     synth_tool: str = "yosys",
     pnr_tool: str = "librelane",
@@ -639,16 +658,107 @@ def eco_rtl(project: str, changes: list[str]) -> dict[str, Any]:
     return out
 
 
+def _guarded(step: str, fn: Callable[[], Any]) -> dict[str, Any]:
+    """A step's result; a tool that fails in an unexpected way fails the step, as in
+    ``chipleap.rtl.verify.run_step``."""
+    from chipleap.rtl.verify import STEP_ERRORS
+    from chipleap.verify.result import StepResult
+
+    try:
+        result = fn()
+    except STEP_ERRORS as exc:
+        first = (str(exc).strip().splitlines() or [""])[0]
+        result = StepResult(step, "fail", f"{type(exc).__name__}: {first}", {"error": str(exc)})
+    return _step(result)
+
+
+def prove_rtl(project: str, check: str = "") -> dict[str, Any]:
+    """The project's formal checks (or the one named), with counterexamples as data."""
+    from chipleap.rtl.formal import formal
+
+    p = _project(project)
+    if check and p.formal is not None:
+        known = [c.name for c in p.formal.checks] + [f"sby:{x.stem}" for x in p.formal.sby]
+        if check not in known:
+            raise ToolError(f"no formal check named {check!r}; checks: {', '.join(known)}")
+    return _guarded("formal", lambda: formal(p, check))
+
+
+def check_assertions(
+    project: str,
+    module: str,
+    assertions: list[dict[str, Any]],
+    mode: str = "prove",
+    depth: int = 20,
+    clock: str = "",
+    reset: str = "",
+) -> dict[str, Any]:
+    """Proposed properties of a module, proved in a copy of its file under build/."""
+    from chipleap.rtl import formal
+
+    p = _project(project)
+    try:
+        return formal.check_assertions(
+            p, module, assertions, mode=mode, depth=depth, clock=clock, reset=reset
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def equivalence_rtl(project: str, check: str = "") -> dict[str, Any]:
+    from chipleap.rtl.equiv import PAIRS, equiv
+
+    if check and check not in PAIRS:
+        raise ToolError(f"check must be one of {', '.join(PAIRS)}")
+    p = _project(project)
+    return _guarded("equiv", lambda: equiv(p, check))
+
+
+def cdc_rtl(project: str) -> dict[str, Any]:
+    from chipleap.rtl.cdc import cdc
+
+    p = _project(project)
+    return _guarded("cdc", lambda: cdc(p))
+
+
+def gate_sim_rtl(project: str, tests: str = "") -> dict[str, Any]:
+    """The project's cocotb tests on its routed (or synthesized) netlist."""
+    from chipleap.rtl.gls import gls
+
+    p = _project(project)
+    return _guarded("gls", lambda: gls(p, tests))
+
+
+def coverage_gaps(
+    project: str, file: str = "", kinds: str = "", limit: int = 50, context: int = 2
+) -> dict[str, Any]:
+    """The points the last coverage run never reached, with their source lines."""
+    from chipleap.rtl.coverage import gaps
+
+    p = _project(project)
+    try:
+        return gaps(p, file=file, kinds=kinds, limit=limit, context=context)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 def check_tools() -> dict[str, Any]:
-    from chipleap.verify.tools import all_tools, commercial, ihp_liberty
+    from chipleap.verify.tools import all_tools, commercial, ihp_liberty, liberty_settings_problem
 
     lib = ihp_liberty()
     return {
         "tools": [
-            {"name": t.name, "found": t.found, "version": t.version, "used_for": t.purpose}
+            {
+                "name": t.name,
+                "found": t.found,
+                "version": t.version,
+                "used_for": t.purpose,
+                **({"note": t.note} if t.note else {}),
+            }
             for t in all_tools() + commercial()
         ],
         "ihp_sg13g2_liberty": str(lib) if lib else None,
+        **({"liberty_note": why} if (why := liberty_settings_problem()) else {}),
     }
 
 
@@ -686,16 +796,24 @@ TOOLS: dict[str, Callable[..., Any]] = {
     "upf_rtl": upf_rtl,
     "timing_paths_rtl": timing_paths_rtl,
     "eco_rtl": eco_rtl,
+    "prove_rtl": prove_rtl,
+    "check_assertions": check_assertions,
+    "equivalence_rtl": equivalence_rtl,
+    "cdc_rtl": cdc_rtl,
+    "gate_sim_rtl": gate_sim_rtl,
+    "coverage_gaps": coverage_gaps,
 }
 # Tools whose results depend on the machine, on files or write files are logged but not
 # replayed. Power, IR drop, timing paths and ECOs read the routed design in build/, which
-# the inputs digest does not cover.
+# the inputs digest does not cover; coverage_gaps reads the last coverage run, so replaying
+# it says nothing about the call.
 SIDE_EFFECTS = {
     "generate_soc",
     "verify_soc",
     "check_tools",
     "verify_rtl",
     "check_macro",
+    "coverage_gaps",
     "power_rtl",
     "ir_drop_rtl",
     "timing_paths_rtl",
@@ -710,6 +828,11 @@ PROJECT_TOOLS = {
     "simulate_rtl",
     "coverage_rtl",
     "synthesize_rtl",
+    "prove_rtl",
+    "check_assertions",
+    "equivalence_rtl",
+    "cdc_rtl",
+    "gate_sim_rtl",
     "dft_rtl",
     "upf_rtl",
 }
@@ -726,23 +849,32 @@ def project_context(project: str, tool: str = "") -> dict[str, Any]:
         quaigh,
         slang,
         sv2v,
+        untrusted,
         verilator,
         yosys,
+        z3,
     )
 
     try:
-        digest = _project(project).inputs_digest()
+        p = _project(project)
+        digest, roots = p.inputs_digest(), p.roots
     except ToolError:
-        digest = None
-    py = cocotb_python()
-    tools: dict[str, str | None] = {
-        t.name: t.version if t.found else None
-        for t in (verilator(), slang(), iverilog(), yosys(), sv2v())
-    }
-    if tool in ("dft_rtl", "upf_rtl"):
-        for t in (openroad(), fault(), quaigh(), gl_iverilog()):
-            tools[t.name] = t.version if t.found else None
-    tools["cocotb"] = cocotb_version(py) if py else None
+        given = Path(project).expanduser().resolve()
+        digest, roots = None, (given if given.is_dir() else given.parent,)
+    # The versions are those of the tools a step on this project would run, found as a
+    # step finds them: never in the project (runs_tools).
+    with untrusted(*roots):
+        py = cocotb_python()
+        # SymbiYosys and EQY built from a Yosys tag report no version; Yosys's stands for
+        # them.
+        tools: dict[str, str | None] = {
+            t.name: t.version if t.found else None
+            for t in (verilator(), slang(), iverilog(), yosys(), sv2v(), z3())
+        }
+        if tool in ("dft_rtl", "upf_rtl"):
+            for t in (openroad(), fault(), quaigh(), gl_iverilog()):
+                tools[t.name] = t.version if t.found else None
+        tools["cocotb"] = cocotb_version(py) if py else None
     return {"inputs_sha256": digest, "tools": tools}
 
 
@@ -990,13 +1122,14 @@ def build_server(log_dir: str | None = None) -> Any:
 
     @server.tool(
         description="Verify an RTL project and write build/verify/report.html. Steps: "
-        "lint,sim,coverage,synth by default; add pnr (LibreLane place and route on IHP "
-        "SG13G2, minutes) or use all. Tools run where the user configured them. Runs the "
-        "project's tests and golden model, which are code: only for projects the user trusts."
+        "lint,sim,coverage,formal,cdc,synth,equiv by default; add pnr (LibreLane place and "
+        "route on IHP SG13G2, minutes) and gls (gate-level simulation of the routed netlist), "
+        "or use all. Tools run where the user configured them. Runs the project's tests and "
+        "golden model, which are code: only for projects the user trusts."
     )
     def verify_rtl(
         project: str,
-        steps: str = "lint,sim,coverage,synth",
+        steps: str = "lint,sim,coverage,formal,cdc,synth,equiv",
         sim_tool: str = "",
         synth_tool: str = "yosys",
         pnr_tool: str = "librelane",
@@ -1092,6 +1225,115 @@ def build_server(log_dir: str | None = None) -> Any:
             "change so far, read the new slack and checks, and keep a change only if it "
             "helps and DRC, LVS and antenna stay clean. Then tell the user which changes to "
             "put in the project's eco section."
+        )
+
+    @server.tool(
+        description="Prove an RTL project's formal properties with SymbiYosys (the checks "
+        "of its formal section, or the one named). Each check is pass, fail, unknown or error; "
+        "a failure names the property, its file, line and step, with the counterexample as "
+        "values per step of the top module's signals and a VCD path. A .sby file the project "
+        "names runs as it is: it is code, only for projects the user trusts."
+    )
+    def prove_rtl(project: str, check: str = "") -> dict[str, Any]:
+        return logged("prove_rtl", TOOLS["prove_rtl"])(project=project, check=check)
+
+    @server.tool(
+        description="Check properties you propose for a module of an RTL project, without "
+        "editing it: each assertion is a boolean SystemVerilog expression over the module's "
+        "signals ($past, $rose, $fell, $stable, $changed, $countones, $onehot, $onehot0, "
+        "$isunknown, $signed and $unsigned allowed; no statements), kind assert, assume or "
+        "cover, and an optional name. They are sampled at the project's clock outside "
+        "reset. Each assertion comes back holds, fails (with step and the counterexample "
+        "values) or unknown; each cover reached or unreached; assumptions constrain the "
+        "others. The design's own assertions are left out of this run, so each answer is "
+        "the proposal's own."
+    )
+    def check_assertions(
+        project: str,
+        module: str,
+        assertions: list[dict[str, Any]],
+        mode: str = "prove",
+        depth: int = 20,
+        clock: str = "",
+        reset: str = "",
+    ) -> dict[str, Any]:
+        return logged("check_assertions", TOOLS["check_assertions"])(
+            project=project,
+            module=module,
+            assertions=assertions,
+            mode=mode,
+            depth=depth,
+            clock=clock,
+            reset=reset,
+        )
+
+    @server.tool(
+        description="Check that an RTL project's netlists implement it: rtl-synth (the RTL "
+        "against ChipLeap's synthesized netlist) and synth-pnr (LibreLane's synthesized "
+        "netlist against its routed one, after place and route). Each pair is proved, "
+        "bounded (some points equal only for N cycles from reset), differs (with a "
+        "counterexample from reset), skipped or error."
+    )
+    def equivalence_rtl(project: str, check: str = "") -> dict[str, Any]:
+        return logged("equivalence_rtl", TOOLS["equivalence_rtl"])(project=project, check=check)
+
+    @server.tool(
+        description="Check an RTL project's clock and reset domain crossings on its netlist: "
+        "each finding has a rule (unsynchronized, logic_before_synchronizer, "
+        "multibit_synchronizer, reset_crossing, reset_release, generated_clock ...), the "
+        "source and destination registers and domains, and the path between them; accepted "
+        "structures (synchronizers, gray-coded pointers, handshakes, FIFO memories) are listed."
+    )
+    def cdc_rtl(project: str) -> dict[str, Any]:
+        return logged("cdc_rtl", TOOLS["cdc_rtl"])(project=project)
+
+    @server.tool(
+        description="Run an RTL project's cocotb tests on its netlist: the routed netlist with "
+        "SDF delays from the last place and route (gate_sim.netlist: synth for the "
+        "synthesized netlist with zero delay). Needs Icarus 13. Runs the project's tests and "
+        "golden model, which are code: only for projects the user trusts."
+    )
+    def gate_sim_rtl(project: str, tests: str = "") -> dict[str, Any]:
+        return logged("gate_sim_rtl", TOOLS["gate_sim_rtl"])(project=project, tests=tests)
+
+    @server.tool(
+        description="The coverage points an RTL project's tests never reached in the last "
+        "coverage_rtl run, grouped by source line with the lines around each, and the "
+        "project's test functions, to write tests that reach them. stale is true when the "
+        "project's files changed since that run. kinds: line, branch, toggle (comma-separated)."
+    )
+    def coverage_gaps(
+        project: str, file: str = "", kinds: str = "", limit: int = 50, context: int = 2
+    ) -> dict[str, Any]:
+        return logged("coverage_gaps", TOOLS["coverage_gaps"])(
+            project=project, file=file, kinds=kinds, limit=limit, context=context
+        )
+
+    @server.prompt(description="Propose and prove properties of a module of an RTL project.")
+    def propose_assertions(project: str, module: str) -> str:
+        return (
+            f"Find properties of module {module} in the RTL project at {project}. Call "
+            "describe_project and read the module's source. Propose invariants a correct design "
+            "must keep (counters within range, one-hot states, handshake rules, pointers that "
+            "agree), and covers for the states the tests should reach; call check_assertions "
+            "with them. For each assertion that fails, read the counterexample's values step "
+            "by step and decide whether the property is wrong or the design is, and say which "
+            "and why; fix the property or report the bug, never weaken a property only to make "
+            "it pass. Suggest adding the ones that hold to the project (under `ifdef FORMAL or "
+            "in formal.sources) and finish with prove_rtl."
+        )
+
+    @server.prompt(description="Raise an RTL project's coverage with new tests.")
+    def close_coverage(project: str, goal: str = "90") -> str:
+        return (
+            f"Raise the coverage of the RTL project at {project} to {goal}% of lines and "
+            "branches. Call coverage_rtl, then coverage_gaps. For each gap, read its source "
+            "lines and write a cocotb test in the project's test directory (coverage_gaps names "
+            "it and the existing tests) that drives the inputs to reach it, checking results "
+            "against the golden model where there is one. Call coverage_rtl again and report "
+            "newly_covered. Repeat until the goal is met or the points left cannot be reached "
+            "(say why for each, for example a default branch of a full case). Never change the "
+            "RTL or weaken a test to raise coverage."
         )
 
     @server.resource(

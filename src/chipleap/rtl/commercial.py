@@ -19,7 +19,7 @@ from typing import Any
 from chipleap.hw.tech import get_tech
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
-from chipleap.rtl.project import Project
+from chipleap.rtl.project import Project, runs_tools
 from chipleap.verify import cpnr, csynth, innovus
 from chipleap.verify.backends import synth_liberty
 from chipleap.verify.pnr import PnrError, PnrResult
@@ -157,6 +157,7 @@ def _lefs(tech_key: str, lib: str) -> tuple[str, ...]:
     return tuple(tech.lef) or (innovus.ihp_lefs(Path(lib)) if tech_key == "ihp-sg13g2" else ())
 
 
+@runs_tools
 def synthesize_with(
     project: Project, tool: str, workdir: Path, remote: Remote | None = None
 ) -> dict[str, Any]:
@@ -226,6 +227,7 @@ def synthesize_with(
     }
 
 
+@runs_tools
 def synth_step(project: Project, tool: str, remote: Remote | None = None) -> StepResult:
     try:
         d = synthesize_with(project, tool, project.build_dir / tool, remote)
@@ -242,6 +244,7 @@ def synth_step(project: Project, tool: str, remote: Remote | None = None) -> Ste
     return StepResult("synth", "pass", msg, d)
 
 
+@runs_tools
 def place_route_with(project: Project, workdir: Path, remote: Remote | None = None) -> PnrResult:
     """Genus then Innovus on the project, here or on ``remote``, with the project's
     utilisation, placement density and die size, as LibreLane gets them. ``workdir`` is a
@@ -304,6 +307,7 @@ def place_route_with(project: Project, workdir: Path, remote: Remote | None = No
     return cpnr.result(workdir, clk.mhz if clk else 1000 / DEFAULT_PERIOD_NS, bool(slow))
 
 
+@runs_tools
 def pnr_step(project: Project, remote: Remote | None = None) -> StepResult:
     try:
         r = place_route_with(project, project.build_dir / "innovus", remote)

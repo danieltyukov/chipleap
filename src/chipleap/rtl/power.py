@@ -9,7 +9,7 @@ vectorless, from a default input activity, and from the VCD. Both are reported p
 
 Tests see ``GATES=yes`` (Tiny Tapeout's convention) and ``CHIPLEAP_GATES=1``, so a test
 that reads an internal signal can skip what a netlist no longer has, and the project's
-parameters as ``CHIPLEAP_PARAM_<name>``, since a netlist has none. Scan ports, when the
+parameters as JSON in ``CHIPLEAP_PARAMETERS``, since a netlist has none. Scan ports, when the
 netlist has them, are forced to their functional values.
 
 Activity is measured per clock period, so the clock in the VCD is checked against the
@@ -54,7 +54,7 @@ from chipleap.rtl.sim import RUNNER, TestResult, cocotb_python, manifest, parse_
 from chipleap.rtl.synth import SynthError, synthesize
 from chipleap.verify import launch
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import excluding, gl_iverilog, tool_env
+from chipleap.verify.tools import clean_env, gl_iverilog, untrusted
 
 GROUPS = ("Sequential", "Combinational", "Clock", "Macro", "Pad", "Total")
 SCAN_PORT_RE = re.compile(r"^scan_(enable|in)_\d+$")
@@ -177,15 +177,15 @@ def gate_level_run(
     if project.tests.toplevel == project.top:
         m["parameters"] = {}  # a netlist has none
     m["build_args"] = [*m["build_args"], "-s", "chipleap_gl_aux"]
-    # A netlist has no parameters, so the tests get the project's in the environment.
-    params = {f"CHIPLEAP_PARAM_{k}": str(v) for k, v in project.parameters.items()}
-    m["env"] = {**m["env"], **params, "GATES": "yes", "CHIPLEAP_GATES": "1"}
+    # A netlist has no parameters; the tests read the project's from CHIPLEAP_PARAMETERS,
+    # which every simulation gets (``chipleap.rtl.sim.manifest``).
+    m["env"] = {**m["env"], "GATES": "yes", "CHIPLEAP_GATES": "1"}
     m["vcd"] = True
     builddir.write_text(work, "manifest.json", json.dumps(m, indent=1))
     builddir.write_text(work, RUNNER, resources.files("chipleap.rtl").joinpath(RUNNER).read_text())
     # cocotb finds iverilog and vvp on PATH: the gate-level Icarus first, and no entry
-    # that leads into the project (tools.tool_env).
-    env = tool_env(prepend=(str(Path(tool.path).parent),))
+    # that leads into the project (tools.clean_env).
+    env = clean_env([Path(tool.path).parent])
     env.pop("PYTEST_CURRENT_TEST", None)
     env["COCOTB_ANSI_OUTPUT"] = "0"
     limit = float(os.environ.get("CHIPLEAP_SIM_TIMEOUT", "1800"))
@@ -540,7 +540,7 @@ def power(project: Project) -> StepResult:
     """The power step: gate-level power from the tests' activity at each corner, beside
     the vectorless estimate. Fails when a test fails on the netlist."""
     try:
-        with excluding(project.root):
+        with untrusted(*project.roots):
             r = analyze(project)
     except OpenroadUnavailable as exc:
         return StepResult("power", "skipped", str(exc))

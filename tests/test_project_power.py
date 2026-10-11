@@ -118,10 +118,11 @@ def test_counter_power_from_its_tests(counter_project):
     test = counter_project / "test/test_counter.py"
     # A netlist has no parameter W: the gate-level run passes it in the environment.
     test.write_text(
-        "import os\n"
+        "import json, os\n"
         + test.read_text().replace(
             "int(dut.W.value)",
-            "(int(os.environ['CHIPLEAP_PARAM_W']) if os.environ.get('GATES') else int(dut.W.value))",
+            "(json.loads(os.environ['CHIPLEAP_PARAMETERS'])['W'] if os.environ.get('GATES') "
+            "else int(dut.W.value))",
         )
     )
     r = P.power(load_project(counter_project))
