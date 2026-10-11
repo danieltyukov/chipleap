@@ -174,3 +174,90 @@ def test_a_project_sby_file_runs_as_it_is(tmp_path):
     names = [c["name"] for c in r.data["checks"]]
     assert names == ["prove", "sby:quick"], r.summary
     assert all(c["status"] == "pass" for c in r.data["checks"]), r.data
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "count <= DEPTH",
+        "!(full_o && empty_o)",
+        "$past(count) != 3'd1 || count != 0",
+        "wptr == AW'(rptr + count[AW-1:0])",
+        "{full_o, empty_o} != 2'b11",
+        "$onehot0({full_o, empty_o}) && u_core.state == 4'hA",
+        "push_i ? 1'b1 : (count < 3)",
+    ],
+)
+def test_proposed_expressions_that_are_accepted(expr):
+    assert formal.check_expression(expr) == expr
+
+
+@pytest.mark.parametrize(
+    ("expr", "why"),
+    [
+        ("a; b", "';'"),
+        ("`include", "'`'"),
+        ('a == "x"', "'\"'"),
+        ("$display(a)", "$display"),
+        ("$readmemh(f, m)", "$readmemh"),
+        ("a // b", "comment"),
+        ("a /* b */", "comment"),
+        ("(a", "unbalanced"),
+        ("a)) ; endmodule (", "';'"),
+        ("a) || (b", "unbalanced"),
+        ("#1 a", "'#'"),
+        ("a = b", "'='"),
+        ("", "empty"),
+        ("a" * 401, "at most 400"),
+    ],
+)
+def test_proposed_expressions_that_are_refused(expr, why):
+    with pytest.raises(ValueError) as exc:
+        formal.check_expression(expr)
+    assert why in str(exc.value)
+
+
+def test_proposals_are_checked_before_anything_runs(tmp_path):
+    p = load_project(fifo_project(tmp_path))
+    for bad, message in (
+        ([], "at least one"),
+        ([{"expr": "a", "kind": "restrict"}], "kind must be"),
+        ([{"expr": "a", "name": "x y"}], "name must be"),
+        ([{"expr": "a", "name": "p"}, {"expr": "b", "name": "p"}], "named twice"),
+        ([{"expr": "a;"}], "';'"),
+        ([{"expr": "a", "extra": 1}], "unknown keys"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            formal.check_assertions(p, "fifo", bad)
+    with pytest.raises(ValueError, match="no module named nowhere"):
+        formal.check_assertions(p, "nowhere", [{"expr": "1"}])
+    with pytest.raises(ValueError, match="clock"):
+        formal.check_assertions(p, "fifo", [{"expr": "1"}], clock="clk; x")
+
+
+@needs_sby
+def test_proposed_assertions_hold_or_fail_one_by_one(tmp_path):
+    root = fifo_project(tmp_path)
+    before = (root / "rtl/fifo.sv").read_text()
+    r = formal.check_assertions(
+        load_project(root),
+        "fifo",
+        [
+            {"expr": "count <= DEPTH", "name": "bounded"},
+            {"expr": "count != 3", "name": "never_three"},
+            {"expr": "!(full_o && empty_o)"},
+            {"expr": "full_o", "kind": "cover", "name": "can_fill"},
+        ],
+        depth=8,
+    )
+    by = {x["name"]: x for x in r["results"]}
+    assert by["bounded"]["status"] == "holds" and by["p2"]["status"] == "holds"
+    bad = by["never_three"]
+    assert bad["status"] == "fails" and bad["step"] > 0 and (root / bad["trace"]).is_file()
+    assert bad["values"]["signals"]["count"][bad["step"]] == 3
+    assert by["can_fill"]["status"] == "reached"
+    assert r["status"] == "fail"
+    # The project's own files are untouched; the copy with the proposals is in build/.
+    assert (root / "rtl/fifo.sv").read_text() == before
+    copies = (root / "build/formal/proposed").rglob("fifo.sv")
+    assert any("chipleap_never_three" in c.read_text() for c in copies)
