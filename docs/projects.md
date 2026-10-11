@@ -58,7 +58,9 @@ pnr:
   librelane: {}               # further LibreLane variables, passed through
 ```
 
-Paths are relative to the project file; environment variables (`$VAR`, `${VAR}`) are expanded, and an unset one is an error. Every key is checked and errors name the key, for example `clocks[0] needs period_ns or freq_mhz (one of them)` or `tests.modules: test_x.py not found in test`. `chipleap project check` prints the project with every default filled in.
+Paths are relative to the project file and must stay inside its directory: see [Files outside the project](#files-outside-the-project). Environment variables and `~` are not expanded. Every key is checked and errors name the key, for example `clocks[0] needs period_ns or freq_mhz (one of them)` or `tests.modules: test_x.py not found in test`. `chipleap project check` prints the project with every default filled in.
+
+Names (the top, ports, parameters, defines) are identifiers without `$`, parameter values are integers, and a define's value is a short literal (letters, digits and `_ . ' + -`, such as `8` or `8'hFF`). File and directory names may not hold control characters, quotes, backslashes, braces, brackets, `$`, `;`, a backtick, `#`, `*` or `?`, nor start with `-` or `+`. These values go into Yosys and Tcl scripts and onto tool command lines, so anything a script could read as syntax is refused when the project is read, and every value is quoted again when a script is written.
 
 A filelist holds source files, `-f` or `-F` for another filelist (relative to the file that names it), `+incdir+DIR`, `-IDIR`, `+define+NAME=VALUE` and `-DNAME`. Comments start with `//` or `#`. Its files come before `sources`. Library options (`-v`, `-y`) are not supported: list the files.
 
@@ -102,6 +104,19 @@ The options for generated bundles apply to projects ([commercial-tools.md](comme
 
 The MCP server has tools for projects ([mcp.md](mcp.md)): `describe_project`, `lint_rtl`, `simulate_rtl`, `coverage_rtl`, `synthesize_rtl` and `verify_rtl`. Lint, simulation and synthesis return diagnostics with the tool, severity, file, line, column, the tool's code and, for a failing test, its name, so an assistant can fix the RTL in a loop. The `fix_rtl` prompt walks it through that. Run logs record a digest of every file a project names and the versions of the tools, and `chipleap replay` says whether a different result comes from changed files or changed tools.
 
+## Files outside the project
+
+Every path a project names (sources, filelists and what they name, include directories, tests, the golden model, waivers, constraints) must resolve, symlinks followed, to a place inside the project's directory. A project file from someone else's repository therefore cannot point a run at `~/.ssh` or anywhere else on your machine, and what lint, simulation, the reports, the run logs and a copy to a server see is the project's own files. Files under an include or test directory that resolve outside the project, and build directories (`build`, `sim_build`, `runs`, `obj_dir`), are left out of copies and digests.
+
+To use files from elsewhere, such as shared IP in a sibling checkout, allow their directory yourself:
+
+```sh
+chipleap verify path/to/rtl --allow-path ../shared-ip
+CHIPLEAP_ALLOW_PATHS=/opt/ip:/home/me/ip chipleap mcp    # the MCP server reads it too
+```
+
+Nothing in a project file can widen this, and an MCP client cannot either: the server only reads `CHIPLEAP_ALLOW_PATHS` from the environment you start it in. A run on a server (`--remote`) copies only files inside the project.
+
 ## Security
 
-Verifying a project runs its cocotb tests, which are Python, and builds its RTL with the simulator. That is what the step is for, so it is not sandboxed: verify projects you trust. As for bundles, a server and its setup come only from your command line or environment, never from an MCP client.
+Verifying a project runs its cocotb tests, which are Python, and builds its RTL with the simulator; a project's own SDC is Tcl that OpenROAD runs. That is what the steps are for, so they are not sandboxed: verify projects you trust. What a project cannot do is reach outside its directory (above), or smuggle commands into the scripts ChipLeap writes from its values ([the project file](#the-project-file)). As for bundles, a server and its setup come only from your command line or environment, never from an MCP client.

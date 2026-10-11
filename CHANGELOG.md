@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - MCP tools for projects: `describe_project`, `lint_rtl`, `simulate_rtl`, `coverage_rtl`, `synthesize_rtl` and `verify_rtl`, with structured diagnostics (tool, severity, file, line, column, code, failing test) so an assistant can fix RTL in a loop; a `fix_rtl` prompt and a `chipleap://project-reference` resource. `chipleap replay` re-runs the project tools, and when a result differs it says whether the project's files or the tools changed since the call.
 - `examples/uart`: a UART with cocotb tests and a reference model. It routes on IHP SG13G2 at 100 MHz with clean DRC, LVS and antenna checks: 325 cells on a 0.0084 mm2 core, 5.7 ns of setup slack at the slow corner (about 234 MHz there, 308 MHz at the typical corner).
 - `chipleap doctor` lists Icarus and slang; `pip install "chipleap[rtl]"` adds cocotb.
+- A project's files stay inside its directory: every path must resolve there, symlinks followed, unless you allow another directory with `--allow-path` or `CHIPLEAP_ALLOW_PATHS`, and values that a Yosys or Tcl script would read as syntax are refused, then quoted again when scripts are written. A tool that fails in an unexpected way (a timeout, a missing program, a truncated results file) fails its step; the other steps and the reports still run.
 
 ### Changed
 

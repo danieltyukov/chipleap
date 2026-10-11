@@ -145,7 +145,9 @@ platform: xheep                     # xheep | standalone
 
 PROJECT_REFERENCE = """# ChipLeap project reference (project.yaml)
 
-A project describes RTL someone wrote. Paths are relative to the project file.
+A project describes RTL someone wrote. Paths are relative to the project file and must
+stay inside its directory (the user can allow others; a project file cannot). Names are
+identifiers without $, parameter values integers, define values short literals.
 
 ```yaml
 schema: project/v1

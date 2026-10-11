@@ -115,6 +115,11 @@ New MCP tools: `describe_project`, `lint_rtl`, `simulate_rtl`, `coverage_rtl`, `
 
 Verifying a project runs its cocotb tests, which are Python, and compiles its RTL. That is the point of the step, so it is not sandboxed: verify projects you trust. The commercial host and setup still come only from the user's command line or environment.
 
+A project file may still come from a repository the user did not write, and its values reach tool scripts, command lines and results an assistant reads. Two rules, added after review:
+
+- **Confinement.** Every path resolves, symlinks followed, inside the project directory, or inside a directory the user allows with `--allow-path` or `CHIPLEAP_ALLOW_PATHS`; nothing in the project file widens it. No environment variable or `~` expansion. Copies to a server and input digests take only confined files, outside build directories.
+- **No script syntax.** Names are identifiers without `$`, parameter values integers, define values short literals, paths free of quotes, backslashes, braces, brackets, `$`, `;`, backticks, `#`, globs and control characters, and no name starts with `-` or `+`. Every script writer quotes each value again (`chipleap.rtl.quote`: double quotes for Yosys, braces for Tcl) and refuses what it cannot quote.
+
 ## Public API for later milestones
 
 - `chipleap.rtl.project`: `PROJECT_FILE`, `SCHEMA`, `ProjectError`, `Project`, `Clock`, `Reset`, `Tests`, `LintConfig`, `PnrConfig`, `SECTIONS`, `RESERVED`, `load_project`, `parse_project`, `find_project`, `init_project`; `Project.rel`, `Project.build_dir`, `Project.input_files`, `Project.inputs_digest`.
