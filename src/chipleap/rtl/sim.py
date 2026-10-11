@@ -210,16 +210,18 @@ def manifest(
     if project.golden is not None:
         py_path.append(name(project.golden.parent))
     build_args: list[str] = []
-    plusargs: list[str] = []
     if simulator == "verilator":
         # Lint is its own step; warnings must not stop the simulation.
         build_args.append("-Wno-fatal")
         if coverage:
-            build_args += ["--coverage"]
-            plusargs.append("+verilator+coverage+file+coverage.dat")
+            build_args.append("--coverage")
+    # cocotb's runners for VCS and Questa ignore the timescale; their compilers take it.
+    scale = "/".join(project.timescale)
+    if simulator == "vcs":
+        build_args.append(f"-timescale={scale}")
+    elif simulator == "questa":
+        build_args += ["-timescale", scale]
     env = {"COCOTB_ANSI_OUTPUT": "0"}
-    if project.golden is not None:
-        env["CHIPLEAP_GOLDEN"] = name(project.golden)
     return {
         "simulator": simulator,
         "sources": [name(s) for s in (*project.sources, *project.tests.sources)],
@@ -232,9 +234,10 @@ def manifest(
         "seed": project.tests.seed,
         "timescale": list(project.timescale),
         "build_args": build_args,
-        "plusargs": plusargs,
+        "coverage": coverage and simulator == "verilator",
         "test_filter": test_filter,
         "python_path": py_path,
+        "golden": name(project.golden) if project.golden is not None else "",
         "env": env,
     }
 

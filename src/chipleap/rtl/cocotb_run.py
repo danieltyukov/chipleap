@@ -51,15 +51,22 @@ def main(argv: list[str]) -> int:
     except (Exception, SystemExit) as exc:  # the runner raises SystemExit for a missing tool
         _write(outcome, {"stage": "build", "error": str(exc)})
         return 1
+    env = dict(m.get("env", {}))
+    if m.get("golden"):
+        env["CHIPLEAP_GOLDEN"] = str((work / m["golden"]).resolve())
+    plusargs = list(m.get("plusargs", []))
+    if m.get("coverage"):
+        # Verilator writes its counts where this says, whichever directory it runs in.
+        plusargs.append(f"+verilator+coverage+file+{work / 'coverage.dat'}")
     try:
+        # The simulation runs in the build directory, where Questa keeps its work library.
         runner.test(
             test_module=m["modules"],
             hdl_toplevel=m["toplevel"],
             build_dir=build_dir,
-            test_dir=work,
             seed=m.get("seed"),
-            plusargs=m.get("plusargs", []),
-            extra_env=m.get("env", {}),
+            plusargs=plusargs,
+            extra_env=env,
             results_xml=str(work / "results.xml"),
             test_filter=m.get("test_filter") or None,
             log_file=work / "test.log",
