@@ -73,4 +73,19 @@ module uart_tx #(
       endcase
     end
   end
+
+`ifdef FORMAL
+  // The line in each state, proved by chipleap verify's formal step (SymbiYosys reads the
+  // sources with -formal, which defines FORMAL; lint and simulation never see this).
+  logic past_valid = 1'b0;
+  always_ff @(posedge clk_i) past_valid <= 1'b1;
+  always_comb if (!past_valid) assume (!rst_ni);
+  always_comb begin
+    if (past_valid && rst_ni) begin
+      line_idles_high: assert (state_q != Idle || tx_o);
+      start_bit_low: assert (state_q != Start || !tx_o);
+      stop_bit_high: assert (state_q != Stop || tx_o);
+    end
+  end
+`endif
 endmodule

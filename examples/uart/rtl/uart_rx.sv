@@ -54,7 +54,9 @@ module uart_rx #(
           if (tick_q == HALF) begin
             tick_q  <= '0;
             bit_q   <= '0;
-            state_q <= rx ? Idle : Data;
+            // A start bit that is gone at its middle was a glitch.
+            if (rx) state_q <= Idle;
+            else state_q <= Data;
           end else begin
             tick_q <= tick_q + CW'(1);
           end
