@@ -108,6 +108,30 @@ def prepare_verilog(project: Project, workdir: Path) -> tuple[list[Path], bool]:
     return [out], False
 
 
+def read_commands(project: Project, files: list[Path], raw: bool) -> list[str]:
+    """The Yosys commands that read the project: sources, include directories, defines,
+    parameters and the top."""
+    opts: list[str] = []
+    if raw:
+        opts += [f"-I {q.yosys(i)}" for i in project.include_dirs]
+        opts += [f"-D {q.yosys(x)}" for x in project.define_args()]
+    reads = [" ".join(["read_verilog -sv", *opts, q.yosys(f)]) for f in files]
+    chparam = " ".join(f"-set {q.plain(k)} {int(v)}" for k, v in project.parameters.items())
+    top = q.plain(project.top)
+    return [
+        *reads,
+        *([f"chparam {chparam} {top}"] if chparam else []),
+        f"hierarchy -check -top {top}",
+    ]
+
+
+def front(project: Project, files: list[Path], raw: bool) -> list[str]:
+    """The Yosys commands that read the project and synthesize it to generic gates, before
+    flip-flops and cells are mapped to the liberty. Equivalence checking starts from the
+    same commands (``chipleap.rtl.equiv``)."""
+    return [*read_commands(project, files, raw), f"synth -top {q.plain(project.top)} -flatten"]
+
+
 def _script(
     project: Project, files: list[Path], raw: bool, liberty: Path, workdir: Path, target_ns: float
 ) -> str:
@@ -131,21 +155,11 @@ def _script(
             "stime,-p",
         ]
     )
-    opts: list[str] = []
-    if raw:
-        opts += [f"-I {q.yosys(i)}" for i in project.include_dirs]
-        opts += [f"-D {q.yosys(x)}" for x in project.define_args()]
-    reads = [" ".join(["read_verilog -sv", *opts, q.yosys(f)]) for f in files]
-    chparam = " ".join(f"-set {q.plain(k)} {int(v)}" for k, v in project.parameters.items())
-    top = q.plain(project.top)
     lib = q.yosys(liberty)
     netlist = workdir / f"{project.top}.synth.v"
     return "\n".join(
         [
-            *reads,
-            *([f"chparam {chparam} {top}"] if chparam else []),
-            f"hierarchy -check -top {top}",
-            f"synth -top {top} -flatten",
+            *front(project, files, raw),
             f"dfflibmap -liberty {lib}",
             # ChipLeap's own text, no project data: ";" inside quotes stays in the word.
             f'abc -liberty {lib} -script "{abc}"',

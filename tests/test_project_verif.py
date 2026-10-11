@@ -55,7 +55,7 @@ def test_sections_parse_and_round_trip(counter_project):
             ],
             "sby": ["formal/extra.sby"],
         },
-        equivalence={"checks": ["rtl-synth", "synth-pnr"]},
+        equivalence={"checks": ["rtl-synth", "synth-pnr"], "engine": "eqy", "depth": 12},
         cdc={
             "async_inputs": ["en_i"],
             "input_domains": {"data_i": "clk_b"},
@@ -73,6 +73,7 @@ def test_sections_parse_and_round_trip(counter_project):
     )
     assert [s.name for s in p.formal.sby] == ["extra.sby"]
     assert p.equivalence.checks == ("rtl-synth", "synth-pnr")
+    assert p.equivalence.engine == "eqy" and p.equivalence.depth == 12
     assert p.cdc.async_inputs == ("en_i",) and p.cdc.input_domains == {"data_i": "clk_b"}
     assert p.cdc.waive == (CdcWaiver("dbg_*", "*", "set before the clock starts"),)
     assert p.gate_sim.corner == "nom_slow_1p08V_125C"
@@ -107,6 +108,8 @@ def test_an_empty_formal_section_proves_by_default(counter_project):
         ({"formal": {"sby": ["rtl/counter.sv"]}}, "formal.sby: rtl/counter.sv is not a .sby"),
         ({"formal": {"bogus": 1}}, "formal: unknown keys bogus"),
         ({"equivalence": {"checks": ["rtl-gds"]}}, "equivalence.checks: 'rtl-gds'"),
+        ({"equivalence": {"engine": "lec"}}, "equivalence.engine must be one of yosys, eqy"),
+        ({"equivalence": {"depth": 0}}, "equivalence.depth must be a positive integer"),
         ({"cdc": {"async_inputs": ["clk_i"]}}, "cdc.async_inputs: clk_i is a clock"),
         ({"cdc": {"async_inputs": ["a;b"]}}, "must be a Verilog identifier"),
         ({"cdc": {"input_domains": {"d": "clk_x"}}}, "cdc.input_domains.d: clk_x is not"),

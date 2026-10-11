@@ -78,7 +78,8 @@ FORMAL_MODES = ("prove", "bmc", "cover")
 # out: its induction step crashes there. abc pdr needs yices to write a counterexample.
 FORMAL_ENGINES = ("smtbmc z3", "smtbmc yices", "smtbmc bitwuzla", "abc pdr")
 FORMAL_DEPTH_MAX = 1000
-EQUIV_CHECKS = ("rtl-synth", "synth-pnr", "rtl-pnr")
+EQUIV_CHECKS = ("rtl-synth", "synth-pnr")
+EQUIV_ENGINES = ("yosys", "eqy")
 GLS_NETLISTS = ("routed", "synth")
 GLS_DELAYS = ("min", "typ", "max")
 # A LibreLane corner name, as its SDF directories are named.
@@ -155,6 +156,8 @@ class FormalConfig:
 @dataclass(frozen=True)
 class EquivConfig:
     checks: tuple[str, ...] = ()  # empty: rtl-synth, and synth-pnr when a routed run exists
+    engine: str = "yosys"  # the prover: Yosys's equiv passes or EQY
+    depth: int = 40  # cycles from reset of the bounded check of what induction leaves
 
 
 @dataclass(frozen=True)
@@ -377,7 +380,8 @@ class Project:
                 f["sby"] = [self.rel(x) for x in self.formal.sby]
             out["formal"] = f
         if self.equivalence != EquivConfig():
-            out["equivalence"] = {"checks": list(self.equivalence.checks)}
+            e = self.equivalence
+            out["equivalence"] = {"checks": list(e.checks), "engine": e.engine, "depth": e.depth}
         if self.cdc != CdcConfig():
             out["cdc"] = {
                 "async_inputs": list(self.cdc.async_inputs),
@@ -1046,12 +1050,15 @@ def _parse_formal(value: Any, paths: _Paths) -> FormalConfig | None:
 
 
 def _parse_equivalence(value: Any) -> EquivConfig:
-    e = _mapping(value, "equivalence", ("checks",))
+    e = _mapping(value, "equivalence", ("checks", "engine", "depth"))
     checks = _str_list(e.get("checks"), "equivalence.checks")
     for c in checks:
         if c not in EQUIV_CHECKS:
             raise ProjectError(f"equivalence.checks: {c!r} is not one of {', '.join(EQUIV_CHECKS)}")
-    return EquivConfig(tuple(dict.fromkeys(checks)))
+    engine = _choice(e.get("engine", "yosys"), EQUIV_ENGINES, "equivalence.engine")
+    return EquivConfig(
+        tuple(dict.fromkeys(checks)), engine, _depth(e.get("depth", 40), "equivalence.depth")
+    )
 
 
 def _parse_cdc(value: Any, clocks: tuple[Clock, ...], resets: tuple[Reset, ...]) -> CdcConfig:
