@@ -680,8 +680,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--steps",
         default=None,
         help="comma-separated steps; for a bundle consistency,lint,sim,synth,xheep, for a "
-        "project lint,sim,coverage,synth; pnr (place and route) is opt-in, and all runs every "
-        "step",
+        "project lint,sim,coverage,formal,cdc,synth,equiv; pnr (place and route) and gls "
+        "(gate-level simulation of its netlist) are opt-in, and all runs every step",
     )
     s.add_argument("--xheep", help="X-HEEP checkout (default: CHIPLEAP_XHEEP_DIR or the cache)")
     s.add_argument("--fetch-xheep", action="store_true", help="clone the tested X-HEEP commit")

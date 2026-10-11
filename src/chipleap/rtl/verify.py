@@ -14,7 +14,11 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from chipleap.rtl import builddir, commercial
+from chipleap.rtl.cdc import cdc
 from chipleap.rtl.coverage import coverage
+from chipleap.rtl.equiv import equiv
+from chipleap.rtl.formal import formal
+from chipleap.rtl.gls import gls
 from chipleap.rtl.lint import lint
 from chipleap.rtl.pnr import pnr
 from chipleap.rtl.project import Project, load_project
@@ -24,9 +28,11 @@ from chipleap.rtl.synth import synth
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
 
-PROJECT_STEPS = ("lint", "sim", "coverage", "synth", "pnr")
-# Place and route takes minutes, so it runs only when named or with "all".
-DEFAULT_STEPS = ("lint", "sim", "coverage", "synth")
+# Equivalence and gate-level simulation come after place and route, so they see its netlist.
+PROJECT_STEPS = ("lint", "sim", "coverage", "formal", "cdc", "synth", "pnr", "equiv", "gls")
+# Place and route takes minutes, so it runs only when named or with "all"; gate-level
+# simulation needs its result.
+DEFAULT_STEPS = ("lint", "sim", "coverage", "formal", "cdc", "synth", "equiv")
 SIM_TOOLS = ("auto", "icarus", "verilator", *COMMERCIAL)
 SYNTH_TOOLS = ("yosys", "genus", "dc")
 PNR_TOOLS = ("librelane", "innovus")
@@ -96,6 +102,14 @@ def _run_step(
         return simulate(project, tool, remote if tool in COMMERCIAL else None, test_filter)
     if step == "coverage":
         return coverage(project)
+    if step == "formal":
+        return formal(project)
+    if step == "cdc":
+        return cdc(project)
+    if step == "equiv":
+        return equiv(project)
+    if step == "gls":
+        return gls(project, test_filter)
     if step == "synth":
         if synth_tool != "yosys":
             return commercial.synth_step(project, synth_tool, remote)

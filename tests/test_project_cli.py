@@ -1,13 +1,14 @@
 """The project commands and `chipleap verify` on an RTL project."""
 
 import json
+from pathlib import Path
 
 import pytest
 
 from chipleap.cli import main
 from chipleap.rtl.sim import cocotb_python
 from chipleap.rtl.verify import DEFAULT_STEPS, PROJECT_STEPS, steps_from
-from chipleap.verify.tools import iverilog, verilator
+from chipleap.verify.tools import iverilog, sby, verilator, yosys, z3
 
 needs_tools = pytest.mark.skipif(
     cocotb_python() is None or not iverilog().found or not verilator().found,
@@ -64,6 +65,37 @@ def test_verify_reports_the_failing_test(counter_project, capsys):
     assert "FAIL" in out and "test_counter.counts_when_enabled" in out
     md = (counter_project / "build/verify/VERIFY.md").read_text()
     assert "| test_counter.counts_when_enabled | fail |" in md
+
+
+FIFO = Path(__file__).parent / "fixtures/formal/fifo.sv"
+
+
+@pytest.mark.skipif(
+    not (sby().found and z3().found and yosys().found), reason="needs SymbiYosys, z3 and Yosys"
+)
+def test_verify_reports_proofs_and_crossings(tmp_path, capsys):
+    root = tmp_path / "fifo"
+    (root / "rtl").mkdir(parents=True)
+    # The read pointer moves on a pop of an empty FIFO: pointers_agree fails.
+    text = FIFO.read_text().replace("if (do_pop) rptr", "if (pop_i) rptr")
+    (root / "rtl/fifo.sv").write_text(text)
+    (root / "project.yaml").write_text(
+        "top: fifo\nsources: [rtl/fifo.sv]\nclocks: [{port: clk_i, period_ns: 10}]\n"
+        "resets: [{port: rst_ni}]\nformal: {checks: [{name: prove, depth: 8}]}\n"
+        "cdc: {async_inputs: [push_i]}\n"
+    )
+    code = main(["verify", str(root), "--steps", "formal,cdc"])
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert out.splitlines()[0].startswith("formal   FAIL     prove (prove depth 8): fifo.")
+    assert "cdc      FAIL" in out
+    md = (root / "build/verify/VERIFY.md").read_text()
+    assert "## Formal properties" in md and "| prove | prove | 8 | fail |" in md
+    assert "| prove | fifo.pointers_agree | rtl/fifo.sv:" in md
+    assert "## Clock and reset domain crossings" in md
+    assert "| unsynchronized | error | push_i (async:push_i) | count (clk_i) |" in md
+    html = (root / "build/verify/report.html").read_text()
+    assert "fifo.pointers_agree" in html and "unsynchronized" in html
 
 
 def test_verify_errors(counter_project, capsys, tmp_path):
