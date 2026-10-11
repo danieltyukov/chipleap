@@ -15,17 +15,35 @@ from pathlib import Path
 
 from chipleap.rtl import builddir, commercial
 from chipleap.rtl.coverage import coverage
+from chipleap.rtl.dft import dft
+from chipleap.rtl.eco import eco
+from chipleap.rtl.irdrop import ir_drop
 from chipleap.rtl.lint import lint
 from chipleap.rtl.pnr import pnr
+from chipleap.rtl.power import power
 from chipleap.rtl.project import Project, load_project
 from chipleap.rtl.report import project_html, project_markdown
 from chipleap.rtl.sim import COMMERCIAL, simulate
 from chipleap.rtl.synth import synth
+from chipleap.rtl.upf import upf
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
 
-PROJECT_STEPS = ("lint", "sim", "coverage", "synth", "pnr")
-# Place and route takes minutes, so it runs only when named or with "all".
+PROJECT_STEPS = (
+    "lint",
+    "sim",
+    "coverage",
+    "synth",
+    "pnr",
+    "eco",
+    "dft",
+    "power",
+    "ir_drop",
+    "upf",
+)
+# Place and route takes minutes, so it and the steps that read its result run only when
+# named or with "all". The ECO comes right after it, so that DFT's check of the routed
+# chains, power and IR drop see the changed layout.
 DEFAULT_STEPS = ("lint", "sim", "coverage", "synth")
 SIM_TOOLS = ("auto", "icarus", "verilator", *COMMERCIAL)
 SYNTH_TOOLS = ("yosys", "genus", "dc")
@@ -104,6 +122,16 @@ def _run_step(
         if pnr_tool == "innovus":
             return commercial.pnr_step(project, remote)
         return pnr(project)
+    if step == "eco":
+        return eco(project)
+    if step == "dft":
+        return dft(project)
+    if step == "power":
+        return power(project)
+    if step == "ir_drop":
+        return ir_drop(project)
+    if step == "upf":
+        return upf(project)
     raise AssertionError(step)  # run_step checked the name
 
 

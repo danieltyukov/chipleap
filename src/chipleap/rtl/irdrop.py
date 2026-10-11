@@ -201,7 +201,7 @@ def voltage_map_svg(net: NetDrop, die: tuple[float, float, float, float] | None 
         f'width="{width}" height="{height}" role="img" aria-label="{_attr(title)}">',
         f"<title>{_attr(title)}</title>",
         f'<rect x="{pad}" y="{pad}" width="{nx * cell}" height="{ny * cell}" '
-        'fill="none" stroke="currentColor" stroke-opacity="0.3"/>',
+        'fill="none" stroke="#888888" stroke-opacity="0.5"/>',
     ]
     for (i, j), d in sorted(grid.items()):
         # Rows go up the die: the SVG's y grows downwards.
@@ -218,8 +218,8 @@ def voltage_map_svg(net: NetDrop, die: tuple[float, float, float, float] | None 
             f'height="8" fill="{_colour(k / (steps - 1))}"/>'
         )
     parts += [
-        f'<text x="{pad}" y="{bar_y + 8}" font-size="9" fill="currentColor">0 mV</text>',
-        f'<text x="{pad + 44 + bar_w}" y="{bar_y + 8}" font-size="9" fill="currentColor">'
+        f'<text x="{pad}" y="{bar_y + 8}" font-size="9" fill="#888888">0 mV</text>',
+        f'<text x="{pad + 44 + bar_w}" y="{bar_y + 8}" font-size="9" fill="#888888">'
         f"{worst * 1000:.3g} mV</text>",
         "</svg>",
     ]

@@ -64,6 +64,12 @@ the steps and writes the report, place and route included when asked for.
 simulate_rtl, coverage_rtl and verify_rtl run the project's cocotb tests and golden
 model, which are code: use them only on projects the user trusts.
 
+After place and route: dft_rtl (scan chains, ATPG coverage, patterns simulated),
+power_rtl (gate-level power from the tests, at corners), ir_drop_rtl (worst supply drop),
+upf_rtl (power domains in OpenROAD), timing_paths_rtl (the worst paths, stage by stage)
+and eco_rtl (resize gates, add buffers or repair timing on the routed design, then sign
+off again). power_rtl runs the tests too.
+
 check_macro validates a macro package (an analog block from aispice, say) before a chip
 places it."""
 
@@ -180,12 +186,28 @@ golden: model/uart_model.py   # Python reference model the tests import
 lint: {waivers: [rtl/waivers.vlt], slang: true}
 constraints: {sdc: constraints/uart.sdc}   # optional; else generated from clocks
 pnr: {utilisation: 45, density: 55, die_um: [300, 300], librelane: {}}
+dft: {max_chain_length: 100, insert: true, min_coverage: 90, patterns: 8}
+power: {corners: [typ, slow, fast], netlist: auto}   # typ 1.2 V 25 C, slow 1.08 V 125 C
+ir_drop: {corner: typ, max_drop_pct: 5}
+upf:
+  domains:
+    - {name: PD_TOP}                               # the top: everything not listed below
+    - {name: PD_RX, elements: [u_rx], voltage: 1.2}  # area_um: [x0, y0, x1, y1] optional
+eco:                                               # changes to the routed design
+  - {resize: _174_, cell: sg13g2_a21oi_2}
+  - {buffer: _212_/Y, cell: sg13g2_buf_2}
+  - {repair: setup, margin_ns: 0.5}
 ```
 
 `chipleap project init DIR` writes one for existing RTL, guessing the top, clock and
 reset. Steps: lint (Verilator -Wall, slang -Wextra), sim (cocotb), coverage (Verilator
 line, branch and toggle), synth (Yosys on the technology's cells), pnr (LibreLane on
-IHP SG13G2: timing at the slow corner, DRC, LVS, antenna).
+IHP SG13G2: timing at the slow corner, DRC, LVS, antenna; the scan netlist when dft
+inserts one), eco (the eco changes on the routed design, signed off again), dft
+(OpenROAD scan chains, Fault ATPG coverage, the patterns simulated through the chains),
+power (OpenROAD power from the cocotb tests' VCD on the gate-level netlist, beside the
+vectorless figure), ir_drop (PDNSim on the routed grid), upf (OpenROAD reads the power
+domains and places them; no open tool simulates power intent).
 """
 
 
@@ -532,6 +554,86 @@ def verify_rtl(
     }
 
 
+def dft_rtl(project: str) -> dict[str, Any]:
+    """Scan chains, ATPG coverage and the chain simulation (the project's dft section)."""
+    from chipleap.rtl.verify import run_step
+
+    return _step(run_step(_project(project), "dft"))
+
+
+def _corners(text: str) -> tuple[str, ...]:
+    from chipleap.rtl.project import CORNERS
+
+    items = tuple(c.strip() for c in text.split(",") if c.strip())
+    bad = [c for c in items if c not in CORNERS]
+    if bad:
+        raise ToolError(f"corners are {', '.join(CORNERS)}, not {bad[0]}")
+    return items
+
+
+def power_rtl(project: str, corners: str = "") -> dict[str, Any]:
+    """Gate-level power from the tests' activity; ``corners`` overrides the project's."""
+    import dataclasses
+
+    from chipleap.rtl.verify import run_step
+
+    p = _project(project)
+    if corners:
+        p = dataclasses.replace(p, power=dataclasses.replace(p.power, corners=_corners(corners)))
+    return _step(run_step(p, "power"))
+
+
+def ir_drop_rtl(project: str, corner: str = "") -> dict[str, Any]:
+    import dataclasses
+
+    from chipleap.rtl.verify import run_step
+
+    p = _project(project)
+    picked = _corners(corner)
+    if picked:
+        p = dataclasses.replace(p, ir_drop=dataclasses.replace(p.ir_drop, corner=picked[0]))
+    return _step(run_step(p, "ir_drop"))
+
+
+def upf_rtl(project: str) -> dict[str, Any]:
+    from chipleap.rtl.verify import run_step
+
+    return _step(run_step(_project(project), "upf"))
+
+
+def timing_paths_rtl(
+    project: str, corner: str = "slow", check: str = "setup", count: int = 5
+) -> dict[str, Any]:
+    """The routed design's worst paths, each stage's pin, cell, instance and delay."""
+    from chipleap.rtl.eco import timing_paths
+    from chipleap.rtl.openroad import OpenroadError
+
+    p = _project(project)
+    try:
+        paths, run = timing_paths(p, corner, check, count)
+    except (OpenroadError, ValueError, RuntimeError) as exc:
+        raise ToolError(str(exc).splitlines()[0]) from exc
+    return {"run": run, "corner": corner, "check": check, "paths": [x.to_dict() for x in paths]}
+
+
+def eco_rtl(project: str, changes: list[str]) -> dict[str, Any]:
+    """Apply ``changes`` (resize:INST=CELL, buffer:INST/PIN=CELL, repair:setup|hold[@NS])
+    to the routed design and sign it off again."""
+    from chipleap.rtl.eco import eco
+    from chipleap.rtl.project import EcoChange, ProjectError
+
+    p = _project(project)
+    try:
+        parsed = [EcoChange.parse(c) for c in changes]
+    except ProjectError as exc:
+        raise ToolError(str(exc)) from exc
+    if not parsed:
+        raise ToolError("give at least one change")
+    out = _step(eco(p, parsed))
+    out["keep"] = "add the changes to the project's eco section to make them part of its flow"
+    return out
+
+
 def check_tools() -> dict[str, Any]:
     from chipleap.verify.tools import all_tools, commercial, ihp_liberty
 
@@ -573,20 +675,55 @@ TOOLS: dict[str, Callable[..., Any]] = {
     "synthesize_rtl": synthesize_rtl,
     "verify_rtl": verify_rtl,
     "check_macro": check_macro,
+    "dft_rtl": dft_rtl,
+    "power_rtl": power_rtl,
+    "ir_drop_rtl": ir_drop_rtl,
+    "upf_rtl": upf_rtl,
+    "timing_paths_rtl": timing_paths_rtl,
+    "eco_rtl": eco_rtl,
 }
 # Tools whose results depend on the machine, on files or write files are logged but not
-# replayed.
-SIDE_EFFECTS = {"generate_soc", "verify_soc", "check_tools", "verify_rtl", "check_macro"}
+# replayed. Power, IR drop, timing paths and ECOs read the routed design in build/, which
+# the inputs digest does not cover.
+SIDE_EFFECTS = {
+    "generate_soc",
+    "verify_soc",
+    "check_tools",
+    "verify_rtl",
+    "check_macro",
+    "power_rtl",
+    "ir_drop_rtl",
+    "timing_paths_rtl",
+    "eco_rtl",
+}
 # Tools that read a project. Their results depend on its files and on the installed tools,
 # so their log entries also carry a digest of every input file and the tool versions, and
 # a replay that differs says which of the two changed.
-PROJECT_TOOLS = {"describe_project", "lint_rtl", "simulate_rtl", "coverage_rtl", "synthesize_rtl"}
+PROJECT_TOOLS = {
+    "describe_project",
+    "lint_rtl",
+    "simulate_rtl",
+    "coverage_rtl",
+    "synthesize_rtl",
+    "dft_rtl",
+    "upf_rtl",
+}
 
 
-def project_context(project: str) -> dict[str, Any]:
+def project_context(project: str, tool: str = "") -> dict[str, Any]:
     """The inputs digest and tool versions a project tool's result depends on."""
     from chipleap.rtl.sim import cocotb_python, cocotb_version
-    from chipleap.verify.tools import iverilog, slang, sv2v, verilator, yosys
+    from chipleap.verify.tools import (
+        fault,
+        gl_iverilog,
+        iverilog,
+        openroad,
+        quaigh,
+        slang,
+        sv2v,
+        verilator,
+        yosys,
+    )
 
     try:
         digest = _project(project).inputs_digest()
@@ -597,6 +734,9 @@ def project_context(project: str) -> dict[str, Any]:
         t.name: t.version if t.found else None
         for t in (verilator(), slang(), iverilog(), yosys(), sv2v())
     }
+    if tool in ("dft_rtl", "upf_rtl"):
+        for t in (openroad(), fault(), quaigh(), gl_iverilog()):
+            tools[t.name] = t.version if t.found else None
     tools["cocotb"] = cocotb_version(py) if py else None
     return {"inputs_sha256": digest, "tools": tools}
 
@@ -626,7 +766,7 @@ class RunLog:
             "error": error,
         }
         if tool in PROJECT_TOOLS and isinstance(args.get("project"), str):
-            entry.update(project_context(args["project"]))
+            entry.update(project_context(args["project"], tool))
         with self.path.open("a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
 
@@ -648,7 +788,7 @@ def replay_calls(log: Path) -> list[dict[str, Any]]:
         except Exception as exc:  # a project that moved or broke since the call
             outcome = f"fails now: {exc}"
         if outcome != "same" and "inputs_sha256" in entry:
-            now = project_context(entry["args"]["project"])
+            now = project_context(entry["args"]["project"], entry["tool"])
             if now["inputs_sha256"] != entry["inputs_sha256"]:
                 outcome = "inputs changed"
             elif now["tools"] != entry.get("tools"):
@@ -862,6 +1002,83 @@ def build_server(log_dir: str | None = None) -> Any:
             sim_tool=sim_tool,
             synth_tool=synth_tool,
             pnr_tool=pnr_tool,
+        )
+
+    @server.tool(
+        description="Insert scan chains with OpenROAD into an RTL project with a dft section, "
+        "generate stuck-at patterns with Fault and Quaigh, and simulate a flush pattern and "
+        "the first patterns through the chains on Icarus 13 (also on the routed netlist when "
+        "it has the chains). Returns chains, coverage, pattern files and mismatches."
+    )
+    @_stops_its_runs
+    def dft_rtl(project: str) -> dict[str, Any]:
+        return logged("dft_rtl", TOOLS["dft_rtl"])(project=project)
+
+    @server.tool(
+        description="Gate-level power of an RTL project: its cocotb tests run on the routed "
+        "netlist (else the synthesized one) with the cell models, and OpenROAD reports power "
+        "from that activity and vectorless, per group, at each corner (corners: comma "
+        "separated typ, slow, fast). Runs the project's tests, which are code: only for "
+        "projects the user trusts."
+    )
+    @_stops_its_runs
+    def power_rtl(project: str, corners: str = "") -> dict[str, Any]:
+        return logged("power_rtl", TOOLS["power_rtl"])(project=project, corners=corners)
+
+    @server.tool(
+        description="Static IR drop of a routed RTL project with OpenROAD PDNSim, with "
+        "currents from the tests' activity: worst and average drop per supply net, the worst "
+        "cells, and a map. corner: typ, slow or fast."
+    )
+    @_stops_its_runs
+    def ir_drop_rtl(project: str, corner: str = "") -> dict[str, Any]:
+        return logged("ir_drop_rtl", TOOLS["ir_drop_rtl"])(project=project, corner=corner)
+
+    @server.tool(
+        description="Read an RTL project's upf section into OpenROAD: power domains, their "
+        "cells placed in their areas, and the signals between domains, with level shifters "
+        "flagged where voltages differ. No open tool simulates power intent."
+    )
+    @_stops_its_runs
+    def upf_rtl(project: str) -> dict[str, Any]:
+        return logged("upf_rtl", TOOLS["upf_rtl"])(project=project)
+
+    @server.tool(
+        description="The worst setup or hold paths of a routed RTL project at a corner "
+        "(check: setup or hold; corner: typ, slow or fast), each stage with its pin, "
+        "instance, cell and delay: what eco_rtl changes are chosen from."
+    )
+    @_stops_its_runs
+    def timing_paths_rtl(
+        project: str, corner: str = "slow", check: str = "setup", count: int = 5
+    ) -> dict[str, Any]:
+        return logged("timing_paths_rtl", TOOLS["timing_paths_rtl"])(
+            project=project, corner=corner, check=check, count=count
+        )
+
+    @server.tool(
+        description="Apply an engineering change order to a routed RTL project and sign it "
+        "off again (re-route, timing at every corner, DRC, LVS, antenna), without placing "
+        "again. changes: resize:INSTANCE=CELL (same pins, another size), "
+        "buffer:INSTANCE/PIN=CELL (after a driver or before a sink), repair:setup or "
+        "repair:hold, optionally @MARGIN_NS. Changes always apply to the original routed "
+        "design, so pass the whole list each time. Takes minutes."
+    )
+    @_stops_its_runs
+    def eco_rtl(project: str, changes: list[str]) -> dict[str, Any]:
+        return logged("eco_rtl", TOOLS["eco_rtl"])(project=project, changes=changes)
+
+    @server.prompt(description="Close timing on a routed RTL project with ECO changes.")
+    def fix_timing(project: str) -> str:
+        return (
+            f"The RTL project at {project} is placed and routed. Call timing_paths_rtl for "
+            "the worst setup paths at the slow corner (and hold paths at the fast corner if "
+            "hold fails). Pick one change at a time: a larger cell for a slow gate on the "
+            "worst path (same pins: sg13g2_nor2_1 to sg13g2_nor2_2), a buffer where one "
+            "driver has many loads, or repair:setup with a margin. Call eco_rtl with every "
+            "change so far, read the new slack and checks, and keep a change only if it "
+            "helps and DRC, LVS and antenna stay clean. Then tell the user which changes to "
+            "put in the project's eco section."
         )
 
     @server.resource(
