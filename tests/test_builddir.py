@@ -12,6 +12,7 @@ import pytest
 from chipleap.cli import main
 from chipleap.gen.bundle import write_bundle
 from chipleap.hw import Accel, Design
+from chipleap.macro import write_evidence
 from chipleap.rtl import builddir, commercial
 from chipleap.rtl import pnr as pnr_mod
 from chipleap.rtl import sim as sim_mod
@@ -404,3 +405,19 @@ def test_a_bundle_report_that_is_a_symlink_is_replaced(bundle, home):
     verify_bundle(bundle, steps=("consistency",))
     assert tree(home) == before
     assert "consist" in (bundle / "verify/VERIFY.md").read_text()
+
+
+# A macro package's evidence/, which a package from someone else could ship as a symlink.
+
+
+@pytest.mark.parametrize("at", ["evidence", "evidence/drc.json"])
+def test_evidence_is_not_written_through_a_symlink(tmp_path, home, at):
+    pkg = tmp_path / "tiny.macro"
+    pkg.mkdir()
+    link(pkg / at, home / "verify" if at == "evidence" else home / "keep.txt")
+    before = tree(home)
+    with pytest.raises(BuildDirError, match=f"{at} is a symlink"):
+        write_evidence(pkg, {"operation": "drc"})
+    assert tree(home) == before
+    if at != "evidence":
+        assert write_evidence(pkg, {"operation": "lvs"}) == pkg / "evidence/lvs.json"

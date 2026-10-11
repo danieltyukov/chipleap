@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from chipleap.macro.limits import FileTooLarge, too_large
 from chipleap.macro.manifest import EVIDENCE_SCHEMA, MacroError, Pdk
 from chipleap.macro.schema import validate_def
+from chipleap.rtl import builddir
 
 STATUSES = ("pass", "fail", "unknown", "not_applicable")
 
@@ -77,9 +78,8 @@ def make_evidence(
 
 
 def write_evidence(package: str | Path, doc: dict[str, Any], name: str | None = None) -> Path:
-    """Write a summary to ``evidence/<name or operation>.json`` and return its path."""
-    folder = Path(package) / "evidence"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{name or doc['operation']}.json"
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    return path
+    """Write a summary to ``evidence/<name or operation>.json`` and return its path. A
+    package may come from someone else, so neither ``evidence/`` nor the summary is
+    written through a symlink (``chipleap.rtl.builddir``)."""
+    rel = PurePath("evidence", f"{name or doc['operation']}.json")
+    return builddir.write_text(Path(package), rel, json.dumps(doc, indent=2) + "\n")
