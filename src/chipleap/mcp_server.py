@@ -619,9 +619,12 @@ def replay_calls(log: Path) -> list[dict[str, Any]]:
         entry = json.loads(line)
         if entry["tool"] in SIDE_EFFECTS or entry.get("error"):
             continue
-        result = TOOLS[entry["tool"]](**entry["args"])
-        outcome = "same" if _digest(result) == entry["result_sha256"] else "differs"
-        if outcome == "differs" and "inputs_sha256" in entry:
+        try:
+            result = TOOLS[entry["tool"]](**entry["args"])
+            outcome = "same" if _digest(result) == entry["result_sha256"] else "differs"
+        except Exception as exc:  # a project that moved or broke since the call
+            outcome = f"fails now: {exc}"
+        if outcome != "same" and "inputs_sha256" in entry:
             now = project_context(entry["args"]["project"])
             if now["inputs_sha256"] != entry["inputs_sha256"]:
                 outcome = "inputs changed"

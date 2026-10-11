@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from chipleap.rtl.diag import PARSERS, Diagnostic, relative
-from chipleap.rtl.project import Project
+from chipleap.rtl.project import SKIP_DIRS, Project
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import Tool, iverilog, verilator
@@ -178,7 +178,8 @@ def _staged(project: Project, path: Path, area: str) -> str:
 def _copy(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if src.is_dir():
-        shutil.copytree(src, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+        # Build directories a test directory may hold (cocotb's sim_build) stay behind.
+        shutil.copytree(src, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*SKIP_DIRS))
     else:
         shutil.copy2(src, dest)
 

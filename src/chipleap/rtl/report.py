@@ -23,6 +23,11 @@ STEP_TITLES = {
 DIAG_ROWS = 100
 
 
+def _line(text: str) -> str:
+    """The first line of a message: table cells hold one line."""
+    return text.strip().splitlines()[0] if text.strip() else ""
+
+
 def _loc(d: dict[str, Any]) -> str:
     f = d.get("file", "")
     return f"{f}:{d['line']}" if f and d.get("line") else f
@@ -69,7 +74,7 @@ def _diag_rows(diags: list[dict[str, Any]]) -> list[list[str]]:
             d.get("severity", ""),
             _loc(d),
             d.get("code", "") or d.get("test", ""),
-            d.get("message", ""),
+            _line(d.get("message", "")),
         ]
         for d in diags[:DIAG_ROWS]
     ]
@@ -120,7 +125,7 @@ def _test_rows(r: StepResult) -> list[list[str]]:
             t.get("status", ""),
             f"{t.get('sim_time_ns', 0):g}",
             (f"{_loc(t)}: " if t.get("status") == "fail" and _loc(t) else "")
-            + t.get("message", ""),
+            + _line(t.get("message", "")),
         ]
         for t in r.data.get("tests", [])
     ]
