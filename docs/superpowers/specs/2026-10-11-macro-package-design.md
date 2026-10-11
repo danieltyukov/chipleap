@@ -59,7 +59,7 @@ The rule table is in `docs/macro-package.md`. Checks run in a fixed order: manif
 
 ChipLeap (`chipleap.macro`): `check_package(path, pdk=None) -> Report`, `load_manifest(path) -> Manifest`, `Manifest` (with `Pin`, `Domain`, `Corner`, `Pdk`, `Producer`), `Manifest.to_toml()`, `make_evidence(...)`, `write_evidence(...)`, `required_files(manifest)`, `read_gds(path) -> GdsLibrary`, `schema()`. CLI `chipleap macro check DIR [--pdk NAME[@COMMIT]] [--strict] [--json]` and `chipleap macro schema`; MCP tool `check_macro`.
 
-aispice (`aispice_core::macropkg`): `check_package(dir, &CheckOptions) -> Report`, `Manifest::load(dir)`, `Manifest::from_toml_str`, `Manifest::to_toml()`, `Evidence::new(...)` and `Evidence::write(...)`, `required_files`, `gds::read_gds`, `SCHEMA_JSON`. CLI `aispice macro check DIR [--pdk ...] [--strict] [--json]` and `aispice macro schema`; agent and MCP tool `check_macro`.
+aispice (`aispice_core::macropkg`): `check_package(dir, &CheckOptions) -> Result<Report, MacroError>` (an error only for a missing directory or a malformed `--pdk`), `Manifest::load(dir)`, `Manifest::from_toml_str`, `Manifest::to_toml()`, `Evidence::new(...)` and `Evidence::write(...)`, `required_files`, `gds::read_gds`, `SCHEMA_JSON`. CLI `aispice macro check DIR [--pdk ...] [--strict] [--json]` and `aispice macro schema`; agent and MCP tool `check_macro`.
 
 ## Alternatives considered
 
