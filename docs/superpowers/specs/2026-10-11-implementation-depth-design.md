@@ -20,7 +20,7 @@ The implementation steps industry expects after place and route exist for an RTL
 
 ### Steps
 
-`PROJECT_STEPS` becomes `lint, sim, coverage, synth, dft, pnr, eco, power, ir_drop, upf`. The default stays `lint,sim,coverage,synth`; `all` runs every step. A step whose section is missing skips with a reason, so `all` is safe on any project.
+`PROJECT_STEPS` becomes `lint, sim, coverage, synth, pnr, eco, dft, power, ir_drop, upf`, so that DFT's check of the routed chains, power and IR drop see the routed (and changed) layout. The default stays `lint,sim,coverage,synth`; `all` runs every step. A step whose section is missing skips with a reason, so `all` is safe on any project.
 
 | Step | Needs | Engine | Passes when |
 |---|---|---|---|
