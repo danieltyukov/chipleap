@@ -294,6 +294,10 @@ def random_point(spec: Spec, rng: random.Random, workload: Workload) -> Point | 
         accel=accel,
         platform=spec.platform,
     )
+    limit = _freq_limit(spec, tech, accel)
+    if design.freq_mhz > limit:
+        steps = [f for f in FREQ_STEPS if f <= limit]
+        design = design.with_(freq_mhz=float(steps[-1]) if steps else limit)
     try:
         design.validate()
     except DesignError:

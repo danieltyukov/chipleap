@@ -196,13 +196,21 @@ module chipleap_accel #(
   // DMA: 2-D copy from memory into a buffer over all read ports
   // ---------------------------------------------------------------------------
   logic        dma_start, dma_to_w, dma_done;
-  logic [31:0] dma_rows, dma_wpr, dma_src, dma_src_stride;
+  logic [31:0] dma_rows, dma_wpr, dma_src, dma_src_off, dma_src_stride;
   logic [31:0] dma_dst, dma_dst_stride;
 
   logic        dma_active;
+  // A transfer spends its first cycle in setup: the source address is a base plus an offset,
+  // and the last word and row indices are the counts less one, all formed here from
+  // registers so that none of that arithmetic is in series with the loader's.
+  logic        dma_setup;
+  logic [31:0] iss_off, iss_wpr, iss_rows;
   logic        dma_tow_q;
-  logic [31:0] iss_row, iss_word, iss_rowaddr, iss_rowdst, iss_rows, iss_wpr;
+  logic [31:0] iss_row, iss_word, iss_rowaddr, iss_rowdst;
   logic [31:0] iss_sstride, iss_dstride;
+  // Index of the last word in a row and of the last row, set when a transfer starts, so the
+  // per-word check is an equality on registers rather than an increment and a compare.
+  logic [31:0] iss_wlast, iss_rlast;
   logic        iss_all;
 
   logic [PORTS-1:0] pend_v;
@@ -234,17 +242,17 @@ module chipleap_accel #(
       alloc[p] = 1'b0;
       alloc_addr[p] = '0;
       alloc_dst[p] = '0;
-      if (dma_active && !all_done && (!pend_v[p] || rd_gnt_i[p]) &&
+      if (dma_active && !dma_setup && !all_done && (!pend_v[p] || rd_gnt_i[p]) &&
           after < (OSTW + 1)'(MAX_OUTSTANDING)) begin
         alloc[p] = 1'b1;
         alloc_addr[p] = ra + (w << 2);
         alloc_dst[p] = AW'(rd + w);
-        if (w + 32'd1 == iss_wpr) begin
+        if (w == iss_wlast) begin
           w = '0;
+          if (r == iss_rlast) all_done = 1'b1;
           r = r + 32'd1;
           ra = ra + iss_sstride;
           rd = rd + iss_dstride;
-          if (r == iss_rows) all_done = 1'b1;
         end else begin
           w = w + 32'd1;
         end
@@ -267,20 +275,24 @@ module chipleap_accel #(
       if (pend_v[p] || outst[p] != '0) any_outstanding = 1'b1;
     end
   end
-  assign dma_done = dma_active && iss_all && !any_outstanding;
+  assign dma_done = dma_active && !dma_setup && iss_all && !any_outstanding;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       dma_active <= 1'b0;
+      dma_setup <= 1'b0;
+      iss_off <= '0;
+      iss_wpr <= '0;
+      iss_rows <= '0;
       dma_tow_q <= 1'b0;
       iss_row <= '0;
       iss_word <= '0;
       iss_rowaddr <= '0;
       iss_rowdst <= '0;
-      iss_rows <= '0;
-      iss_wpr <= '0;
       iss_sstride <= '0;
       iss_dstride <= '0;
+      iss_wlast <= '0;
+      iss_rlast <= '0;
       iss_all <= 1'b0;
       pend_v <= '0;
       pend_addr <= '0;
@@ -294,15 +306,23 @@ module chipleap_accel #(
         dma_tow_q <= dma_to_w;
         iss_row <= '0;
         iss_word <= '0;
+        dma_setup <= 1'b1;
         iss_rowaddr <= dma_src;
-        iss_rowdst <= dma_dst;
-        iss_rows <= dma_rows;
+        iss_off <= dma_src_off;
         iss_wpr <= dma_wpr;
+        iss_rows <= dma_rows;
+        iss_rowdst <= dma_dst;
         iss_sstride <= dma_src_stride;
         iss_dstride <= dma_dst_stride;
-        iss_all <= (dma_rows == 0) || (dma_wpr == 0);
+        iss_all <= 1'b1;
       end else if (dma_active) begin
-        if (dma_done) begin
+        if (dma_setup) begin
+          dma_setup <= 1'b0;
+          iss_rowaddr <= iss_rowaddr + iss_off;
+          iss_wlast <= iss_wpr - 32'd1;
+          iss_rlast <= iss_rows - 32'd1;
+          iss_all <= (iss_rows == 0) || (iss_wpr == 0);
+        end else if (dma_done) begin
           dma_active <= 1'b0;
         end else begin
           iss_row <= nx_row;
@@ -378,17 +398,21 @@ module chipleap_accel #(
   } lstate_t;
   lstate_t ls;
 
-  logic [31:0] l_m0, l_n0, l_k0;
+  logic [31:0] l_n0, l_k0;
   logic [31:0] l_xrow, l_wrow, l_yrow;  // byte addresses of X[m0][0], W[n0][0], Y[m0][0]
   logic [31:0] l_tm, l_tn, l_tk;
   logic l_slot;
   logic [31:0] tiles_issued, tiles_done;
-  logic [31:0] w_row_bytes, tmK, tmN4;
+  logic [31:0] w_row_bytes, w_tile_bytes, tmK, tmN4;  // per-job strides, set at start
+  // Whether the next tile moves along K, N or M. The tile and its position are settled once
+  // L_NEXT has run, so these compares happen in L_W, a few cycles before L_PUSH needs them,
+  // and the 32-bit add-compare chains are not in series with the address updates.
+  logic more_k, more_n, more_m;
   logic core_idle;
 
-  wire [31:0] rem_m = cfg_m - l_m0;
-  wire [31:0] rem_n = cfg_n - l_n0;
-  wire [31:0] rem_k = cfg_k - l_k0;
+  // What remains of M, N and K from the current tile position, kept as registers and updated
+  // with the position, so sizing the next tile in L_NEXT is a compare and not a subtract.
+  logic [31:0] rem_m, rem_n, rem_k;
   wire first_in_m = (l_n0 == 0) && (l_k0 == 0);
   wire slot_free = !desc_v[l_slot];
   wire pipe_empty = (desc_v == '0) && core_idle && (tiles_done == tiles_issued);
@@ -399,6 +423,7 @@ module chipleap_accel #(
     dma_rows = '0;
     dma_wpr = '0;
     dma_src = '0;
+    dma_src_off = '0;
     dma_src_stride = '0;
     dma_dst = '0;
     dma_dst_stride = '0;
@@ -416,7 +441,8 @@ module chipleap_accel #(
         dma_dst_stride = cfg_k >> 2;
       end else begin
         dma_wpr = l_tk >> 2;
-        dma_src = l_xrow + l_k0;
+        dma_src = l_xrow;
+        dma_src_off = l_k0;
         dma_dst = 32'(l_slot) * A_SLOT;
         dma_dst_stride = cfg_tk >> 2;
       end
@@ -425,7 +451,8 @@ module chipleap_accel #(
       dma_to_w = 1'b1;
       dma_rows = l_tn;
       dma_wpr = w_words(l_tk);
-      dma_src = l_wrow + w_bytes(l_k0);
+      dma_src = l_wrow;
+      dma_src_off = w_bytes(l_k0);
       dma_src_stride = w_row_bytes;
       dma_dst = 32'(l_slot) * W_SLOT;
       dma_dst_stride = w_words(cfg_tk);
@@ -437,14 +464,13 @@ module chipleap_accel #(
       desc_new.k0 = l_k0;
       desc_new.ybase = l_yrow + (l_n0 << 2);
       desc_new.first_k = (l_k0 == 0);
-      desc_new.last_k = (l_k0 + l_tk >= cfg_k);
+      desc_new.last_k = !more_k;
     end
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       ls <= L_IDLE;
-      l_m0 <= '0;
       l_n0 <= '0;
       l_k0 <= '0;
       l_xrow <= '0;
@@ -456,21 +482,31 @@ module chipleap_accel #(
       l_slot <= 1'b0;
       tiles_issued <= '0;
       w_row_bytes <= '0;
+      w_tile_bytes <= '0;
       tmK <= '0;
       tmN4 <= '0;
+      more_k <= 1'b0;
+      more_n <= 1'b0;
+      more_m <= 1'b0;
+      rem_m <= '0;
+      rem_n <= '0;
+      rem_k <= '0;
     end else begin
       unique case (ls)
         L_IDLE: begin
           if (start) begin
-            l_m0 <= '0;
             l_n0 <= '0;
             l_k0 <= '0;
+            rem_m <= cfg_m;
+            rem_n <= cfg_n;
+            rem_k <= cfg_k;
             l_xrow <= cfg_x;
             l_wrow <= cfg_w;
             l_yrow <= cfg_y;
             l_slot <= 1'b0;
             tiles_issued <= '0;
             w_row_bytes <= w_bytes(cfg_k);
+            w_tile_bytes <= w_bytes(32'(TN) * cfg_k);
             tmK <= cfg_tm[7:0] * cfg_k;
             tmN4 <= (cfg_tm[7:0] * cfg_n) << 2;
             ls <= L_NEXT;
@@ -489,24 +525,36 @@ module chipleap_accel #(
         end
         L_X: ls <= L_XWAIT;
         L_XWAIT: if (dma_done) ls <= L_W;
-        L_W: ls <= L_WWAIT;
+        L_W: begin
+          // Another tile follows along an axis when more remains than this tile takes; the
+          // tile takes the lesser of the two, so one compare of two registers decides it.
+          more_k <= rem_k > cfg_tk;
+          more_n <= rem_n > 32'(TN);
+          more_m <= rem_m > cfg_tm;
+          ls <= L_WWAIT;
+        end
         L_WWAIT: if (dma_done) ls <= L_PUSH;
         L_PUSH: begin
           tiles_issued <= tiles_issued + 32'd1;
           if (DB) l_slot <= ~l_slot;
           // Advance k0, then n0, then m0.
-          if (l_k0 + l_tk < cfg_k) begin
+          if (more_k) begin
             l_k0 <= l_k0 + l_tk;
+            rem_k <= rem_k - l_tk;
             ls <= L_NEXT;
-          end else if (l_n0 + l_tn < cfg_n) begin
+          end else if (more_n) begin
             l_k0 <= '0;
+            rem_k <= cfg_k;
             l_n0 <= l_n0 + l_tn;
-            l_wrow <= l_wrow + w_bytes(32'(TN) * cfg_k);
+            rem_n <= rem_n - l_tn;
+            l_wrow <= l_wrow + w_tile_bytes;
             ls <= L_NEXT;
-          end else if (l_m0 + l_tm < cfg_m) begin
+          end else if (more_m) begin
             l_k0 <= '0;
             l_n0 <= '0;
-            l_m0 <= l_m0 + l_tm;
+            rem_k <= cfg_k;
+            rem_n <= cfg_n;
+            rem_m <= rem_m - l_tm;
             l_xrow <= l_xrow + tmK;
             l_wrow <= cfg_w;
             l_yrow <= l_yrow + tmN4;
@@ -644,6 +692,13 @@ module chipleap_accel #(
     logic running, issuing;
     logic [31:0] gm, gkc, nchunks;
     logic [31:0] g_rowbase;  // word address of activation row gm
+    // Three stages: fetch and unpack the operands into xq/wq, multiply and add them into
+    // psum_q, accumulate into work/acc. The operand registers cut the path from the buffer
+    // read to the adder tree in two, so the engine closes timing at the slow corner.
+    logic signed [7:0] xq[V];
+    logic signed [7:0] wq[L][V];
+    logic ov_q, ofirst_q, olast_q;
+    logic [$clog2(ACC_ROWS)-1:0] om_q;
     logic signed [31:0] psum_q[L];
     logic pv_q, pfirst_q, plast_q;
     logic [$clog2(ACC_ROWS)-1:0] pm_q;
@@ -692,10 +747,20 @@ module chipleap_accel #(
       end
     end
 
+    // Each lane sums its V products as a balanced tree, log2(V) adders deep rather than a
+    // chain of V, and only as wide as the sum can get: V signed 16-bit products need
+    // 16 + log2(V) bits. The result is sign-extended once, so no adder carries through
+    // 32 bits of copies of the sign.
+    localparam int unsigned PW = 16 + (V > 1 ? $clog2(V) : 0);
     always_comb begin
       for (int l = 0; l < int'(L); l++) begin
-        dot[l] = '0;
-        for (int v = 0; v < int'(V); v++) dot[l] = dot[l] + 32'(mul8(xv[v], wv[l][v]));
+        logic signed [PW-1:0] t[V];
+        for (int v = 0; v < int'(V); v++) t[v] = PW'(mul8(xq[v], wq[l][v]));
+        for (int w = int'(V); w > 1; w = (w + 1) / 2) begin
+          for (int i = 0; i < w / 2; i++) t[i] = t[2*i] + t[2*i+1];
+          if (w % 2 == 1) t[w/2] = t[w-1];
+        end
+        dot[l] = 32'(t[0]);
       end
     end
 
@@ -707,12 +772,26 @@ module chipleap_accel #(
         gkc <= '0;
         g_rowbase <= '0;
         nchunks <= '0;
+        ov_q <= 1'b0;
+        ofirst_q <= 1'b0;
+        olast_q <= 1'b0;
+        om_q <= '0;
+        for (int v = 0; v < int'(V); v++) xq[v] <= '0;
+        for (int l = 0; l < int'(L); l++) for (int v = 0; v < int'(V); v++) wq[l][v] <= '0;
         pv_q <= 1'b0;
         pfirst_q <= 1'b0;
         plast_q <= 1'b0;
         pm_q <= '0;
+        for (int l = 0; l < int'(L); l++) psum_q[l] <= '0;
       end else begin
-        pv_q <= 1'b0;
+        ov_q <= 1'b0;
+        pv_q <= ov_q;
+        if (ov_q) begin
+          pfirst_q <= ofirst_q;
+          plast_q <= olast_q;
+          pm_q <= om_q;
+          for (int l = 0; l < int'(L); l++) psum_q[l] <= dot[l];
+        end
         if (core_start) begin
           running <= 1'b1;
           issuing <= 1'b1;
@@ -722,11 +801,12 @@ module chipleap_accel #(
           nchunks <= cd.tk / V;
         end else if (running) begin
           if (issuing) begin
-            pv_q <= 1'b1;
-            pfirst_q <= (gkc == 0);
-            plast_q <= (gkc + 1 == nchunks);
-            pm_q <= gm[$clog2(ACC_ROWS)-1:0];
-            for (int l = 0; l < int'(L); l++) psum_q[l] <= dot[l];
+            ov_q <= 1'b1;
+            ofirst_q <= (gkc == 0);
+            olast_q <= (gkc + 1 == nchunks);
+            om_q <= gm[$clog2(ACC_ROWS)-1:0];
+            xq <= xv;
+            wq <= wv;
             if (gkc + 1 == nchunks) begin
               gkc <= '0;
               if (gm + 1 == cd.tm) issuing <= 1'b0;
@@ -737,7 +817,7 @@ module chipleap_accel #(
             end else begin
               gkc <= gkc + 1;
             end
-          end else if (!pv_q) begin
+          end else if (!ov_q && !pv_q) begin
             running <= 1'b0;
           end
         end
@@ -752,7 +832,7 @@ module chipleap_accel #(
         end
       end
     end
-    assign core_done = running && !issuing && !pv_q;
+    assign core_done = running && !issuing && !ov_q && !pv_q;
     always_comb begin
       for (int i = 0; i < int'(TM_MAX); i++)
         for (int j = 0; j < int'(TN); j++) acc_out[i*TN+j] = acc[i*TN+j];
@@ -766,23 +846,46 @@ module chipleap_accel #(
     localparam int unsigned C = COLS;
     localparam int unsigned RI = R > 1 ? $clog2(R) : 1;
     logic running, loading;
-    logic [31:0] blk, nblk, t, tstream;
+    // The time step only counts through one block: R loads, then at most ACC_ROWS rows plus
+    // the array's skew, so it is narrow and its compares are short.
+    localparam int unsigned TW = $clog2(ACC_ROWS + R + C + 2);
+    logic [31:0] blk, nblk;
+    logic [TW-1:0] t, tstream;
     logic [31:0] tbase;  // word address of activation row t while streaming
     // PE registers, row-major (r * C + c)
     logic signed [7:0] wq[R*C];
     logic signed [7:0] aq[R*C];
     logic signed [31:0] pq[R*C];
     logic signed [31:0] acc[ACC_ROWS*C];
+    // The activation feed is registered before it enters the array, so the buffer read
+    // and its address arithmetic are not in series with the first PE's multiply-add.
     logic signed [7:0] feed[R];
+    logic signed [7:0] feed_q[R];
+    // Write-back of the bottom row, one cycle behind: which accumulator row each column's
+    // result belongs to is worked out and registered first, then added in. The last one
+    // lands as the core reports done, a cycle before the store engine reads it.
+    localparam int unsigned AI = ACC_ROWS > 1 ? $clog2(ACC_ROWS) : 1;
+    logic wb_v[C];
+    logic wb_first[C];
+    logic [AI-1:0] wb_m[C];
+    logic signed [31:0] wb_val[C];
+    logic wb2_v[C];
+    logic [AI-1:0] wb2_m[C];
+    logic signed [31:0] wb2_sum[C];
 
     always_comb begin
       for (int r = 0; r < int'(R); r++) begin
         logic [31:0] m;
-        m = t - 32'(r);
+        m = 32'(t) - 32'(r);
         feed[r] = '0;
-        if (running && !loading && t >= 32'(r) && m < cd.tm)
+        if (running && !loading && 32'(t) >= 32'(r) && m < cd.tm)
           feed[r] = x_at(tbase - 32'(r) * a_stride, blk * R + 32'(r));
       end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) for (int r = 0; r < int'(R); r++) feed_q[r] <= '0;
+      else for (int r = 0; r < int'(R); r++) feed_q[r] <= feed[r];
     end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -800,48 +903,68 @@ module chipleap_accel #(
             pq[r*C+c] <= '0;
             wq[r*C+c] <= '0;
           end
+        for (int c = 0; c < int'(C); c++) begin
+          wb_v[c] <= 1'b0;
+          wb_first[c] <= 1'b0;
+          wb_m[c] <= '0;
+          wb_val[c] <= '0;
+          wb2_v[c] <= 1'b0;
+          wb2_m[c] <= '0;
+          wb2_sum[c] <= '0;
+        end
       end else begin
+        for (int c = 0; c < int'(C); c++) begin
+          wb_v[c] <= 1'b0;
+          // Read and add: the accumulator row this result belongs to, or nothing on the first
+          // block of the first K tile.
+          wb2_v[c] <= wb_v[c];
+          wb2_m[c] <= wb_m[c];
+          wb2_sum[c] <= wb_first[c] ? wb_val[c] : acc[int'(wb_m[c])*C+c] + wb_val[c];
+          // Write.
+          if (wb2_v[c]) acc[int'(wb2_m[c])*C+c] <= wb2_sum[c];
+        end
         if (core_start) begin
           running <= 1'b1;
           loading <= 1'b1;
           blk <= '0;
           nblk <= cd.tk / R;
           t <= '0;
-          tstream <= cd.tm + 32'(R + C) - 32'd1;
+          tstream <= TW'(cd.tm + 32'(R + C));
         end else if (running) begin
           if (loading) begin
             for (int c = 0; c < int'(C); c++)
               wq[int'(t[RI-1:0])*C+c] <= (32'(c) < cd.tn) ?
-                  w_at(32'(c), blk * R + t) : 8'sd0;
-            if (t + 1 == 32'(R)) begin
+                  w_at(32'(c), blk * R + 32'(t)) : 8'sd0;
+            if (32'(t) + 1 == 32'(R)) begin
               loading <= 1'b0;
               t <= '0;
               tbase <= a_base;
-            end else t <= t + 1;
+            end else t <= t + TW'(1);
           end else begin
             for (int r = 0; r < int'(R); r++)
               for (int c = 0; c < int'(C); c++) begin
                 logic signed [7:0] ain;
-                ain = (c == 0) ? feed[r] : aq[r*C+c-1];
+                ain = (c == 0) ? feed_q[r] : aq[r*C+c-1];
                 aq[r*C+c] <= ain;
                 pq[r*C+c] <= ((r == 0) ? 32'sd0 : pq[(r-1)*C+c]) + 32'(mul8(ain, wq[r*C+c]));
               end
             for (int c = 0; c < int'(C); c++) begin
               logic [31:0] m;
-              m = t - 32'(R) - 32'(c);
-              if (t >= 32'(R + c) && m < cd.tm)
-                acc[int'(m[$clog2(ACC_ROWS)-1:0])*C+c] <= (cd.first_k && blk == 0) ? pq[(R-1)*C+c]
-                    : acc[int'(m[$clog2(ACC_ROWS)-1:0])*C+c] + pq[(R-1)*C+c];
+              m = 32'(t) - 32'(R) - 32'(c) - 32'd1;
+              wb_v[c] <= 32'(t) >= 32'(R + c + 1) && m < cd.tm;
+              wb_first[c] <= cd.first_k && blk == 0;
+              wb_m[c] <= m[AI-1:0];
+              wb_val[c] <= pq[(R-1)*C+c];
             end
             tbase <= tbase + a_stride;
-            if (t + 1 == tstream) begin
+            if (t + TW'(1) == tstream) begin
               t <= '0;
               if (blk + 1 == nblk) running <= 1'b0;
               else begin
                 blk <= blk + 1;
                 loading <= 1'b1;
               end
-            end else t <= t + 1;
+            end else t <= t + TW'(1);
           end
         end
       end
@@ -868,8 +991,12 @@ module chipleap_accel #(
     logic signed [7:0] aq[R*C];
     logic signed [7:0] wq[R*C];
     logic signed [31:0] pacc[R*C];
+    // Both edge feeds are registered before they enter the array, so the buffer reads, the
+    // weight unpacking and their address arithmetic are not in series with a multiply-add.
     logic signed [7:0] afeed[R];
     logic signed [7:0] wfeed[C];
+    logic signed [7:0] afeed_q[R];
+    logic signed [7:0] wfeed_q[C];
 
     always_comb begin
       for (int r = 0; r < int'(R); r++) begin
@@ -888,6 +1015,16 @@ module chipleap_accel #(
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
+        for (int r = 0; r < int'(R); r++) afeed_q[r] <= '0;
+        for (int c = 0; c < int'(C); c++) wfeed_q[c] <= '0;
+      end else begin
+        for (int r = 0; r < int'(R); r++) afeed_q[r] <= afeed[r];
+        for (int c = 0; c < int'(C); c++) wfeed_q[c] <= wfeed[c];
+      end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
         running <= 1'b0;
         t <= '0;
         tend <= '0;
@@ -901,13 +1038,13 @@ module chipleap_accel #(
         if (core_start) begin
           running <= 1'b1;
           t <= '0;
-          tend <= cd.tk + 32'(R + C) - 32'd2;
+          tend <= cd.tk + 32'(R + C) - 32'd1;
         end else if (running) begin
           for (int r = 0; r < int'(R); r++)
             for (int c = 0; c < int'(C); c++) begin
               logic signed [7:0] ain, win;
-              ain = (c == 0) ? afeed[r] : aq[r*C+c-1];
-              win = (r == 0) ? wfeed[c] : wq[(r-1)*C+c];
+              ain = (c == 0) ? afeed_q[r] : aq[r*C+c-1];
+              win = (r == 0) ? wfeed_q[c] : wq[(r-1)*C+c];
               aq[r*C+c] <= ain;
               wq[r*C+c] <= win;
               pacc[r*C+c] <= pacc[r*C+c] + 32'(mul8(ain, win));
@@ -937,7 +1074,13 @@ module chipleap_accel #(
   // Store engine: write the output tile through the write port
   // ---------------------------------------------------------------------------
   logic st_active, st_issued;
-  logic [31:0] st_i, st_j, st_rowaddr;
+  // Row and column within the output tile: at most TM_MAX x TN, so the counters and their
+  // compares are as narrow as that.
+  localparam int unsigned STI = $clog2(TM_MAX + 1);
+  localparam int unsigned STJ = $clog2(TN + 1);
+  logic [STI-1:0] st_i;
+  logic [STJ-1:0] st_j;
+  logic [31:0] st_rowaddr;
   logic [OSTW+3:0] st_out;
   logic st_pend;
   logic [31:0] st_paddr, st_pdata;
@@ -974,15 +1117,15 @@ module chipleap_accel #(
           st_active <= 1'b0;
         end else if (!st_issued && (!st_pend || g)) begin
           st_pend <= 1'b1;
-          st_paddr <= st_rowaddr + (st_j << 2);
+          st_paddr <= st_rowaddr + (32'(st_j) << 2);
           st_pdata <= acc_out[int'(st_i[TMI-1:0])*TN+int'(st_j[TNI-1:0])];
-          if (st_j + 1 == cd.tn) begin
+          if (st_j + STJ'(1) == STJ'(cd.tn)) begin
             st_j <= '0;
             st_rowaddr <= st_rowaddr + (cfg_n << 2);
-            if (st_i + 1 == cd.tm) st_issued <= 1'b1;
-            else st_i <= st_i + 1;
+            if (st_i + STI'(1) == STI'(cd.tm)) st_issued <= 1'b1;
+            else st_i <= st_i + STI'(1);
           end else begin
-            st_j <= st_j + 1;
+            st_j <= st_j + STJ'(1);
           end
         end else if (g) begin
           st_pend <= 1'b0;

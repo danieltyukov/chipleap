@@ -58,10 +58,10 @@ The constants below are read off the generated controller's state machines.
 | Phase | Cycles |
 |---|---|
 | Load stage per tile | 3 (`L_NEXT`, `L_W`, `L_PUSH`), plus 1 (`L_X`) when activations load |
-| One DMA transfer | `ceil(bytes / bytes_per_cycle) + latency + 2` |
-| GEMV core, one tile | `tm * tk / cols + 2` |
-| Weight-stationary core | `(tk / rows) * (2 * rows + tm + cols - 1) + 1` |
-| Output-stationary core | `tk + rows + cols - 1` |
+| One DMA read | `ceil(bytes / bytes_per_cycle) + latency + 3`, one of them a setup cycle |
+| GEMV core, one tile | `tm * tk / cols + 3` |
+| Weight-stationary core | `(tk / rows) * (2 * rows + tm + cols) + 1` |
+| Output-stationary core | `tk + rows + cols` |
 | Core stage overhead | 2 (`C_IDLE`, `C_FREE`) |
 | Storing an output tile | `1 + ceil(4 * tm * tn / bytes_per_cycle) + latency + 2` |
 | End of job | 1 |
@@ -97,7 +97,7 @@ On-chip SRAM holds, in order: firmware (32 KiB unless the spec says otherwise), 
 - data does not fit and there is no external memory, or it exceeds the memory's capacity times its channels;
 - the external memory is read-only (flash) and the KV cache or activations would have to live there;
 - external data exceeds the 2 GiB window a 32-bit X-HEEP can map;
-- the clock exceeds the node's practical maximum;
+- the clock exceeds the node's practical maximum, or on IHP SG13G2 what the routed accelerator meets at the slow corner (see the calibration below);
 - the memory interface needs a PHY that no one has built at that node, or faster I/O than the node's pads manage (serial memories are clocked down to the pads instead).
 
 ## Energy
@@ -118,7 +118,7 @@ Core area, excluding pads:
 - CPU: kGE x NAND2 area / 0.7 placement utilisation.
 - SoC logic: 110 kGE for X-HEEP's debug module, DMA, boot ROM, power manager, timers, interrupt controllers and peripherals, plus the bus (8 kGE one-to-many, 0.6 kGE per master and slave pair for NtoM).
 - SRAM: each bank from the largest macros available, as `macros x periphery + KiB x array`.
-- Accelerator logic: `accel_logic_kge`, fitted to Yosys synthesis of the generated RTL on SG13G2 (below): 28.8 kGE of control, registers and store engine, 2.2 kGE per OBI port, and per dataflow a cost per MAC plus a cost per lane, column or array edge. Weight width does not enter, because the PEs multiply 8 x 8 and only the unpacking depends on it.
+- Accelerator logic: `accel_logic_kge`, fitted to Yosys synthesis of the generated RTL on SG13G2 (below): 30.5 kGE of control, registers and store engine, 0.3 kGE per OBI port, and per dataflow a cost per MAC plus a cost per lane, column or array edge. Weight width does not enter, because the PEs multiply 8 x 8 and only the unpacking depends on it.
 - Accelerator buffers: SRAM macros.
 - AXI4 adapter (standalone platform only): 0.54 kGE, synthesized on SG13G2 with the core as a black box; the same for 1 to 16 ports, because the read ports are wiring. With it, the accelerator is what `Evaluation.ip_area` reports as the generated IP; every other entry is the host system the model assumes (docs/platforms.md).
 - Memory interface: PHY area (LPDDR only, scaled linearly from 28 nm) plus controller logic.
@@ -138,8 +138,8 @@ Where the IHP SG13G2 numbers come from (`scripts/calibrate_sg13g2.py` re-measure
 
 - NAND2 area 7.2576 um2 and leakage: `sg13g2_nand2_1` in `sg13g2_stdcell_typ_1p20V_25C.lib`.
 - SRAM: the `RM_IHPSG13_1P_*` macro liberty files. Area is `0.0362 mm2 + 0.02846 mm2 per KiB` per macro, within 2 % for the 64-bit macros from 512 B to 16 KiB and for the 32 KiB 8192x32 macro (1520 um x 618 um). Energy depends on the access width. A wide (64-bit) read costs 15.3 pJ per byte at 16 KiB, scaling with size to the power 0.4, within 10 % of every 64-bit macro; accelerator buffers use this. X-HEEP's banks are 32 bits wide, and a narrow access pays the periphery for fewer bits: `6.5 pJ x KiB^0.6` per byte fits the 1, 2 and 32 KiB 32-bit macros within 12 %, so a 32 KiB bank costs about 52 pJ per byte.
-- Accelerator logic, from Yosys and ABC (mapped, buffered and sized) against the same library, over 11 configurations of the generated RTL: all three dataflows, one to four ports, 8 to 64 MACs. Per MAC: 1.21 kGE for GEMV (multiplier and adder tree), 2.05 kGE weight-stationary, 1.67 kGE output-stationary; per GEMV lane 3.63 kGE (eight 32-bit accumulators), per weight-stationary column 0.87 kGE, per output-stationary row or column 0.98 kGE. Leave-one-out error: 3.8 % on average, 10 % at worst (the four-port GEMV, an extrapolation in ports).
-- Clock: 100 MHz, in line with ETH Zurich's open-flow IHP chips (Croc/MLEM at 80 MHz typical, Basilisk at 64 to 77 MHz).
+- Accelerator logic, from Yosys and ABC (mapped, buffered and sized for a 5 ns target) against the same library, over 12 configurations of the generated RTL: all three dataflows, one to four ports, 8 to 64 MACs. Per MAC: 0.96 kGE for GEMV (multiplier and adder tree), 1.91 kGE weight-stationary, 1.67 kGE output-stationary; per GEMV lane 2.91 kGE (operand registers and accumulators), per weight-stationary column 1.65 kGE, per output-stationary row or column 0.81 kGE; 26.7 kGE of control and 2.3 kGE per port. Leave-one-out error: 2.9 % on average, 8.4 % at worst. `scripts/calibrate_sg13g2.py` repeats the fit.
+- Clock: 100 MHz, in line with ETH Zurich's open-flow IHP chips (Croc/MLEM at 80 MHz typical, Basilisk at 64 to 77 MHz). The accelerator is also held to what it closes timing at after routing with LibreLane, at the slow corner (1.08 V, 125 C). With one port, the routed GEMV 1 x 8, weight-stationary 4 x 4 and output-stationary 4 x 4 engines met 100 MHz at 9.2 to 9.5 ns, so their period is taken as 9.53 ns. A synthesized datapath longer than the GEMV 1 x 8's (4.17 ns, from wider GEMV adder trees) stretches that period in proportion. More ports cost 1.95 ns each, a line through the routed GEMV 4 x 8 with two ports (10.13 ns) and GEMV 2 x 8 with four (14.02 ns), where the DMA, handing words to its ports one after another, sets the period. The period the model allows is never shorter than a routed one; [verification.md](verification.md#place-and-route) lists the runs.
 - I/O: 155 MT/s, which on a byte-wide HyperBus at 80 % efficiency is the 124 MB/s Basilisk measured on silicon (Hot Chips 2025 poster).
 - MAC and CPU energies: scaled from Horowitz (below), because the PDK gives no switching energy for logic without activity data.
 

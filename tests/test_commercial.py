@@ -275,10 +275,10 @@ def test_simulator_output_with_a_transcript_prefix_parses():
     cases = [Case(1, 64, 3, 8, seed=1)]
     line = (
         '# {"m":1,"k":64,"n":3,"fmt":8,"stall":0,"latency":1,"tm":1,"tn":1,"tk":64,'
-        '"x_resident":1,"cycles":104,"wall":106,"mismatches":0,"ok":true}'
+        '"x_resident":1,"cycles":109,"wall":111,"mismatches":0,"ok":true}'
     )
     (r,) = hdlsim.parse(ACCEL, cases, "noise\n" + line + "\n# done\n")
-    assert r.ok and r.cycles == 104 and r.predicted == pytest.approx(104)
+    assert r.ok and r.cycles == 109 and r.predicted == pytest.approx(109)
     with pytest.raises(hdlsim.SimError, match="0 results"):
         hdlsim.parse(ACCEL, cases, "# nothing here\n")
 

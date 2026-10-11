@@ -24,12 +24,16 @@ from pathlib import Path
 
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
+from chipleap.hw.tech import FLOP_OVERHEAD_NS
 from chipleap.verify.tools import ihp_liberty, yosys
 
 SMALL_WORDS = (8, 16)
-# Clock-to-Q plus setup of the SG13G2 flip-flop (sg13g2_dfrbpq_1, typical corner), added
-# to ABC's combinational delay to estimate the clock period.
-FLOP_OVERHEAD_NS = 0.45
+# Mapping and gate sizing aim at this delay at the typical corner. Routing and the slow
+# corner (1.08 V, 125 C) roughly double a synthesized path on SG13G2 (LibreLane, measured),
+# so 5 ns here is the 100 MHz the model allows on the node, signed off at the slow corner.
+# Without a target ABC sizes every gate for the shortest path it can reach, and short-path
+# designs come out up to a fifth larger than they need to be.
+TARGET_NS = 5.0
 
 
 class SynthError(RuntimeError):
@@ -70,6 +74,7 @@ def _run(
     params: dict[str, int],
     liberty: Path,
     workdir: Path,
+    target_ns: float = TARGET_NS,
 ) -> tuple[float, int, int, float]:
     chparams = " ".join(f"-set {k} {v}" for k, v in params.items())
     # Map, buffer, size and time in one ABC call: once the logic is mapped to liberty cells,
@@ -83,11 +88,12 @@ def _run(
             "&get -n; &dch -f; &nf; &put"
         )
     else:
-        mapping = "strash; dretime; map"
+        mapping = f"strash; dretime; map -D {target_ns * 1000:.0f}"
     # ABC's buffering needs a timed, topologically sorted network (without the first stime
     # it crashes), and the network must be re-sorted after sizing before it is written out.
-    # The last stime reports the buffered critical path.
-    mapping += "; topo; stime -p; buffer -p; upsize; dnsize; topo; stime -p"
+    # The last stime reports the buffered critical path, sized for the target delay.
+    d = f"-D {target_ns * 1000:.0f}"
+    mapping += f"; topo; stime -p; buffer -p; upsize {d}; dnsize {d}; topo; stime -p"
     abc_script = workdir / "map.abc"
     abc_script.write_text(mapping.replace("; ", "\n") + "\n")
     script = [

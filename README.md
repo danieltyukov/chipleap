@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/danieltyukov/chipleap/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/danieltyukov/chipleap/ci.yml?branch=main&label=CI" alt="CI status"></a>
-  <a href="https://github.com/danieltyukov/chipleap/releases"><img src="https://img.shields.io/github/v/release/danieltyukov/chipleap" alt="Latest release"></a>
+  <a href="https://pypi.org/project/chipleap/"><img src="https://img.shields.io/pypi/v/chipleap" alt="PyPI version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/python-%3E%3D3.10-brightgreen" alt="Python 3.10 or newer">
 </p>
@@ -40,7 +40,7 @@ You describe a workload (say, Llama 3.2 1B decoding), a target (5 tokens per sec
 ## Quick start
 
 ```sh
-uv tool install git+https://github.com/danieltyukov/chipleap
+pip install chipleap                # or: uv tool install chipleap
 chipleap init llama.yaml            # an example spec to edit
 chipleap explore llama.yaml -o out  # decisions, Pareto front and the hardware in out/
 chipleap verify out                 # simulate, synthesize and check it
@@ -48,7 +48,7 @@ chipleap verify out                 # simulate, synthesize and check it
 
 Open `out/report.html` to see each decision, the Pareto front and where the time goes.
 
-<p align="center"><img src="docs/img/report.png" alt="The HTML report: the recommended design, the Pareto front of 2,153 evaluated designs and the agent's progress toward the target" width="560"></p>
+<p align="center"><img src="docs/img/report.png" alt="The HTML report: the recommended design, the Pareto front of 2,154 evaluated designs and the agent's progress toward the target" width="560"></p>
 
 ## Ask your AI assistant
 
@@ -74,13 +74,13 @@ Every tool is optional. `chipleap doctor` lists what it found, and `chipleap ver
 
 <img src="docs/img/layout.jpg" alt="The routed layout of the 1 x 8 GEMV engine on IHP SG13G2, drawn from its GDS: signal wires on four metal layers under the power grid" width="300" align="right">
 
-`chipleap verify out --steps all` adds place and route with LibreLane, the open flow Tiny Tapeout uses for its IHP shuttles. The picture is the GDS it wrote for the SmolLM2 chip's 1 x 8 GEMV engine: a 0.81 mm² core with clean DRC, LVS and antenna checks, at about 120 MHz at the typical corner and 77 MHz at the slow one.
+`chipleap verify out --steps all` adds place and route with LibreLane, the open flow Tiny Tapeout uses for its IHP shuttles. The picture is the GDS it wrote for the SmolLM2 chip's 1 x 8 GEMV engine: a 0.80 mm² core with clean DRC, LVS and antenna checks that meets its 90 MHz clock at the slow corner, with room to spare (about 101 MHz, and 148 MHz at the typical one).
 
 The accelerator model is the same tile schedule the RTL runs, so it is checked against it:
 
 - **Cycles:** equal to simulation without memory stalls, within a few percent with random stalls, on Verilator, Xcelium, VCS and Questa alike.
-- **Area:** logic area within 4 % on average of synthesis on IHP SG13G2, across 11 configurations.
-- **Clock:** the model allows 100 MHz on that node, which the routed design meets at the typical corner.
+- **Area:** logic area within 3 % on average of synthesis on IHP SG13G2, across 12 configurations.
+- **Clock:** the model allows what the routed accelerator meets at the slow corner: 100 MHz with one port, less with more ports or a wider GEMV engine.
 
 The other nodes are scaled from published figures and say so. [docs/model.md](docs/model.md) lists every number and its source; [docs/verification.md](docs/verification.md) explains each check.
 

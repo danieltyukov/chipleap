@@ -15,6 +15,8 @@ def test_config_sets_parameters_and_clock():
     params = dict(p.split("=") for p in cfg["SYNTH_PARAMETERS"])
     assert params["ROWS"] == "1" and params["COLS"] == "8" and params["PORTS"] == "1"
     assert params["ABUF_WORDS"] == params["WBUF_WORDS"] == str(pnr.PNR_WORDS)
+    # Optimised for the corner it is signed off at.
+    assert cfg["DEFAULT_CORNER"].startswith("nom_slow") and cfg["RUN_POST_GRT_RESIZER_TIMING"]
 
 
 def test_metrics_take_the_worst_corner():

@@ -62,7 +62,7 @@ running Innovus by hand. The place-and-route step below runs it for you.
 ```text
 $ chipleap verify out --steps pnr --pnr-tool innovus --synth-tech ihp-sg13g2 \
     --remote eda-server --remote-setup "source /opt/eda/licences.sh; source /opt/eda/cadence/genus.sh; source /opt/eda/cadence/innovus.sh"
-pnr    PASS     Innovus: placed and routed on ihp-sg13g2: ... mm2 core at 60% utilisation, ... cells; 100 MHz met at the typical corner (about ... MHz), about ... MHz at the slow corner; DRC and connectivity clean
+pnr    PASS     Innovus: placed and routed on ihp-sg13g2: ... mm2 core at 60% utilisation, ... cells; 100 MHz met at the slow corner (about ... MHz, and about ... MHz at the typical one); DRC and connectivity clean
 ```
 
 `--pnr-tool innovus` is the commercial counterpart of the LibreLane step and reports the
@@ -80,8 +80,9 @@ Innovus:
 4. inserts the library's filler cells and checks connectivity against the netlist, the
    LEF design rules and process antennas.
 
-The step passes when the clock is met at the typical corner, hold is met at every corner
-and the three checks are clean, like the LibreLane step. It reports the core area,
+The step passes when the clock is met at the slowest corner given (the slow liberty, or the
+typical one when that is all there is), hold is met at every corner and the three checks
+are clean, like the LibreLane step. It reports the core area,
 utilisation, cell count, the clock reached at each corner, and the violations. Innovus
 extracts parasitics from the resistance and capacitance the LEF gives each layer, as no
 Quantus technology file is assumed. The work directory, `out/verify/innovus/`, keeps the

@@ -19,7 +19,7 @@ from chipleap.spec import Spec
 from chipleap.workload.llm import format_bits
 from chipleap.workload.ops import Workload
 
-FREQ_STEPS = (25, 50, 100, 150, 200, 300, 400, 600, 800, 1000, 1200)
+FREQ_STEPS = (25, 50, 75, 90, 100, 150, 200, 300, 400, 600, 800, 1000, 1200)
 ARRAY_STEPS = (1, 2, 4, 8, 16, 32, 64)
 
 
@@ -41,9 +41,25 @@ def _tech_order(spec: Spec) -> list[str]:
     return sorted(spec.techs, key=lambda k: -TECHNOLOGIES[k].node_nm)
 
 
-def _freq_limit(spec: Spec, tech: str) -> float:
-    limit = TECHNOLOGIES[tech].max_freq_mhz
+def _freq_limit(spec: Spec, tech: str, accel: Accel | None = None) -> float:
+    """The fastest clock allowed: the node's, the accelerator's measured timing where the
+    node has it, and the spec's."""
+    t = TECHNOLOGIES[tech]
+    limit = t.clock_limit_mhz(accel.dataflow, accel.cols, accel.ports) if accel else t.max_freq_mhz
     return min(limit, spec.max_freq_mhz) if spec.max_freq_mhz else limit
+
+
+def _within_clock(spec: Spec, design: Design) -> tuple[Design, str]:
+    """``design`` with its clock lowered to the largest step its accelerator closes timing
+    at, and a note for the decision log when that changed anything."""
+    limit = _freq_limit(spec, design.tech, design.accel)
+    if design.freq_mhz <= limit + 1e-9:
+        return design, ""
+    steps = [f for f in FREQ_STEPS if f <= limit]
+    freq = float(steps[-1]) if steps else limit
+    return design.with_(
+        freq_mhz=freq
+    ), f", clock {design.freq_mhz:g} -> {freq:g} MHz to close timing"
 
 
 def matmul_rows(workload: Workload) -> float:
@@ -88,11 +104,12 @@ def neighbours(spec: Spec, point: Point, workload: Workload) -> Iterator[Move]:
     d, wf = point.design, point.weights
 
     def mv(kind: str, label: str, why: str, design: Design, weights: str = wf) -> Move | None:
+        design, note = _within_clock(spec, design)
         if design == d and weights == wf:
             return None
         if not _valid(design):
             return None
-        return Move(kind, label, why, Point(design, weights))
+        return Move(kind, label + note, why, Point(design, weights))
 
     out: list[Move | None] = []
     add: Callable[..., None] = lambda *a, **k: out.append(mv(*a, **k))  # noqa: E731
@@ -183,7 +200,7 @@ def neighbours(spec: Spec, point: Point, workload: Workload) -> Iterator[Move]:
         )
 
     # Clock
-    limit = _freq_limit(spec, d.tech)
+    limit = _freq_limit(spec, d.tech, d.accel)
     ups = [f for f in FREQ_STEPS if d.freq_mhz < f <= limit]
     downs = [f for f in FREQ_STEPS if f < d.freq_mhz]
     if ups:
@@ -266,7 +283,9 @@ def neighbours(spec: Spec, point: Point, workload: Workload) -> Iterator[Move]:
         if other is None:
             continue
         t = TECHNOLOGIES[other]
-        freq = min(d.freq_mhz * (2 if direction == "newer" else 1), _freq_limit(spec, other))
+        freq = min(
+            d.freq_mhz * (2 if direction == "newer" else 1), _freq_limit(spec, other, d.accel)
+        )
         freq = max(f for f in FREQ_STEPS if f <= freq) if freq >= FREQ_STEPS[0] else freq
         mem = d.ext_mem
         if mem != NONE_KEY:

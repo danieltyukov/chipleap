@@ -56,9 +56,9 @@ def test_format_wider_than_pe_rejected():
 
 
 def test_compute_cycles_per_dataflow():
-    assert tile_compute_cycles(Accel("gemv", 8, 8), 1, 8, 64, True) == 64 // 8 + 2
-    assert tile_compute_cycles(Accel("ws", 4, 8), 2, 8, 8, False) == 2 * (4 + 2 + 4 + 8 - 1) + 1
-    assert tile_compute_cycles(Accel("os", 4, 8), 4, 8, 32, True) == 32 + 4 + 8 - 1
+    assert tile_compute_cycles(Accel("gemv", 8, 8), 1, 8, 64, True) == 64 // 8 + 3
+    assert tile_compute_cycles(Accel("ws", 4, 8), 2, 8, 8, False) == 2 * (4 + 2 + 4 + 8) + 1
+    assert tile_compute_cycles(Accel("os", 4, 8), 4, 8, 32, True) == 32 + 4 + 8
 
 
 def test_closed_form_matches_schedule():

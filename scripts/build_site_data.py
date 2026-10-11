@@ -408,14 +408,14 @@ def stats_html(rows: list[dict[str, Any]]) -> str:
         ),
     ]
     pr = next((r for r in rows if r["step"] == "pnr" and r["status"] == "pass"), {})
-    if pr.get("fmax_mhz"):
+    if pr.get("fmax_worst_mhz"):
         items.append(
             (
-                float(pr["fmax_mhz"]),
+                float(pr["fmax_worst_mhz"]),
                 0,
                 "",
                 "MHz",
-                "clock the routed accelerator reaches on IHP SG13G2",
+                "clock the routed accelerator reaches on IHP SG13G2 at the slow corner",
             )
         )
     elif synth.get("fmax_mhz_estimate"):
@@ -464,7 +464,7 @@ def verify_table(rows: list[dict[str, Any]]) -> str:
         '<tr><th scope="row">Model inputs</th><td><span class="ok">Tested</span> '
         "Parameter counts of all twelve LLM presets within 2% of their model cards. IHP "
         "SG13G2 SRAM area within 2% of the liberty data for every macro size. Accelerator "
-        "logic area within 4% on average of synthesis across 11 configurations. The C driver "
+        "logic area within 3% on average of synthesis across 12 configurations. The C driver "
         "plans the same tiles as the model on 6,000 random shapes.</td></tr>"
     )
     return (

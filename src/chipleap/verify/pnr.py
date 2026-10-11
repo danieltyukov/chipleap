@@ -96,6 +96,17 @@ def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
         "RUN_MAGIC_DRC": False,
         # Let the detailed router fix antenna violations with diodes, as a shuttle requires.
         "DRT_ANTENNA_REPAIR_ITERS": 5,
+        # Optimise where the design is signed off: gate sizing, buffering, the clock tree and
+        # the repair after global routing all work against the slow corner (1.08 V, 125 C),
+        # instead of LibreLane's default of the typical one. Hold is repaired at every corner.
+        "DEFAULT_CORNER": "nom_slow_1p08V_125C",
+        "RUN_POST_GRT_RESIZER_TIMING": True,
+        # Detailed routing took 0.7 to 1.6 ns of slack away from what global routing
+        # estimated, and nothing repairs timing after it, so the repairs aim well above zero.
+        "PL_RESIZER_SETUP_SLACK_MARGIN": 0.8,
+        "GRT_RESIZER_SETUP_SLACK_MARGIN": 1.6,
+        # IHP's KLayout rule deck is the slowest step; let it use several cores.
+        "KLAYOUT_DRC_THREADS": max(1, min(8, (os.cpu_count() or 2) // 2)),
     }
 
 
@@ -169,10 +180,16 @@ def place_and_route(accel: Accel, clock_mhz: float, workdir: Path) -> PnrResult:
             cmd, cwd=workdir, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True
         )
         try:
-            proc.wait(timeout=float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "5400")))
+            proc.wait(timeout=float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800")))
         except BaseException:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+            # SIGTERM first: a containerised LibreLane forwards it and stops its container,
+            # which a SIGKILL to the client would leave running.
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
             raise
     final = workdir / "runs" / tag / "final"
     metrics_file = final / "metrics.json"

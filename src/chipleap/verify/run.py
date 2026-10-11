@@ -205,17 +205,17 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         "buffer_words": pnr.PNR_WORDS,
         "gds": str(r.gds) if r.gds else None,
     }
-    # Like the model's clock limit for the node, timing is judged at the typical corner; the
-    # slow corner (1.08 V, 125 C) is reported beside it.
-    met = r.setup_slack_typ_ns >= 0 and r.hold_slack_ns >= 0
+    # Signed off where the model's clock limit for the node is measured: setup at the slow
+    # corner (1.08 V, 125 C), hold at every corner. The typical corner is reported beside it.
+    met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     checks = "DRC and LVS clean" if r.clean else f"{r.drc_errors} DRC and {r.lvs_errors} LVS errors"
     if r.antenna_nets:
         checks += f", {r.antenna_nets} antenna violations"
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
-        f"{'met' if met else 'missed'} at the typical corner (about {r.fmax_mhz:.0f} MHz), "
-        f"about {r.fmax_worst_mhz:.0f} MHz at the slow corner; {checks}"
+        f"{'met' if met else 'missed'} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
+        f"and about {r.fmax_mhz:.0f} MHz at the typical one); {checks}"
     )
     return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)
 
@@ -350,7 +350,9 @@ def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | No
         "antenna_nets": r.antenna_nets,
         "buffer_words": pnr.PNR_WORDS,
     }
-    met = r.setup_slack_typ_ns >= 0 and r.hold_slack_ns >= 0
+    # Setup is signed off at the slowest corner given (the slow liberty, when there is one),
+    # as in the LibreLane step; hold at every corner.
+    met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     checks = (
         "DRC and connectivity clean"
         if r.clean
@@ -359,15 +361,15 @@ def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | No
     if r.antenna_nets:
         checks += f", {r.antenna_nets} antenna violations"
     corner = (
-        f", about {r.fmax_worst_mhz:.0f} MHz at the slow corner"
+        f"at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz "
+        "at the typical one)"
         if r.setup_slack_ns != r.setup_slack_typ_ns
-        else ""
+        else f"at the typical corner (about {r.fmax_mhz:.0f} MHz)"
     )
     msg = (
         f"Innovus: placed and routed on {tech}: {r.core_um2 / 1e6:.3f} mm2 core at "
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
-        f"{'met' if met else 'missed'} at the typical corner (about {r.fmax_mhz:.0f} MHz)"
-        f"{corner}; {checks}"
+        f"{'met' if met else 'missed'} {corner}; {checks}"
     )
     return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)
 

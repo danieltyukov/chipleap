@@ -31,11 +31,12 @@ ACC_ROWS = 8
 # Fixed cycles of the generated controller, read off its state machines. A load stage is
 # L_NEXT, L_W and L_PUSH (plus L_X when activations load); a DMA transfer spends one cycle
 # allocating its first requests and one noticing it is done, on top of the response
-# latency; the core stage is C_IDLE and C_FREE around C_RUN; storing a tile adds C_STORE
+# latency (plus a setup cycle for reads); the core stage is C_IDLE and C_FREE around C_RUN; storing a tile adds C_STORE
 # and the same two DMA-style cycles; the job ends one cycle after the last tile frees.
 LOAD_FIXED = 3
 X_FIXED = 1
-DMA_FIXED = 2
+DMA_FIXED = 3  # a read transfer: setup, allocating the first requests, noticing it is done
+STORE_DMA_FIXED = 2  # the store engine has no setup cycle
 CORE_FIXED = 2
 STORE_FIXED = 3
 JOB_FIXED = 1
@@ -139,16 +140,18 @@ def tile_compute_cycles(accel: Accel, tm: int, tn: int, tk: int, last_k: bool) -
     """Cycles the core spends in C_RUN for one tile, as the generated RTL does."""
     r, c = accel.rows, accel.cols
     if accel.dataflow == "gemv":
-        # One cycle per activation row and chunk of ``cols`` along K, then one cycle to
-        # accumulate the last partial sum and one to report completion.
-        return tm * (tk // c) + 2
+        # One cycle per activation row and chunk of ``cols`` along K, then the pipeline
+        # drains (multiply, then accumulate the last partial sum) and reports completion.
+        return tm * (tk // c) + 3
     if accel.dataflow == "ws":
         # Per block of ``rows`` along K: load the weight rows (one per cycle), then stream
         # the tm activation rows through the skewed array until the last result leaves.
-        return (tk // r) * (r + tm + r + c - 1) + 1
+        # The activation feed is registered at the array edge, one more cycle per block.
+        return (tk // r) * (r + tm + r + c) + 1
     # os: stream tk steps through the skewed array plus the skew of both edges. Results
     # stay in the PEs; the store engine reads them directly.
-    return tk + r + c - 1
+    # Both edge feeds are registered, one more cycle.
+    return tk + r + c
 
 
 @dataclass(frozen=True)
@@ -336,7 +339,7 @@ def simulate_job(
                 run = tile_compute_cycles(accel, tm, tn, tk, last)
                 stage = CORE_FIXED + run
                 if last:
-                    stage += 1 + math.ceil(tm * tn * 4 / bw.y - 1e-9) + bw.lat_on + DMA_FIXED
+                    stage += 1 + math.ceil(tm * tn * 4 / bw.y - 1e-9) + bw.lat_on + STORE_DMA_FIXED
                 f = idle + stage - 1
                 free.append(f)
                 core_free = f

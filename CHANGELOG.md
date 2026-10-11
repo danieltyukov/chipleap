@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-11
+
+### Changed
+
+- Timing: the accelerator meets 100 MHz on IHP SG13G2 at the slow corner (1.08 V, 125 C) after routing with LibreLane, not only at the typical one: about 109 MHz for the GEMV 1 x 8 engine, 105 and 107 MHz for the 4 x 4 weight- and output-stationary arrays. The GEMV engine registers its operands before the multipliers, the weight- and output-stationary arrays register their edge feeds, the loader decides where the next tile goes a few cycles before it needs to, each DMA read spends its first cycle setting up its address and counts, the weight-stationary array reads an accumulator one cycle before it writes it back, and the loader decides whether another tile follows from the extent still to cover, with one compare. Each stage adds at most one cycle per tile or transfer, and the cycle model follows exactly.
+- The model caps the accelerator's clock on IHP SG13G2 at what it closes timing at after routing, at the slow corner: the period of the routed single-port designs, longer for a wider GEMV datapath, and a period that grows by 1.95 ns per port, fitted to routed GEMV engines with two and four ports (about 99 and 71 MHz). Designs above it are infeasible, and the explorer lowers the clock when a change of accelerator needs it. Clock steps now include 75 and 90 MHz.
+- Place and route: `verify --steps pnr` signs off setup at the slow corner. LibreLane's repairs aim for 0.8 ns of slack after placement and 1.6 ns after global routing, because detailed routing took up to 1.6 ns away and nothing repairs timing after it.
+- Synthesis sizes gates for a 5 ns target (the 100 MHz the node allows, signed off at the slow corner) instead of the shortest path ABC can reach, which had inflated short-path designs by up to a fifth. The accelerator area model is refitted to it over 12 configurations: 2.9 % leave-one-out error on average, 8.4 % at worst.
+- ChipLeap is on PyPI: `pip install chipleap`.
+
 ## [0.2.0] - 2026-10-10
 
 ### Added
@@ -38,6 +48,7 @@ First release.
 - MCP server with ten tools, a `design_chip` prompt and a spec reference, run logs and `chipleap replay`.
 - Website with a Blender render of a generated die and the agent's decisions animated to scale.
 
-[Unreleased]: https://github.com/danieltyukov/chipleap/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/danieltyukov/chipleap/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/danieltyukov/chipleap/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/danieltyukov/chipleap/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/danieltyukov/chipleap/releases/tag/v0.1.0

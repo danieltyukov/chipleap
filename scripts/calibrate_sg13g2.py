@@ -39,6 +39,7 @@ ACCEL_CONFIGS = [
     ("ws", 8, 8, 2),
     ("os", 2, 8, 1),
     ("os", 4, 4, 1),
+    ("os", 4, 8, 1),
     ("os", 8, 8, 2),
 ]
 TERMS = ["base", "port", "gemv mac", "gemv lane", "ws mac", "ws column", "os mac", "os edge"]

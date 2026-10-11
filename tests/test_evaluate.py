@@ -112,3 +112,19 @@ def test_requirements_derate_serial_memories_like_the_evaluator():
     assert not next(m for m in req.memories if m.key == "lpddr4-x16").channels_by_node.get(
         "ihp-sg13g2"
     )
+
+
+def test_ihp_clock_above_the_accelerators_timing_is_a_violation(smol):
+    fast = Design(
+        tech="ihp-sg13g2",
+        freq_mhz=100,
+        bus="NtoM",
+        il_banks=4,
+        ext_mem="octal-psram",
+        ext_channels=2,
+        accel=Accel("gemv", 2, 8, 8, ports=4, abuf_kib=2, wbuf_kib=2),
+    )
+    ev = evaluate(smol, fast)
+    assert any("closes timing" in v for v in ev.violations)
+    slow = evaluate(smol, fast.with_(freq_mhz=50))
+    assert not any("closes timing" in v for v in slow.violations)

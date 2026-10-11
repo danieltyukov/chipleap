@@ -48,8 +48,8 @@ def test_accel_area_grows_with_the_array():
         small = accel_logic_kge(df, 2, 8, 1)
         assert accel_logic_kge(df, 4, 8, 1) > small
         assert accel_logic_kge(df, 2, 8, 2) > small
-    # Synthesized on SG13G2: a 1 x 8 GEMV engine with one port is 43.3 kGE.
-    assert abs(accel_logic_kge("gemv", 1, 8, 1) - 43.3) / 43.3 < 0.03
+    # Synthesized on SG13G2 for the 5 ns target: a 1 x 8 GEMV engine with one port is 39.4 kGE.
+    assert abs(accel_logic_kge("gemv", 1, 8, 1) - 39.4) / 39.4 < 0.03
 
 
 def test_memory_availability():
@@ -83,3 +83,15 @@ def test_design_roundtrip():
     assert Design.from_dict(d.to_dict()) == d
     with pytest.raises(DesignError, match="unknown design fields"):
         Design.from_dict({**d.to_dict(), "colour": "red"})
+
+
+def test_accel_clock_limit_follows_ports_and_width():
+    from chipleap.hw.tech import accel_signoff_mhz, get_tech
+
+    one, two, four = (accel_signoff_mhz("gemv", 8, p) for p in (1, 2, 4))
+    assert one >= two > four
+    assert accel_signoff_mhz("gemv", 16, 1) < accel_signoff_mhz("gemv", 8, 1)
+    ihp, g28 = get_tech("ihp-sg13g2"), get_tech("generic-28nm")
+    assert ihp.clock_limit_mhz("gemv", 8, 4) < ihp.max_freq_mhz
+    # Only the node the timing was measured on is capped by it.
+    assert g28.clock_limit_mhz("gemv", 8, 4) == g28.max_freq_mhz

@@ -443,6 +443,15 @@ def evaluate(
             f"{design.freq_mhz:g} MHz is above the {tech.max_freq_mhz:g} MHz practical at "
             f"{tech.name}"
         )
+    elif design.accel and tech.accel_timing:
+        a = design.accel
+        limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports)
+        if design.freq_mhz > limit + 1e-9:
+            violations.add(
+                f"the {a.dataflow} {a.rows}x{a.cols} accelerator with {a.ports} port"
+                f"{'s' if a.ports > 1 else ''} closes timing at about {limit:.0f} MHz on "
+                f"{tech.name} after routing, at the slow corner"
+            )
     if mem is not None:
         if not mem.phy_exists(tech.node_nm):
             violations.add(

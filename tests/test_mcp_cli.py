@@ -12,7 +12,7 @@ SPEC = (EXAMPLES / "smollm2-135m-open-pdk.yaml").read_text()
 DESIGN = """
 name: t
 tech: ihp-sg13g2
-freq_mhz: 100
+freq_mhz: 90
 cpu: cv32e20
 bus: NtoM
 banks: 2
