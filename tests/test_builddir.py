@@ -5,7 +5,12 @@ A repository can ship ``build/`` (or ``build/pnr``, ``build/<tool>``, a bundle's
 step must then refuse with a clear error, and nothing outside may be deleted or written.
 A symlink further inside a work directory is removed before the step writes there."""
 
+import os
+import stat
+import sys
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -205,6 +210,193 @@ def test_only_a_directory_chipleap_made_is_emptied(tmp_path, home, mode):
     builddir.output_dir(out, empty=True)
     assert tree(home) == before
     assert [p.name for p in out.iterdir()] == [builddir.MARKER]
+
+
+# The path fallback, where the system has no descriptor-relative calls (Windows). It looks
+# at every entry with lstat just before using it and never enters a symlink, a junction or
+# any other reparse point.
+
+
+class JunctionOs:
+    """``os`` as builddir sees it on Windows when the tree holds directory junctions: lstat
+    reports one as a directory carrying the reparse-point attribute, and scandir as a
+    directory that is not a symlink, so neither os.path.islink nor DirEntry.is_symlink
+    gives it away. Here every symlink to a directory looks like that."""
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    @staticmethod
+    def lstat(path, *args, **kwargs):
+        st = os.lstat(path, *args, **kwargs)
+        if not (stat.S_ISLNK(st.st_mode) and os.path.isdir(path)):
+            return st
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o755,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            st_ino=st.st_ino,
+            st_dev=st.st_dev,
+        )
+
+    @staticmethod
+    @contextmanager
+    def scandir(path):
+        with os.scandir(path) as it:
+            yield [JunctionEntry(e) for e in it]
+
+    @staticmethod
+    def rmdir(path, *args, **kwargs):
+        # Windows removes a junction itself with rmdir; the directory it leads to stays.
+        if os.path.islink(path):
+            return os.unlink(path)
+        return os.rmdir(path, *args, **kwargs)
+
+
+class JunctionEntry:
+    def __init__(self, entry):
+        self.name, self.path = entry.name, entry.path
+        self._entry = entry
+        self._junction = entry.is_symlink() and entry.is_dir()
+
+    def is_symlink(self):
+        return self._entry.is_symlink() and not self._junction
+
+    def is_dir(self, *, follow_symlinks=True):
+        return self._junction or self._entry.is_dir(follow_symlinks=follow_symlinks)
+
+
+@pytest.fixture
+def junctions(monkeypatch):
+    monkeypatch.setattr(builddir, "_FD", False)
+    monkeypatch.setattr(builddir, "os", JunctionOs())
+
+
+def test_a_reparse_point_counts_as_a_link():
+    def st(mode, attributes=None):
+        if attributes is None:  # as on Linux and macOS, where there is no such field
+            return SimpleNamespace(st_mode=mode)
+        return SimpleNamespace(st_mode=mode, st_file_attributes=attributes)
+
+    directory = stat.S_IFDIR | 0o755
+    reparse = stat.FILE_ATTRIBUTE_REPARSE_POINT | stat.FILE_ATTRIBUTE_DIRECTORY
+    assert builddir._link(st(directory)) == ""
+    assert builddir._link(st(directory, stat.FILE_ATTRIBUTE_DIRECTORY)) == ""
+    assert builddir._link(st(stat.S_IFREG | 0o644, 0)) == ""
+    assert builddir._link(st(stat.S_IFLNK | 0o777)) == "a symlink"
+    assert builddir._link(st(directory, reparse)) == "a junction or another reparse point"
+    assert builddir._link(st(stat.S_IFREG | 0o644, stat.FILE_ATTRIBUTE_REPARSE_POINT))
+    with pytest.raises(BuildDirError, match="x is a junction or another reparse point"):
+        builddir._refuse(Path("x"), st(directory, reparse), directory=True)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_the_path_fallback_never_enters_a_junction_inside(tmp_path, home, junctions, empty):
+    w = tmp_path / "build/pnr"
+    (w / "runs").mkdir(parents=True)
+    (w / "runs/metrics.json").write_text("{}\n")
+    link(w / "src", home)
+    link(w / "runs/final", home / "pnr")
+    before = tree(home)
+    builddir.work_dir(tmp_path, "build", "pnr", empty=empty)
+    assert tree(home) == before
+    assert not os.path.lexists(w / "src") and not os.path.lexists(w / "runs/final")
+    assert tree(w) == ({} if empty else {"runs": "/", "runs/metrics.json": "{}\n"})
+
+
+@pytest.mark.parametrize("at", ["build", "build/pnr", "build/pnr/src"])
+def test_the_path_fallback_refuses_a_junction_on_the_way(tmp_path, home, junctions, at):
+    link(tmp_path / at, home)
+    before = tree(home)
+    with pytest.raises(BuildDirError, match=f"{at} is a junction or another reparse point"):
+        builddir.work_dir(tmp_path, "build", "pnr", "src", empty=True)
+    assert tree(home) == before
+
+
+def test_the_path_fallback_refuses_a_junction_as_output(tmp_path, home, junctions):
+    link(tmp_path / "out", home)
+    link(tmp_path / "bundle/sw", home)
+    before = tree(home)
+    with pytest.raises(BuildDirError, match="out is a junction"):
+        builddir.output_dir(tmp_path / "out", empty=True)
+    with pytest.raises(BuildDirError, match="sw is a junction"):
+        builddir.write_text(tmp_path / "bundle", "sw/driver.h", "text\n")
+    assert tree(home) == before
+
+
+def test_the_path_fallback_stops_when_a_directory_is_swapped_while_it_empties(
+    tmp_path, home, monkeypatch
+):
+    """A race: a directory inside the work directory becomes a symlink after ChipLeap
+    looked at it and before it goes in. The fallback looks again before it lists or
+    removes anything there, so it stops instead of emptying the home directory."""
+    monkeypatch.setattr(builddir, "_FD", False)
+    w = tmp_path / "build/sim"
+    (w / "sim_build").mkdir(parents=True)
+    (w / "sim_build/x.o").write_text("x")
+
+    class SwappingOs:
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def lstat(path, *args, **kwargs):
+            st = os.lstat(path, *args, **kwargs)
+            if Path(path).name == "sim_build" and not (tmp_path / "moved").exists():
+                (w / "sim_build").rename(tmp_path / "moved")
+                link(w / "sim_build", home)
+            return st
+
+    monkeypatch.setattr(builddir, "os", SwappingOs())
+    before = tree(home)
+    with pytest.raises(BuildDirError, match="sim_build changed while ChipLeap was emptying it"):
+        builddir.work_dir(tmp_path, "build", "sim", empty=True)
+    assert tree(home) == before
+
+
+def test_the_path_fallback_stops_when_the_tree_moves_outside_while_it_empties(
+    tmp_path, home, monkeypatch
+):
+    """A race: ``build`` moves into the home directory, and a symlink to it takes its place,
+    while ChipLeap empties ``build/sim``. Each directory is still the one ChipLeap saw,
+    but it no longer leads to a place inside the work directory, so ChipLeap stops before
+    it removes one."""
+    monkeypatch.setattr(builddir, "_FD", False)
+    w = tmp_path / "build/sim"
+    (w / "sim_build").mkdir(parents=True)
+    (w / "sim_build/x.o").write_text("x")
+    moved = home / "build"
+
+    class MovingOs:
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def unlink(path, *args, **kwargs):
+            os.unlink(path, *args, **kwargs)
+            if not moved.exists():
+                (tmp_path / "build").rename(moved)
+                link(tmp_path / "build", moved)
+
+    monkeypatch.setattr(builddir, "os", MovingOs())
+    with pytest.raises(BuildDirError, match="sim_build changed while ChipLeap was emptying it"):
+        builddir.work_dir(tmp_path, "build", "sim", empty=True)
+    assert (moved / "sim/sim_build").is_dir()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions exist only on Windows")
+def test_a_real_junction_is_never_entered(tmp_path, home):  # pragma: no cover - Windows
+    import _winapi
+
+    w = tmp_path / "build/pnr"
+    w.mkdir(parents=True)
+    _winapi.CreateJunction(str(home), str(w / "src"))
+    before = tree(home)
+    builddir.work_dir(tmp_path, "build", "pnr", empty=True)
+    assert tree(home) == before and not os.path.lexists(w / "src")
+    _winapi.CreateJunction(str(home), str(tmp_path / "out"))
+    with pytest.raises(BuildDirError, match="out is a junction"):
+        builddir.output_dir(tmp_path / "out", empty=True)
+    assert tree(home) == before
 
 
 # Every step of an RTL project.
