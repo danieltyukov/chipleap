@@ -18,6 +18,7 @@ constraints' and a difference over 1 % is reported.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import os
@@ -178,7 +179,7 @@ def gate_level_run(
         except ET.ParseError as exc:
             raise PowerError(f"the gate-level results are not valid XML: {exc}") from None
     error = "" if outcome.get("stage") == "done" else str(outcome.get("error", "no outcome"))
-    return GateRun(
+    run = GateRun(
         netlist=netlist,
         routed=routed,
         tests=tests,
@@ -186,6 +187,40 @@ def gate_level_run(
         scope=scope,
         error=error,
     )
+    if run.vcd is not None:
+        (work / ACTIVITY_MARKER).write_text(_activity_key(project, netlist))
+    return run
+
+
+ACTIVITY_MARKER = "activity.sha256"
+
+
+def _activity_key(project: Project, netlist: Path) -> str:
+    """What a VCD depends on: the netlist, the project's files (its tests) and the scope."""
+    h = hashlib.sha256(netlist.read_bytes())
+    h.update(project.inputs_digest().encode())
+    h.update(project.power.scope.encode())
+    return h.hexdigest()
+
+
+def activity(
+    project: Project, netlist: Path, views: PdkViews, routed: bool
+) -> tuple[Path, str] | None:
+    """A VCD of the tests on ``netlist`` and its scope: the power step's when it was made
+    from this netlist and these tests, else a new gate-level run; None when the tests
+    cannot run here."""
+    work = (project.build_dir / "power").resolve()
+    gl = work / "gl"
+    marker = gl / ACTIVITY_MARKER
+    scope = project.power.scope or project.tests.toplevel
+    fresh = marker.is_file() and (gl / VCD_NAME).is_file()
+    if fresh and marker.read_text() == _activity_key(project, netlist):
+        return gl / VCD_NAME, scope
+    try:
+        run = gate_level_run(project, netlist, views, work, routed)
+    except OpenroadUnavailable:
+        return None
+    return (run.vcd, run.scope) if run.vcd is not None else None
 
 
 def vcd_clock_period_ns(vcd: Path, scope: str, clock: str) -> float | None:
