@@ -60,7 +60,9 @@ For a design the user wrote (an RTL project with a project.yaml, see the
 chipleap://project-reference resource): describe_project checks the project file;
 lint_rtl, simulate_rtl, coverage_rtl and synthesize_rtl return structured diagnostics
 (file, line, severity, message, failing test) to fix the RTL in a loop; verify_rtl runs
-the steps and writes the report, place and route included when asked for."""
+the steps and writes the report, place and route included when asked for.
+simulate_rtl, coverage_rtl and verify_rtl run the project's cocotb tests and golden
+model, which are code: use them only on projects the user trusts."""
 
 SPEC_REFERENCE = """# ChipLeap spec reference
 
@@ -148,8 +150,10 @@ PROJECT_REFERENCE = """# ChipLeap project reference (project.yaml)
 A project describes RTL someone wrote. Paths are relative to the project file and must
 stay inside its directory (the user can allow others; a project file cannot). Names are
 identifiers without $, parameter values integers, define values short literals. An
-`include names a quoted relative file without "..". Simulation runs the project's cocotb
-tests and golden model, which are code: only for projects the user trusts.
+`include names a quoted relative file without "..", and a $readmemh file given as a
+string must be inside the project. On Linux, lint and Yosys synthesis read only the
+project and their own files (Landlock). Simulation runs the project's cocotb tests and
+golden model, which are code: only for projects the user trusts.
 
 ```yaml
 schema: project/v1
@@ -799,7 +803,8 @@ def build_server(log_dir: str | None = None) -> Any:
         description="Run an RTL project's cocotb tests (Icarus or Verilator; Xcelium, VCS "
         "or Questa where the user configured them). Returns every test's status and, for "
         "failures, the message and the file and line that failed, plus compile errors as "
-        "diagnostics. tests: a regular expression selecting test names."
+        "diagnostics. tests: a regular expression selecting test names. Runs the project's "
+        "tests and golden model, which are code: only for projects the user trusts."
     )
     def simulate_rtl(project: str, tests: str = "", simulator: str = "") -> dict[str, Any]:
         return logged("simulate_rtl", TOOLS["simulate_rtl"])(
@@ -809,7 +814,8 @@ def build_server(log_dir: str | None = None) -> Any:
     @server.tool(
         description="Code coverage of an RTL project's design from its cocotb tests on "
         "Verilator: line, branch and toggle totals per file, and up to limit points the "
-        "tests never reached (file, line, kind, name), to write the tests that reach them."
+        "tests never reached (file, line, kind, name), to write the tests that reach them. "
+        "Runs the project's tests, which are code: only for projects the user trusts."
     )
     def coverage_rtl(project: str, limit: int = 50) -> dict[str, Any]:
         return logged("coverage_rtl", TOOLS["coverage_rtl"])(project=project, limit=limit)
@@ -825,7 +831,8 @@ def build_server(log_dir: str | None = None) -> Any:
     @server.tool(
         description="Verify an RTL project and write build/verify/report.html. Steps: "
         "lint,sim,coverage,synth by default; add pnr (LibreLane place and route on IHP "
-        "SG13G2, minutes) or use all. Tools run where the user configured them."
+        "SG13G2, minutes) or use all. Tools run where the user configured them. Runs the "
+        "project's tests and golden model, which are code: only for projects the user trusts."
     )
     def verify_rtl(
         project: str,
