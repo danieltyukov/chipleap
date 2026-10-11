@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Place and route: at `CHIPLEAP_PNR_TIMEOUT` (3 h by default), on Ctrl-C, SIGTERM or SIGHUP, and when the MCP server cancels a `verify_soc` call or shuts down, ChipLeap now stops LibreLane's container as well. It used to stop only the `docker` client, so the container went on routing to the end, and a cancelled MCP call or a server shutdown stopped nothing. The run's containers are recognised by a label of their own, and no other container is touched. A run that times out fails the step with the limit in its summary instead of ending `chipleap verify` with a traceback, and a second run in the same work directory fails at once instead of overwriting the first. LibreLane no longer inherits ChipLeap's standard input: a containerised run switched the terminal to raw mode through it, so Ctrl-C never reached ChipLeap, and under the MCP server it could read the client's requests.
+
 ## [0.3.0] - 2026-10-11
 
 ### Changed

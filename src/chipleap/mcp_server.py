@@ -9,10 +9,12 @@ generate and verify the SoC. Every tool is deterministic for the same inputs, an
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -560,6 +562,7 @@ def build_server(log_dir: str | None = None) -> Any:
         "technology key to map to. Commercial tools run where the user configured them "
         "(here, or on the server in the user's CHIPLEAP_REMOTE)."
     )
+    @_stops_its_runs
     def verify_soc(
         out_dir: str,
         steps: str = "consistency,lint,sim,synth,xheep",
@@ -612,5 +615,33 @@ def build_server(log_dir: str | None = None) -> Any:
     return server
 
 
+def _stops_its_runs(fn: Callable[..., dict[str, Any]]) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """A blocking tool that runs in a worker thread, and whose LibreLane runs stop when the
+    call is cancelled or the server shuts down. A plain blocking tool would keep its
+    thread, and LibreLane, going for hours after either."""
+    from chipleap.verify import launch
+
+    @functools.wraps(fn)
+    async def call(**kwargs: Any) -> dict[str, Any]:
+        import anyio
+
+        stop = threading.Event()
+
+        def work() -> dict[str, Any]:
+            with launch.stop_when(stop):
+                return fn(**kwargs)
+
+        try:
+            return await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
+        finally:
+            stop.set()
+
+    return call
+
+
 def main(log_dir: str | None = None) -> None:
-    build_server(log_dir).run("stdio")
+    from chipleap.verify import launch
+
+    # SIGTERM, SIGHUP and the end of the session stop every LibreLane run in progress.
+    with launch.stop_on_exit():
+        build_server(log_dir).run("stdio")
