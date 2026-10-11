@@ -393,12 +393,9 @@ def run_tests(
     if run.stage != "build" and results.is_file():
         run.tests = parse_results(results.read_text(errors="replace"), project, staged)
     if run.stage == "build":
-        log = (
-            (work / "build.log").read_text(errors="replace")
-            if (work / "build.log").is_file()
-            else ""
-        )
-        diags = PARSERS[key](log) if key in PARSERS else []
+        build_log = work / "build.log"
+        text = build_log.read_text(errors="replace") if build_log.is_file() else ""
+        diags = PARSERS[key](text) if key in PARSERS else []
         diags = [d for d in diags if d.severity == "error"] or [
             Diagnostic(key, "error", f"the build failed: {run.error}")
         ]
@@ -407,14 +404,15 @@ def run_tests(
         run.diagnostics.append(
             Diagnostic("cocotb", "error", t.message, t.file, t.line, 0, "", t.full_name)
         )
-    if run.stage == "done" and not run.tests:
-        run.diagnostics.append(
-            Diagnostic(
-                "cocotb",
-                "error",
-                "no test results: " + (_tail(work / "test.log", 3) or "the simulator wrote none"),
-            )
-        )
+    if run.stage != "build" and not run.tests:
+        # The simulator stopped before cocotb wrote results: an elaboration error, a missing
+        # licence, a crash. Its own messages say which.
+        test_log = work / "test.log"
+        text = test_log.read_text(errors="replace") if test_log.is_file() else ""
+        found = [d for d in (PARSERS[key](text) if key in PARSERS else []) if d.severity == "error"]
+        run.diagnostics += relative(found, project.root, {"src": ""} if staged else None) or [
+            Diagnostic("cocotb", "error", "no test results: " + (_tail(test_log, 3) or "no log"))
+        ]
     return run
 
 
@@ -441,7 +439,8 @@ def summarize(run: SimRun) -> tuple[str, str]:
         first = run.diagnostics[0] if run.diagnostics else None
         return "fail", f"{who}: the design does not build" + (f": {first}" if first else "")
     if not run.tests:
-        return "fail", f"{who}: no test results ({run.error or 'see the test log'})"
+        first = run.diagnostics[0] if run.diagnostics else None
+        return "fail", f"{who}: no test results" + (f": {first}" if first else "")
     n = len(run.tests)
     if run.failed:
         names = ", ".join(

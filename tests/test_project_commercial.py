@@ -109,3 +109,19 @@ def _ok():
     from chipleap.verify.result import StepResult
 
     return StepResult("x", "pass", "ok")
+
+
+def test_a_simulator_that_stops_early_says_why(project, monkeypatch):
+    def fake_run_steps(steps, workdir, remote, timeout):
+        (workdir / "outcome.json").write_text('{"stage": "test", "error": "exit 2"}')
+        (workdir / "test.log").write_text(
+            "xmsim: *F,NOLICN: Unable to checkout license for the simulation.\n"
+        )
+
+    monkeypatch.setattr(sim_mod, "run_steps", fake_run_steps)
+    r = sim_mod.simulate(project, "xcelium", Remote("server"))
+    assert r.status == "fail"
+    assert r.summary == (
+        "Xcelium: no test results: error: Unable to checkout license for the simulation. [NOLICN]"
+    )
+    assert r.data["diagnostics"][0]["code"] == "NOLICN"
