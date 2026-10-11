@@ -538,9 +538,14 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    from chipleap.mcp_server import replay
+    from chipleap.mcp_server import replay_calls
 
-    ok, total = replay(Path(args.log))
+    calls = replay_calls(Path(args.log))
+    total = len(calls)
+    ok = sum(c["outcome"] == "same" for c in calls)
+    for c in calls:
+        if c["outcome"] != "same":
+            print(f"  {c['tool']}({json.dumps(c['args'], sort_keys=True)}): {c['outcome']}")
     print(f"Replayed {total} calls: {ok} reproduced exactly, {total - ok} differ")
     return 0 if ok == total else 1
 
