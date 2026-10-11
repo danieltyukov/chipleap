@@ -241,6 +241,9 @@ def test_proposed_expressions_that_are_accepted(expr):
         ("a)) ; endmodule (", "';'"),
         ("a) || (b", "unbalanced"),
         ("#1 a", "'#'"),
+        # Verilog reads "(*" as the start of an attribute, not a parenthesis.
+        ("(* keep *) a", "attributes"),
+        ("a *) || (b", "attributes"),
         ("a = b", "'='"),
         ("", "empty"),
         ("a" * 401, "at most 400"),

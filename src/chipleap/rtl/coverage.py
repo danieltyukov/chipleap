@@ -160,7 +160,21 @@ def _summary_path(project: Project) -> Path:
     return project.build_dir / "coverage" / SUMMARY
 
 
+def _point(d: Any) -> bool:
+    """Whether ``d`` is an uncovered point as the coverage step writes it."""
+    return (
+        isinstance(d, dict)
+        and all(isinstance(d.get(k), str) for k in ("kind", "file", "name"))
+        and isinstance(d.get("line"), int)
+        and not isinstance(d.get("line"), bool)
+        and isinstance(d.get("hier", ""), str)
+    )
+
+
 def _last(project: Project) -> dict[str, Any] | None:
+    """The summary the last coverage run kept, or None. The file is in the project's
+    build directory, which a repository can ship, so anything not shaped as the step
+    writes it counts as no run."""
     path = _summary_path(project)
     if not path.is_file():
         return None
@@ -168,7 +182,14 @@ def _last(project: Project) -> dict[str, Any] | None:
         data = json.loads(project.read(path))
     except (ProjectError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    uncovered, kinds = data.get("uncovered"), data.get("kinds", {})
+    if not isinstance(uncovered, list) or not all(_point(d) for d in uncovered):
+        return None
+    if not isinstance(kinds, dict) or not isinstance(data.get("inputs_sha256", ""), str):
+        return None
+    return data
 
 
 def test_functions(project: Project) -> dict[str, list[str]]:

@@ -27,7 +27,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -131,12 +130,12 @@ def prepare(project: Project, workdir: Path) -> tuple[Project, tuple[str, ...], 
     """The project as the simulator sees it at gate level (cell models and the netlist
     copy as its sources, no parameters), the simulator options, and what was used."""
     netlist, sdf, corner = _netlist(project)
-    models = workdir / "cells"
-    models.mkdir(parents=True)
-    sources = []
-    for m in cell_models(project):  # the PDK's, trusted; copied so the run reads its own
-        shutil.copy2(m, models / m.name)
-        sources.append(models / m.name)
+    # The PDK's models, trusted, copied so the run reads its own; like every file here,
+    # written without following a symlink (builddir).
+    sources = [
+        builddir.write_bytes(workdir, f"cells/{m.name}", m.read_bytes())
+        for m in cell_models(project)
+    ]
     text = project.read(netlist).decode(errors="replace")
     args: tuple[str, ...] = ()
     if sdf is not None:
@@ -164,6 +163,7 @@ def gls(project: Project, test_filter: str = "") -> StepResult:
     tool = iverilog()
     if icarus_major(tool) < 13:
         found = f"Icarus {tool.version}" if tool.found else "no Icarus"
+        found += f" ({tool.note})" if tool.note else ""
         return StepResult(
             "gls",
             "skipped",

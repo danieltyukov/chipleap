@@ -147,3 +147,38 @@ def test_the_delays_reach_the_simulation(tmp_path):
     r = gls.gls(load_project(root))
     assert r.status == "fail" and r.data["failed"] > 0, r.summary
     assert r.data["sdf_messages"]["unreadable"] == []
+
+
+def test_every_file_of_the_gate_level_run_is_written_through_builddir(
+    counter_project, tmp_path, monkeypatch
+):
+    # The work directory was just emptied, but every file in it still goes through
+    # chipleap.rtl.builddir, which never writes through a symlink.
+    from chipleap.rtl import builddir
+
+    pdk = tmp_path / "pdk/verilog"
+    pdk.mkdir(parents=True)
+    for name in ("cells.v", "udp.v"):
+        (pdk / name).write_text(f"// {name}\n")
+    netlist = counter_project / "build/pnr/counter.nl.v"
+    netlist.parent.mkdir(parents=True)
+    netlist.write_text("module counter (clk_i);\n input clk_i;\nendmodule\n")
+    sdf = netlist.with_suffix(".sdf")
+    sdf.write_text("(DELAYFILE)\n")
+    monkeypatch.setattr(gls, "cell_models", lambda p: sorted(pdk.glob("*.v")))
+    monkeypatch.setattr(gls, "_netlist", lambda p: (netlist, sdf, "nom_typ_1p20V_25C"))
+    written: list[Path] = []
+    real = builddir.write_bytes
+
+    def spy(root, rel, data):
+        path = real(root, rel, data)
+        written.append(path)
+        return path
+
+    monkeypatch.setattr(builddir, "write_bytes", spy)
+    p = load_project(counter_project)
+    work = p.work_dir("gls", empty=True)
+    gate, _, _ = gls.prepare(p, work)
+    files = sorted(f for f in work.rglob("*") if f.is_file())
+    assert files == sorted(written) and len(files) == 4
+    assert {f.name for f in gate.sources} == {"cells.v", "udp.v", "counter.gls.v"}

@@ -869,7 +869,7 @@ def netlist(project: Project, workdir: Path) -> dict[str, Any]:
     """The project's top module as Yosys elaborates it, mapped to single-bit gates."""
     tool = yosys()
     if tool.path is None:
-        raise RuntimeError("Yosys is not installed")
+        raise RuntimeError(tool.missing("Yosys"))
     files, raw = prepare_verilog(project, workdir)
     out = workdir / "netlist.json"
     script = [
@@ -946,8 +946,8 @@ def check(project: Project) -> dict[str, Any]:
 @runs_tools
 def cdc(project: Project) -> StepResult:
     """The CDC and RDC step: fails on any error that is not waived."""
-    if not yosys().found:
-        return StepResult("cdc", "skipped", "Yosys is not installed")
+    if not (ys := yosys()).found:
+        return StepResult("cdc", "skipped", ys.missing("Yosys"))
     data = check(project)
     errors = [f for f in data["findings"] if f["severity"] == "error" and not f.get("waived")]
     doms = ", ".join(f"{d} ({n} flip-flops)" for d, n in data["domains"].items())

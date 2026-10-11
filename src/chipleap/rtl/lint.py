@@ -126,7 +126,7 @@ def lint(project: Project) -> StepResult:
     v, s = verilator(), slang()
     use_slang = project.lint.slang and s.found
     if not v.found and not use_slang:
-        return StepResult("lint", "skipped", "Verilator is not installed")
+        return StepResult("lint", "skipped", v.missing("Verilator"))
     diags: list[Diagnostic] = []
     names = []
     tools: dict[str, str] = {}

@@ -33,7 +33,7 @@ from chipleap.rtl import quote as q
 from chipleap.rtl.diag import Diagnostic, parse_sv2v, parse_yosys, relative
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import ihp_liberty, sv2v, yosys
+from chipleap.verify.tools import ihp_liberty, liberty_settings_problem, sv2v, yosys
 
 DEFAULT_PERIOD_NS = 10.0  # for designs without a clock
 _SEQ_CELL = re.compile(r"(?i)(^|_)(s?df|dl|lh|dff|latch)")
@@ -62,6 +62,16 @@ class RtlSynthResult:
     liberty: Path
     netlist: Path
     diagnostics: list[Diagnostic] = field(default_factory=list)
+
+
+def no_liberty(tech_key: str) -> str:
+    """Why there is no liberty for ``tech_key``, and what to do."""
+    if tech_key != "ihp-sg13g2":
+        return f"no liberty file for {tech_key}: add it with chipleap tech add --liberty, or use ihp-sg13g2"
+    why = liberty_settings_problem()
+    return f"no liberty file for {tech_key}: " + (
+        why or "install the open PDK or set CHIPLEAP_LIBERTY"
+    )
 
 
 def liberty_for(tech_key: str) -> Path | None:
@@ -174,15 +184,10 @@ def _script(
 def synthesize(project: Project, workdir: Path | None = None) -> RtlSynthResult:
     tool = yosys()
     if not tool.found or tool.path is None:
-        raise SynthUnavailable("Yosys is not installed")
+        raise SynthUnavailable(tool.missing("Yosys"))
     lib = liberty_for(project.tech)
     if lib is None:
-        hint = (
-            "install the open PDK or set CHIPLEAP_LIBERTY"
-            if project.tech == "ihp-sg13g2"
-            else "add it with chipleap tech add --liberty, or use ihp-sg13g2"
-        )
-        raise SynthUnavailable(f"no liberty file for {project.tech}: {hint}")
+        raise SynthUnavailable(no_liberty(project.tech))
     work = project.work_dir(workdir or "synth")
     files, raw = prepare_verilog(project, work)
     clk = project.fastest_clock

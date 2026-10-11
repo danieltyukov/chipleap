@@ -52,6 +52,7 @@ from chipleap.rtl.synth import (
     SynthError,
     front,
     liberty_for,
+    no_liberty,
     prepare_verilog,
     read_commands,
     synthesize,
@@ -286,11 +287,11 @@ def _first_error(log: str) -> str:
 def _run(cmd: list[str], cwd: Path, reads: list[Path]) -> str:
     """A confined run; returns its output. A timeout comes back as an error line."""
     timeout = float(os.environ.get("CHIPLEAP_EQUIV_TIMEOUT", "1800"))
-    with confine.confined(cmd, reads) as (argv, env):
+    with confine.confined(cmd, reads, solver_path(cmd[0], exclude=reads)) as (argv, env):
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
-            env={**env, "PATH": solver_path(cmd[0], exclude=reads)},
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -313,7 +314,7 @@ def _run(cmd: list[str], cwd: Path, reads: list[Path]) -> str:
 def _yosys(script: str, workdir: Path, name: str, reads: list[Path]) -> str:
     tool = yosys()
     if tool.path is None:
-        raise EquivUnavailable("Yosys is not installed")
+        raise EquivUnavailable(tool.missing("Yosys"))
     path = builddir.write_text(workdir, f"{name}.ys", script)
     out = _run([tool.path, "-q", "-l", f"{name}.log", path.name], workdir, reads)
     log = workdir / f"{name}.log"
@@ -330,9 +331,9 @@ def check_pair(project: Project, pair: str, *, gate_netlist: Path | None = None)
         return {**head, "status": "skipped", "reason": NO_ROUTED_RUN}
     liberty = liberty_for(project.tech)
     if liberty is None:
-        return {**head, "status": "skipped", "reason": f"no liberty file for {project.tech}"}
-    if engine == "eqy" and not eqy().found:
-        return {**head, "status": "skipped", "reason": "EQY is not installed (CHIPLEAP_EQY)"}
+        return {**head, "status": "skipped", "reason": no_liberty(project.tech)}
+    if engine == "eqy" and not (e := eqy()).found:
+        return {**head, "status": "skipped", "reason": e.missing("EQY (CHIPLEAP_EQY)")}
     workdir = project.work_dir(Path("equiv") / pair, empty=True)
     try:
         gold, gate = sides(project, pair, liberty.resolve(), workdir, gate_netlist, engine)
@@ -412,8 +413,8 @@ def _describe(r: dict[str, Any]) -> str:
 def equiv(project: Project, only: str = "") -> StepResult:
     """The equivalence step: every pair proved or equal from reset, else the first that
     differs, with its counterexample."""
-    if not yosys().found:
-        return StepResult("equiv", "skipped", "Yosys is not installed")
+    if not (ys := yosys()).found:
+        return StepResult("equiv", "skipped", ys.missing("Yosys"))
     pairs = [only] if only else _pairs(project)
     results = [check_pair(project, p) for p in pairs]
     data = {"tool": "EQY" if project.equivalence.engine == "eqy" else "Yosys", "pairs": results}

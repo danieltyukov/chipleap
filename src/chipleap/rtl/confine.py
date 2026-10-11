@@ -150,7 +150,7 @@ def _interpreter(exe: Path, path: str | None = None) -> str | None:
 
 @contextlib.contextmanager
 def confined(
-    cmd: Sequence[str], read: Iterable[Path]
+    cmd: Sequence[str], read: Iterable[Path], path: str | None = None
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """The command to run ``cmd`` with, and its environment, so that it can read only
     ``read`` (files or directories), the system and its own installation. TMPDIR points
@@ -158,11 +158,13 @@ def confined(
     Landlock is not available, CHIPLEAP_CONFINE is 0 or the tool is a container wrapper.
     Either way the environment's PATH has no relative entry and nothing inside ``read``
     (``chipleap.verify.tools.clean_env``): the tool runs in the project or its build
-    directory, and what it starts by name must not come from there."""
+    directory, and what it starts by name must not come from there. ``path`` is the PATH
+    to start from instead of this process's (a solver's directory first, say); the
+    interpreter of a script tool is looked up on the same PATH it will run with."""
     from chipleap.verify.tools import clean_env, is_wrapper
 
     read = list(read)
-    env = clean_env(exclude=read)
+    env = clean_env(exclude=read, base={**os.environ, **({"PATH": path} if path else {})})
     if not enabled() or is_wrapper(cmd[0]):
         yield list(cmd), env
         return

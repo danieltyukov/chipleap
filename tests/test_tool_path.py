@@ -8,8 +8,10 @@ starts the simulator, a ``#!/usr/bin/env python3`` script starts Python). So too
 found only in absolute directories outside the project, and every program ChipLeap
 starts gets a PATH made of those alone."""
 
+import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -165,3 +167,96 @@ def test_a_step_runs_the_real_tools_or_skips(hostile, step):
     ran = sentinel.read_text() if sentinel.exists() else ""
     assert not ran, f"{step} ran a planted program: {ran}"
     assert r.status in ("pass", "skipped"), (r.status, r.summary)
+
+
+def test_run_logs_probe_tool_versions_outside_the_project(hostile):
+    # With a log directory, every project call records the tool versions. Those probes run
+    # as a step finds its tools (never from the project) and from an empty directory, so
+    # "python -c 'import cocotb'" cannot import a cocotb package the project ships, even
+    # when the server runs in the project.
+    from chipleap import mcp_server
+
+    root, sentinel = hostile
+    (root / "cocotb").mkdir()
+    (root / "cocotb/__init__.py").write_text(
+        f"open({str(sentinel)!r}, 'a').write('cocotb from the project\\n')\n__version__ = '0'\n"
+    )
+    context = mcp_server.project_context(str(root))
+    assert context["inputs_sha256"] and "verilator" in context["tools"]
+    assert sim_mod.cocotb_version(sys.executable) != "0"
+    assert not sentinel.exists(), sentinel.read_text()
+
+
+def test_an_empty_path_falls_back_to_the_system_directories(monkeypatch):
+    # An empty PATH would make a program started by name (ssh, rsync) resolve in its
+    # working directory.
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "bin"]))
+    path = tools.clean_env()["PATH"]
+    assert path == os.defpath and all(os.path.isabs(e) for e in path.split(os.pathsep))
+    assert tools.which("sh") in ("/bin/sh", "/usr/bin/sh")
+
+
+def test_a_tool_found_only_in_the_project_says_so(hostile, monkeypatch):
+    root, sentinel = hostile
+    # Only the project's own directories and relative entries are on the path; the
+    # system's default directories, which ChipLeap falls back to, hold no sby.
+    monkeypatch.setenv("PATH", os.pathsep.join([".", str(root / "abs-bin")]))
+    monkeypatch.delenv("CHIPLEAP_SBY", raising=False)
+    with tools.untrusted(root):
+        found = tools.sby()
+    assert not found.found and "inside the project" in found.note
+    r = run_step(load_project(root), "formal")
+    assert r.status == "skipped", r.summary
+    assert "SymbiYosys (sby) is not installed (the only sby found is" in r.summary
+    monkeypatch.setenv("CHIPLEAP_SBY", "bin/sby")
+    assert "CHIPLEAP_SBY is a relative path, bin/sby" in tools.sby().note
+    monkeypatch.setenv("CHIPLEAP_SBY", str(root / "sby"))
+    with tools.untrusted(root):
+        assert "inside the project" in tools.sby().note
+    assert not sentinel.exists()
+
+
+def test_directories_the_user_allowed_are_not_searched_for_tools(hostile, tmp_path, monkeypatch):
+    # Files from an --allow-path directory come from elsewhere too: a step leaves it out
+    # of the path as it leaves out the project.
+    root, sentinel = hostile
+    shared = tmp_path / "shared-ip"
+    plant(shared / "bin", sentinel)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(shared / "bin"), os.environ["PATH"]]))
+    p = load_project(root, allow=[shared])
+    for step in ("lint", "synth"):
+        r = run_step(p, step)
+        assert r.status in ("pass", "skipped"), r.summary
+    assert not sentinel.exists(), sentinel.read_text()
+
+
+def test_relative_liberty_settings_are_refused_with_the_reason(monkeypatch, tmp_path):
+    from chipleap.rtl.synth import no_liberty
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cells.lib").write_text("library (x) {}\n")
+    monkeypatch.setenv("CHIPLEAP_LIBERTY", "cells.lib")
+    assert tools.ihp_liberty() is None
+    assert "CHIPLEAP_LIBERTY is a relative path, cells.lib" in no_liberty("ihp-sg13g2")
+    monkeypatch.delenv("CHIPLEAP_LIBERTY")
+    monkeypatch.setenv("PDK_ROOT", "pdk")
+    assert "PDK_ROOT is a relative path, pdk" in tools.liberty_settings_problem()
+
+
+@pytest.mark.skipif(not confine.enabled(), reason="Landlock is not available")
+def test_a_confined_script_reads_the_interpreter_on_the_path_it_runs_with(tmp_path):
+    # SymbiYosys runs with its own directory first on PATH; its "#!/usr/bin/env python3"
+    # resolves there, so that interpreter's installation must be readable.
+    tool_dir, py_dir = tmp_path / "tool/bin", tmp_path / "py/bin"
+    tool_dir.mkdir(parents=True)
+    py_dir.mkdir(parents=True)
+    script = tool_dir / "sby"
+    script.write_text("#!/usr/bin/env fakepython\n")
+    script.chmod(0o755)
+    (py_dir / "fakepython").write_text("#!/bin/sh\n")
+    (py_dir / "fakepython").chmod(0o755)
+    path = os.pathsep.join([str(py_dir), "/usr/bin", "/bin"])
+    with confine.confined([str(script)], [tmp_path / "project"], path) as (argv, env):
+        rules = json.loads(argv[argv.index("--") - 1])
+    assert env["PATH"].split(os.pathsep)[0] == str(py_dir)
+    assert str(py_dir) in rules or str(py_dir.parent) in rules

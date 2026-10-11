@@ -35,7 +35,7 @@ from chipleap.rtl import quote as q
 from chipleap.rtl.project import FormalCheck, Project, ProjectError, active_low_by_name, runs_tools
 from chipleap.rtl.vcd import read_trace
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import sby, solver_path
+from chipleap.verify.tools import Tool, sby, solver_path
 
 INSTALL_HINT = "scripts/install_formal_tools.sh, then CHIPLEAP_SBY"
 # "summary:   failed assertion fifo.p at /x/fifo.sv:40.5-40.63 in step 2"
@@ -89,6 +89,10 @@ def sby_text(
             "",
         ]
     )
+
+
+def _no_sby(tool: Tool) -> str:
+    return f"{tool.missing('SymbiYosys (sby)')}: {INSTALL_HINT}"
 
 
 def _location(project: Project, file: str, line: str) -> tuple[str, int]:
@@ -186,11 +190,11 @@ def _run(cmd: list[str], cwd: Path, project: Project, workdir: Path) -> str:
     """Run SymbiYosys confined; returns its output. A timeout is an error in the output."""
     timeout = float(os.environ.get("CHIPLEAP_FORMAL_TIMEOUT", "1800"))
     reads = [*project.roots, workdir]
-    with confine.confined(cmd, reads) as (argv, env):
+    with confine.confined(cmd, reads, solver_path(cmd[0], exclude=reads)) as (argv, env):
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
-            env={**env, "PATH": solver_path(cmd[0], exclude=reads)},
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -237,7 +241,7 @@ def run_check(
     in for the project's sources and formal sources (proposed assertions use it)."""
     tool = sby()
     if tool.path is None:
-        raise RuntimeError(f"SymbiYosys (sby) is not installed: {INSTALL_HINT}")
+        raise RuntimeError(_no_sby(tool))
     srcs = files if files is not None else _sources(project)
     text = sby_text(project, check, srcs, includes=includes, after=after)
     config = builddir.write_text(workdir, f"{check.name}.sby", text)
@@ -266,7 +270,7 @@ def run_sby_file(project: Project, path: Path, workdir: Path) -> dict[str, Any]:
     relative to it). The work directory is ChipLeap's."""
     tool = sby()
     if tool.path is None:
-        raise RuntimeError(f"SymbiYosys (sby) is not installed: {INSTALL_HINT}")
+        raise RuntimeError(_no_sby(tool))
     name = f"sby_{path.stem}"
     dest = workdir / name
     out = _run([tool.path, "-f", "-d", str(dest), str(path)], path.parent, project, workdir)
@@ -330,8 +334,8 @@ def formal(project: Project, only: str = "") -> StepResult:
     """The formal step: every check passes, or the first failure with its counterexample."""
     if project.formal is None:
         return StepResult("formal", "skipped", "the project has no formal section")
-    if not sby().found:
-        return StepResult("formal", "skipped", f"SymbiYosys (sby) is not installed: {INSTALL_HINT}")
+    if not (tool := sby()).found:
+        return StepResult("formal", "skipped", _no_sby(tool))
     results = prove(project, only)
     bad = [r for r in results if r["status"] != "pass"]
     data = {
@@ -384,6 +388,10 @@ def check_expression(expr: str) -> str:
         raise ValueError(f"an expression is at most {EXPR_MAX} characters")
     if "//" in expr or "/*" in expr:
         raise ValueError("comments are not allowed in an expression")
+    if "(*" in expr or "*)" in expr:
+        # Verilog reads "(*" as the start of an attribute, which the bracket count
+        # below would see as a parenthesis.
+        raise ValueError("attributes, '(*' and '*)', are not allowed in an expression")
     for ch in ';"`#@\\':
         if ch in expr:
             raise ValueError(f"{ch!r} is not allowed in an expression")
@@ -529,8 +537,8 @@ def check_assertions(
     known = {r.port: r for r in project.resets}
     low = known[rst].active_low if rst in known else active_low_by_name(rst)
     original, text = _defining_file(project, module)
-    if sby().path is None:
-        raise RuntimeError(f"SymbiYosys (sby) is not installed: {INSTALL_HINT}")
+    if (tool := sby()).path is None:
+        raise RuntimeError(_no_sby(tool))
     workdir = project.work_dir(Path("formal") / "proposed", empty=True)
     # Only the proposals are checked: the design's own assertions and covers go.
     keep = ["chformal -assert -cover -remove t:$assert t:$cover %u n:chipleap_* %d"]

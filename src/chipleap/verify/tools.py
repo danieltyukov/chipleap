@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -19,10 +20,17 @@ class Tool:
     path: str | None
     version: str
     purpose: str
+    # Why a tool that seems to be there is not used: a relative CHIPLEAP_<TOOL>, or a copy
+    # found only where ChipLeap does not run tools from.
+    note: str = ""
 
     @property
     def found(self) -> bool:
         return self.path is not None
+
+    def missing(self, label: str) -> str:
+        """``label is not installed``, with the reason a copy that is there was not used."""
+        return f"{label} is not installed" + (f" ({self.note})" if self.note else "")
 
 
 # Directories no tool may come from in this context: the project a step runs on (see
@@ -75,13 +83,20 @@ def which(name: str, exclude: Iterable[str | Path] = (), path: str | None = None
     if os.sep in name or (os.altsep and os.altsep in name):
         found = shutil.which(name) if os.path.isabs(name) else None
     else:
-        found = shutil.which(name, path=search_path(exclude, path))
+        found = shutil.which(name, path=_usable_path(exclude, path))
     # shutil.which tries the current directory first on Windows; never take that.
     if found is None or not os.path.isabs(found):
         return None
     if any(Path(os.path.realpath(found)).is_relative_to(b) for b in _banned(exclude)):
         return None
     return found
+
+
+def _usable_path(exclude: Iterable[str | Path], path: str | None) -> str:
+    """``search_path``, or the system's default directories when nothing is left: an empty
+    PATH would make a program started by name resolve in its working directory."""
+    exclude = list(exclude)
+    return search_path(exclude, path) or search_path(exclude, os.defpath)
 
 
 def clean_env(
@@ -98,16 +113,31 @@ def clean_env(
     exclude = list(exclude)
     env = dict(os.environ if base is None else base)
     first = search_path(exclude, os.pathsep.join(str(d) for d in prepend))
-    rest = search_path(exclude, env.get("PATH", os.defpath))
+    rest = _usable_path(exclude, env.get("PATH", os.defpath))
     env["PATH"] = os.pathsep.join(p for p in (first, rest) if p)
     return env
 
 
+def probe(cmd: list[str], timeout: float = 20) -> subprocess.CompletedProcess[str]:
+    """Run a short query of a tool (its version, where its Python is) in an empty
+    directory of its own: run in a project, ``python -c "import cocotb"`` would import a
+    ``cocotb`` package the project ships, since Python looks in the current directory
+    first."""
+    with tempfile.TemporaryDirectory(prefix="chipleap-probe-") as empty:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            cwd=empty,
+            env=clean_env(exclude=[empty]),
+        )
+
+
 def _version(cmd: list[str], pattern: str) -> str:
     try:
-        out = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=20, check=False, env=clean_env()
-        )
+        out = probe(cmd)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     m = re.search(pattern, out.stdout + out.stderr)
@@ -128,19 +158,36 @@ def is_wrapper(path: str) -> bool:
 def locate(name: str, env: str | None = None) -> str | None:
     """Where the program ``name`` is: the absolute path the variable ``env`` names, else
     ``which(name)``. A variable that holds a bare name is looked up the same way; one
-    that holds a relative path is ignored, as ``which`` ignores it."""
+    that holds a relative path is not used (``located`` says why)."""
+    return located(name, env)[0]
+
+
+def located(name: str, env: str | None = None) -> tuple[str | None, str]:
+    """``locate``, and when it finds nothing although something is there, why."""
     given = os.environ.get(env, "") if env else ""
-    if not given:
-        return which(name)
-    return which(given) if os.path.isabs(given) or os.sep not in given else None
+    if given and not os.path.isabs(given) and os.sep in given:
+        return None, f"{env} is a relative path, {given}; give an absolute one"
+    path = which(given or name)
+    if path is not None:
+        return path, ""
+    if given and os.path.isabs(given) and shutil.which(given):
+        return None, f"{env} names {given}, inside the project, where ChipLeap runs no tools"
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        copy = Path(entry or os.curdir) / (given or name)
+        if copy.is_file() and os.access(copy, os.X_OK):
+            return None, (
+                f"the only {copy.name} found is {copy}, from a PATH entry ChipLeap does not "
+                "run tools from: relative, or inside the project"
+            )
+    return None, ""
 
 
 def find(
     name: str, version_args: list[str], pattern: str, purpose: str, env: str | None = None
 ) -> Tool:
-    path = locate(name, env)
+    path, note = located(name, env)
     if path is None:
-        return Tool(name, None, "", purpose)
+        return Tool(name, None, "", purpose, note)
     if is_wrapper(path):
         return Tool(name, path, "container wrapper", purpose)
     return Tool(name, path, _version([path, *version_args], pattern), purpose)
@@ -296,14 +343,30 @@ def commercial() -> list[Tool]:
     return [Tool(n, which(n), "", purpose) for n, purpose in COMMERCIAL]
 
 
+def liberty_settings_problem() -> str:
+    """What is wrong with CHIPLEAP_LIBERTY or PDK_ROOT, if anything: a relative path would
+    be read from wherever ChipLeap runs, which may be a project, so neither is used."""
+    for var in ("CHIPLEAP_LIBERTY", "PDK_ROOT"):
+        value = os.environ.get(var, "")
+        if value and not os.path.isabs(value):
+            return f"{var} is a relative path, {value}; give an absolute one"
+    lib = os.environ.get("CHIPLEAP_LIBERTY", "")
+    if lib and not Path(lib).is_file():
+        return f"CHIPLEAP_LIBERTY names {lib}, which is not a file"
+    return ""
+
+
 def ihp_liberty() -> Path | None:
-    """The IHP SG13G2 typical-corner standard-cell library, if a PDK is installed."""
+    """The IHP SG13G2 typical-corner standard-cell library, if a PDK is installed.
+    CHIPLEAP_LIBERTY and PDK_ROOT count only as absolute paths
+    (``liberty_settings_problem``)."""
     candidates = []
     env = os.environ.get("CHIPLEAP_LIBERTY")
     if env:
-        return Path(env) if Path(env).is_file() else None
+        return Path(env) if os.path.isabs(env) and Path(env).is_file() else None
+    pdk_root = os.environ.get("PDK_ROOT", "")
     roots = [
-        os.environ.get("PDK_ROOT", ""),
+        pdk_root if os.path.isabs(pdk_root) else "",
         str(Path.home() / ".volare"),
         str(Path.home() / ".ciel"),
         str(Path.home() / ".local/share/pdk"),

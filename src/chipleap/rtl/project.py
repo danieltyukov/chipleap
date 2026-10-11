@@ -410,13 +410,14 @@ def runs_tools(
     fn: Callable[Concatenate[Project, _P], _R],
 ) -> Callable[Concatenate[Project, _P], _R]:
     """For a step on the project in its first argument: while it runs, no tool is found
-    in the project's directory, and no program it starts gets a PATH entry into it
-    (``chipleap.verify.tools.untrusted``). A repository can ship executables named like
-    the tools, and an absolute PATH entry can lead into it as a relative one does."""
+    in the project's directory or a directory the user allowed files from, and no program
+    it starts gets a PATH entry into one (``chipleap.verify.tools.untrusted``). A
+    repository can ship executables named like the tools, and an absolute PATH entry can
+    lead into it as a relative one does."""
 
     @functools.wraps(fn)
     def step(project: Project, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
-        with untrusted(project.root):
+        with untrusted(*project.roots):
             return fn(project, *args, **kwargs)
 
     return step
@@ -1097,7 +1098,7 @@ def _parse_cdc(value: Any, clocks: tuple[Clock, ...], resets: tuple[Reset, ...])
         raise ProjectError("cdc.input_domains must map input ports to clock ports")
     for port, clock in domains.items():
         _ident(port, "cdc.input_domains: a port")
-        if clock not in clock_ports:
+        if not isinstance(clock, str) or clock not in clock_ports:
             raise ProjectError(f"cdc.input_domains.{port}: {clock} is not one of the clocks")
     synced = _str_list(c.get("reset_synchronized"), "cdc.reset_synchronized")
     for r in synced:

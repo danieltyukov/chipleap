@@ -190,3 +190,45 @@ def test_gaps_never_read_outside_the_project(counter_project, tmp_path):
     g = gaps(p)
     assert "TOP SECRET" not in json.dumps(g)
     assert g["gaps"][0]["source"] is None
+
+
+@pytest.mark.parametrize(
+    "kept",
+    [
+        {"uncovered": "x"},
+        [1],
+        {"uncovered": [1]},
+        {"uncovered": [{"kind": "line", "file": "rtl/counter.sv", "name": "b"}]},
+        {"uncovered": [{"kind": "line", "file": 3, "line": 1, "name": "b"}]},
+        {"uncovered": [], "kinds": []},
+    ],
+)
+def test_a_kept_summary_of_another_shape_counts_as_no_run(counter_project, monkeypatch, kept):
+    # build/ can come with the repository, so the kept summary is checked before use: a
+    # malformed one is no last run, for coverage_gaps and for the step, never a TypeError.
+    import json
+
+    from chipleap.rtl import coverage as cov
+    from chipleap.rtl.sim import SimRun, TestResult
+
+    p = load_project(counter_project)
+    path = p.build_dir / "coverage" / cov.SUMMARY
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(kept))
+    with pytest.raises(ValueError, match="run coverage first"):
+        cov.gaps(p)
+
+    def run_tests(project, simulator, *, coverage):
+        work = project.work_dir("coverage", empty=True)
+        src = str(counter_project / "rtl/counter.sv")
+        (work / "coverage.dat").write_text(
+            "# SystemC::Coverage-3\n" + entry(src, 9, "line", "block", 0) + "\n"
+        )
+        test = TestResult("counts", "test_counter", "pass", "", "", 0, 1.0)
+        return SimRun("verilator", "5.052", tests=[test], workdir=work)
+
+    monkeypatch.setattr(cov, "choose", lambda project, key: (key, ""))
+    monkeypatch.setattr(cov, "run_tests", run_tests)
+    r = coverage(p)
+    assert r.status == "pass" and "newly reached" not in r.summary, r.summary
+    assert cov.gaps(load_project(counter_project))["gaps_total"] == 1

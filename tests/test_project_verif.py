@@ -113,6 +113,9 @@ def test_an_empty_formal_section_proves_by_default(counter_project):
         ({"cdc": {"async_inputs": ["clk_i"]}}, "cdc.async_inputs: clk_i is a clock"),
         ({"cdc": {"async_inputs": ["a;b"]}}, "must be a Verilog identifier"),
         ({"cdc": {"input_domains": {"d": "clk_x"}}}, "cdc.input_domains.d: clk_x is not"),
+        # Not a name at all: refused as the others, not a TypeError from the lookup.
+        ({"cdc": {"input_domains": {"d": ["clk_i"]}}}, "cdc.input_domains.d: ['clk_i'] is not"),
+        ({"cdc": {"input_domains": {"d": {"clk_i": 1}}}}, "cdc.input_domains.d:"),
         ({"cdc": {"reset_synchronized": ["rst_x"]}}, "rst_x is not one of the resets"),
         ({"cdc": {"waive": [{"from": "a", "to": "b"}]}}, "cdc.waive[0] needs a reason"),
         ({"cdc": {"waive": [{"from": "a(", "to": "b", "reason": "r"}]}}, "cdc.waive[0].from"),

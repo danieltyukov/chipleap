@@ -636,15 +636,22 @@ def coverage_gaps(
 
 
 def check_tools() -> dict[str, Any]:
-    from chipleap.verify.tools import all_tools, commercial, ihp_liberty
+    from chipleap.verify.tools import all_tools, commercial, ihp_liberty, liberty_settings_problem
 
     lib = ihp_liberty()
     return {
         "tools": [
-            {"name": t.name, "found": t.found, "version": t.version, "used_for": t.purpose}
+            {
+                "name": t.name,
+                "found": t.found,
+                "version": t.version,
+                "used_for": t.purpose,
+                **({"note": t.note} if t.note else {}),
+            }
             for t in all_tools() + commercial()
         ],
         "ihp_sg13g2_liberty": str(lib) if lib else None,
+        **({"liberty_note": why} if (why := liberty_settings_problem()) else {}),
     }
 
 
@@ -714,19 +721,25 @@ PROJECT_TOOLS = {
 def project_context(project: str) -> dict[str, Any]:
     """The inputs digest and tool versions a project tool's result depends on."""
     from chipleap.rtl.sim import cocotb_python, cocotb_version
-    from chipleap.verify.tools import iverilog, slang, sv2v, verilator, yosys, z3
+    from chipleap.verify.tools import iverilog, slang, sv2v, untrusted, verilator, yosys, z3
 
     try:
-        digest = _project(project).inputs_digest()
+        p = _project(project)
+        digest, roots = p.inputs_digest(), p.roots
     except ToolError:
-        digest = None
-    py = cocotb_python()
-    # SymbiYosys and EQY built from a Yosys tag report no version; Yosys's stands for them.
-    tools: dict[str, str | None] = {
-        t.name: t.version if t.found else None
-        for t in (verilator(), slang(), iverilog(), yosys(), sv2v(), z3())
-    }
-    tools["cocotb"] = cocotb_version(py) if py else None
+        given = Path(project).expanduser().resolve()
+        digest, roots = None, (given if given.is_dir() else given.parent,)
+    # The versions are those of the tools a step on this project would run, found as a
+    # step finds them: never in the project (runs_tools).
+    with untrusted(*roots):
+        py = cocotb_python()
+        # SymbiYosys and EQY built from a Yosys tag report no version; Yosys's stands for
+        # them.
+        tools: dict[str, str | None] = {
+            t.name: t.version if t.found else None
+            for t in (verilator(), slang(), iverilog(), yosys(), sv2v(), z3())
+        }
+        tools["cocotb"] = cocotb_version(py) if py else None
     return {"inputs_sha256": digest, "tools": tools}
 
 

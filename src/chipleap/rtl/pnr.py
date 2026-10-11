@@ -197,8 +197,8 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
 def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     if project.tech != "ihp-sg13g2":
         raise PnrError(f"LibreLane runs on IHP SG13G2, not {project.tech}; use --pnr-tool innovus")
-    if not librelane().found:
-        raise PnrError("LibreLane is not installed")
+    if not (ll := librelane()).found:
+        raise PnrError(ll.missing("LibreLane"))
     work = project.work_dir(workdir or "pnr")
     cfg = config(project, work)
     metrics, gds = run_librelane(work, cfg)

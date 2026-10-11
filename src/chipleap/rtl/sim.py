@@ -31,7 +31,7 @@ from chipleap.rtl.diag import PARSERS, Diagnostic, relative
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import Tool, clean_env, iverilog, locate, verilator, which
+from chipleap.verify.tools import Tool, clean_env, iverilog, locate, probe, verilator, which
 
 OPEN = ("icarus", "verilator")
 COMMERCIAL = {"xcelium": "xrun", "vcs": "vcs", "questa": "vsim"}
@@ -105,14 +105,7 @@ def cocotb_python() -> str | None:
     cfg = which("cocotb-config")
     if cfg:
         try:
-            out = subprocess.run(
-                [cfg, "--python-bin"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-                env=clean_env(),
-            )
+            out = probe([cfg, "--python-bin"], timeout=30)
         except (OSError, subprocess.TimeoutExpired):
             return None
         py = out.stdout.strip()
@@ -122,14 +115,7 @@ def cocotb_python() -> str | None:
 
 def cocotb_version(python: str) -> str:
     try:
-        out = subprocess.run(
-            [python, "-c", "import cocotb; print(cocotb.__version__)"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-            env=clean_env(),
-        )
+        out = probe([python, "-c", "import cocotb; print(cocotb.__version__)"], timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return out.stdout.strip() if out.returncode == 0 else ""
@@ -152,7 +138,7 @@ def choose(project: Project, requested: str = "", cocotb: str = "2") -> tuple[st
     if key in OPEN:
         tool = _open_tool(key)
         if not tool.found:
-            return key, f"{NAMES[key]} is not installed"
+            return key, tool.missing(NAMES[key])
         if (
             key == "verilator"
             and _version_tuple(cocotb)[:1] >= (2,)

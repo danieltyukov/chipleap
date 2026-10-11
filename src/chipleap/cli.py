@@ -428,10 +428,18 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    from chipleap.verify.tools import all_tools, ihp_liberty
+    from chipleap.verify.tools import all_tools, ihp_liberty, liberty_settings_problem
     from chipleap.verify.xheep import find_checkout
 
-    rows = [[t.name, "yes" if t.found else "no", t.version, t.purpose] for t in all_tools()]
+    rows = [
+        [
+            t.name,
+            "yes" if t.found else "no",
+            t.version,
+            t.purpose + (f"; {t.note}" if t.note else ""),
+        ]
+        for t in all_tools()
+    ]
     from chipleap.verify.tools import which
 
     sv2v = which("sv2v")
@@ -442,7 +450,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "IHP SG13G2",
             "yes" if lib else "no",
             "",
-            str(lib) if lib else "open PDK for synthesis (set CHIPLEAP_LIBERTY)",
+            str(lib)
+            if lib
+            else liberty_settings_problem() or "open PDK for synthesis (set CHIPLEAP_LIBERTY)",
         ]
     )
     co = find_checkout()
