@@ -17,7 +17,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -31,7 +30,7 @@ from chipleap.rtl.diag import PARSERS, Diagnostic, relative
 from chipleap.rtl.project import Project
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import Tool, iverilog, verilator
+from chipleap.verify.tools import Tool, from_env, iverilog, tool_env, verilator, which
 
 OPEN = ("icarus", "verilator")
 COMMERCIAL = {"xcelium": "xrun", "vcs": "vcs", "questa": "vsim"}
@@ -98,21 +97,26 @@ def _version_tuple(text: str) -> tuple[int, ...]:
 
 def cocotb_python() -> str | None:
     """A Python that can import cocotb's runner."""
-    env = os.environ.get("CHIPLEAP_COCOTB_PYTHON")
-    if env:
-        return env
+    if os.environ.get("CHIPLEAP_COCOTB_PYTHON"):
+        return from_env("CHIPLEAP_COCOTB_PYTHON")
     if importlib.util.find_spec("cocotb_tools") is not None:
         return sys.executable
-    cfg = shutil.which("cocotb-config")
+    cfg = which("cocotb-config")
     if cfg:
         try:
             out = subprocess.run(
-                [cfg, "--python-bin"], capture_output=True, text=True, timeout=30, check=False
+                [cfg, "--python-bin"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+                cwd=os.sep,
+                env=tool_env(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
         py = out.stdout.strip()
-        return py if out.returncode == 0 and py else None
+        return which(py) if out.returncode == 0 and py else None
     return None
 
 
@@ -124,6 +128,8 @@ def cocotb_version(python: str) -> str:
             text=True,
             timeout=60,
             check=False,
+            cwd=os.sep,
+            env=tool_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -299,16 +305,17 @@ def _tail(path: Path, lines: int = 15) -> str:
 
 
 def _env(simulator: str) -> dict[str, str]:
-    env = dict(os.environ)
-    # Under pytest, cocotb's runner changes where it writes results and raises on a
-    # failing test instead of returning; the runner must behave the same everywhere.
-    env.pop("PYTEST_CURRENT_TEST", None)
-    env["COCOTB_ANSI_OUTPUT"] = "0"
+    first: tuple[str, ...] = ()
     if simulator in OPEN:
         tool = _open_tool(simulator)
         if tool.path:
             # cocotb finds the simulator on PATH; put the one ChipLeap chose first.
-            env["PATH"] = str(Path(tool.path).parent) + os.pathsep + env.get("PATH", "")
+            first = (str(Path(tool.path).parent),)
+    env = tool_env(prepend=first)
+    # Under pytest, cocotb's runner changes where it writes results and raises on a
+    # failing test instead of returning; the runner must behave the same everywhere.
+    env.pop("PYTEST_CURRENT_TEST", None)
+    env["COCOTB_ANSI_OUTPUT"] = "0"
     return env
 
 
@@ -352,7 +359,7 @@ def run_tests(
     key, why = choose(project, simulator, version or "2")
     if why:
         raise SimUnavailable(why)
-    if key in COMMERCIAL and remote is None and shutil.which(COMMERCIAL[key]) is None:
+    if key in COMMERCIAL and remote is None and which(COMMERCIAL[key]) is None:
         raise SimUnavailable(
             f"{NAMES[key]} ({COMMERCIAL[key]}) is not on the path; run it on a server with "
             "--remote HOST"

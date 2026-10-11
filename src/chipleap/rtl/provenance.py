@@ -163,6 +163,10 @@ def seal(
         for rel, path in _walk(root, part):
             if rel == name:
                 continue
+            # A file larger than any step reads back is left out, not recorded: a later
+            # step that asks for it is refused.
+            if os.lstat(path).st_size > READ_LIMIT:
+                continue
             files[rel] = file_digest(path)
             if len(files) > MAX_FILES:
                 raise SealError(f"more than {MAX_FILES} files to record in {root}")

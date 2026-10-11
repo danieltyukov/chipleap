@@ -54,7 +54,7 @@ from chipleap.rtl.sim import RUNNER, TestResult, cocotb_python, manifest, parse_
 from chipleap.rtl.synth import SynthError, synthesize
 from chipleap.verify import launch
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import gl_iverilog
+from chipleap.verify.tools import excluding, gl_iverilog, tool_env
 
 GROUPS = ("Sequential", "Combinational", "Clock", "Macro", "Pad", "Total")
 SCAN_PORT_RE = re.compile(r"^scan_(enable|in)_\d+$")
@@ -183,10 +183,11 @@ def gate_level_run(
     m["vcd"] = True
     builddir.write_text(work, "manifest.json", json.dumps(m, indent=1))
     builddir.write_text(work, RUNNER, resources.files("chipleap.rtl").joinpath(RUNNER).read_text())
-    env = dict(os.environ)
+    # cocotb finds iverilog and vvp on PATH: the gate-level Icarus first, and no entry
+    # that leads into the project (tools.tool_env).
+    env = tool_env(prepend=(str(Path(tool.path).parent),))
     env.pop("PYTEST_CURRENT_TEST", None)
     env["COCOTB_ANSI_OUTPUT"] = "0"
-    env["PATH"] = str(Path(tool.path).parent) + os.pathsep + env.get("PATH", "")
     limit = float(os.environ.get("CHIPLEAP_SIM_TIMEOUT", "1800"))
     try:
         launch.run([python, RUNNER, "manifest.json"], work, work / "runner.log", limit, env=env)
@@ -240,9 +241,11 @@ def activity(
     """A VCD of the tests on ``netlist``, its scope and the manifest that records it: the
     power step's when ChipLeap made it from this netlist and these tests, else a new
     gate-level run; None when the tests cannot run here."""
-    gl = project.build_dir / "power" / "gl"
+    gl = builddir.existing_dir(project.root, "build", "power", "gl")
     scope = project.power.scope or project.tests.toplevel
     try:
+        if gl is None:
+            raise SealError("no gate-level run yet")
         digest = sealed.locate(netlist)[1] if sealed is not None else file_digest(netlist)
         made = open_sealed(gl, GL_MANIFEST, "gl")
         if made.read_text(gl / ACTIVITY_MARKER, 1 << 10) == _activity_key(project, digest):
@@ -537,7 +540,8 @@ def power(project: Project) -> StepResult:
     """The power step: gate-level power from the tests' activity at each corner, beside
     the vectorless estimate. Fails when a test fails on the netlist."""
     try:
-        r = analyze(project)
+        with excluding(project.root):
+            r = analyze(project)
     except OpenroadUnavailable as exc:
         return StepResult("power", "skipped", str(exc))
     except (PowerError, OpenroadError, ValueError) as exc:

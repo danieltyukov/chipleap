@@ -35,6 +35,7 @@ from chipleap.rtl.openroad import (
 from chipleap.rtl.power import activity
 from chipleap.rtl.project import CORNERS, Project
 from chipleap.verify.result import StepResult
+from chipleap.verify.tools import excluding
 
 BINS = 48  # most map cells along the longer side
 ROW_UM = 3.78  # IHP SG13G2's standard-cell row
@@ -254,9 +255,9 @@ class IrResult:
 
 def analyze(project: Project) -> IrResult:
     cfg = project.ir_drop
+    work = project.work_dir("ir_drop", empty=True)
     views = routed_views(project)
     pdk = pdk_views(project, views.run)
-    work = project.work_dir("ir_drop", empty=True)
     act = activity(project, views.netlist, pdk, True, views.sealed)
     job = Job(work, "pdnsim")
     files = pdk.stage_all(job, (cfg.corner,))
@@ -334,7 +335,8 @@ def ir_data(project: Project, r: IrResult) -> dict[str, Any]:
 def ir_drop(project: Project) -> StepResult:
     """The IR drop step: worst drop per supply net on the routed grid at a corner."""
     try:
-        r = analyze(project)
+        with excluding(project.root):
+            r = analyze(project)
     except OpenroadUnavailable as exc:
         return StepResult("ir_drop", "skipped", str(exc))
     except (IrDropError, OpenroadError, ValueError) as exc:

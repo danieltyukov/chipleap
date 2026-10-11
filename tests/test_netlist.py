@@ -141,7 +141,7 @@ def test_size_limit(tmp_path):
     ],
 )
 def test_a_huge_bus_is_refused_before_its_bits_are_made(text):
-    with pytest.raises(NetlistError, match="bits wide|too long|too deeply|wider than"):
+    with pytest.raises(NetlistError, match=r"bits wide|too long|too deeply|wider than"):
         parse_netlist(text)
 
 

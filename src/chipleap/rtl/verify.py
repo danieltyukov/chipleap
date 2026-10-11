@@ -28,6 +28,7 @@ from chipleap.rtl.synth import synth
 from chipleap.rtl.upf import upf
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
+from chipleap.verify.tools import excluding
 
 PROJECT_STEPS = (
     "lint",
@@ -90,7 +91,9 @@ def run_step(
     if step not in PROJECT_STEPS:
         raise ValueError(f"unknown step {step!r}")
     try:
-        return _run_step(project, step, sim_tool, synth_tool, pnr_tool, remote, test_filter)
+        # No tool from the project's own directory, whatever PATH holds.
+        with excluding(project.root):
+            return _run_step(project, step, sim_tool, synth_tool, pnr_tool, remote, test_filter)
     except STEP_ERRORS as exc:
         first = (str(exc).strip().splitlines() or [""])[0]
         msg = f"{type(exc).__name__}: {first}" if first else type(exc).__name__

@@ -1,4 +1,5 @@
 import os
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -7,6 +8,9 @@ import pytest
 # Technologies added with `chipleap tech add` live in the user's config directory and
 # would change exploration results; the tests run on the built-in ones only.
 os.environ["CHIPLEAP_TECH_DIR"] = ""
+# The key that authenticates ChipLeap's manifests of build results: a fresh one for the
+# test run, never the user's.
+os.environ["CHIPLEAP_BUILD_KEY"] = str(Path(tempfile.mkdtemp(prefix="chipleap-key-")) / "build.key")
 
 
 # A small RTL project that lints clean on Verilator -Wall and slang -Wextra, with cocotb
@@ -91,3 +95,31 @@ def counter_project(tmp_path: Path) -> Path:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(textwrap.dedent(text))
     return root
+
+
+IHP_VIEWS = (
+    "lef/sg13g2_tech.lef",
+    "lef/sg13g2_stdcell.lef",
+    "lib/sg13g2_stdcell_typ_1p20V_25C.lib",
+    "lib/sg13g2_stdcell_slow_1p08V_125C.lib",
+    "verilog/sg13g2_stdcell.v",
+    "verilog/sg13g2_udp.v",
+)
+
+
+@pytest.fixture
+def ihp_pdk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A stand-in IHP SG13G2 standard-cell library under PDK_ROOT, as the implementation
+    steps find it; returns its libs.ref/sg13g2_stdcell directory."""
+    from chipleap.rtl import openroad
+
+    root = tmp_path / "pdk"
+    sc = root / "ihp-sg13g2" / "libs.ref" / "sg13g2_stdcell"
+    for rel in IHP_VIEWS:
+        (sc / rel).parent.mkdir(parents=True, exist_ok=True)
+        (sc / rel).write_text("x\n")
+    monkeypatch.setenv("PDK_ROOT", str(root))
+    monkeypatch.delenv("CHIPLEAP_LIBERTY", raising=False)
+    lib = sc / "lib/sg13g2_stdcell_typ_1p20V_25C.lib"
+    monkeypatch.setattr(openroad, "ihp_liberty", lambda: lib)
+    return sc

@@ -185,6 +185,7 @@ def test_pnr_routes_the_scan_netlist(counter_project, tmp_path, monkeypatch):
     scanned.write_text(SCAN)
     fake = D.ScanResult(scanned, scanned, (), {}, "scan_enable_0", 2, (), {})
     monkeypatch.setattr(D, "insert_scan", lambda project, work: fake)
+    (tmp_path / "pnr").mkdir()
     cfg = config(p, tmp_path / "pnr")
     assert cfg["VERILOG_FILES"] == ["dir::src/counter.scan.v"] and cfg["RUN_LINTER"] is False
     assert "SYNTH_PARAMETERS" not in cfg and (tmp_path / "pnr/src/counter.scan.v").is_file()

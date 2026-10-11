@@ -7,6 +7,7 @@ import os
 import pytest
 
 from chipleap.rtl import eco as E
+from chipleap.rtl.pnr import SDC_NAME, seal_routed
 from chipleap.rtl.project import EcoChange, load_project
 from chipleap.verify.tools import librelane, openroad
 
@@ -57,8 +58,11 @@ CHIPLEAP-PATHS end
 """
 
 
-def routed(project_dir, state=None):
-    run = project_dir / "build/pnr/runs/chipleap"
+def routed(project_dir, state=None, pdk=None):
+    """A routed run that ChipLeap recorded: its step directories, the state before
+    detailed routing, the configuration beside it and, with ``pdk``, its PDK views."""
+    pnr = project_dir / "build/pnr"
+    run = pnr / "runs/chipleap"
     for n, step in enumerate(STEPS, 1):
         d = run / f"{n:02d}-{step.lower().replace('.', '-')}"
         d.mkdir(parents=True)
@@ -72,15 +76,40 @@ def routed(project_dir, state=None):
     )
     (run / "final").mkdir()
     (run / "final/metrics.json").write_text("{}")
-    (project_dir / "build/pnr/config.json").write_text(json.dumps({"DESIGN_NAME": "counter"}))
+    if pdk is not None:
+        (run / "resolved.json").write_text(
+            json.dumps(
+                {
+                    "TECH_LEFS": {"nom_*": str(pdk / "lef/sg13g2_tech.lef")},
+                    "CELL_LEFS": [str(pdk / "lef/sg13g2_stdcell.lef")],
+                    "LIB": {
+                        "nom_typ_1p20V_25C": [str(pdk / "lib/sg13g2_stdcell_typ_1p20V_25C.lib")]
+                    },
+                }
+            )
+        )
+    (pnr / "src").mkdir()
+    (pnr / "src/counter.v").write_text("module counter; endmodule\n")
+    (pnr / SDC_NAME).write_text("create_clock -period 10 [get_ports clk_i]\n")
+    (pnr / "config.json").write_text(
+        json.dumps(
+            {
+                "DESIGN_NAME": "counter",
+                "VERILOG_FILES": ["dir::src/counter.v"],
+                "PNR_SDC_FILE": f"dir::{SDC_NAME}",
+                "CLOCK_PERIOD": 10,
+            }
+        )
+    )
+    seal_routed(pnr)
     return run
 
 
 def test_base_resumes_at_detailed_routing(counter_project):
     p = load_project(counter_project)
     run = routed(counter_project)
-    got_run, state, steps = E.base(p)
-    assert got_run == run and steps == STEPS[2:]
+    got_run, sealed, state, steps = E.base(p)
+    assert got_run == run and steps == STEPS[2:] and sealed.what == "pnr"
     assert state["def"].endswith("counter.def") and state["metrics"] == {"a": 1}
 
 
@@ -88,13 +117,14 @@ def test_base_refuses_files_outside_the_run(counter_project, tmp_path):
     secret = tmp_path / "id_rsa"
     secret.write_text("x\n")
     routed(counter_project, {"def": str(secret)})
-    with pytest.raises(E.OpenroadError, match="not a file of the run"):
+    with pytest.raises(E.EcoError, match=r"state def: .* is not a file of build/pnr"):
         E.base(load_project(counter_project))
 
 
 def test_edits_and_the_resumed_flow(counter_project):
     routed(counter_project)
     p = load_project(counter_project)
+    _, sealed, _, steps = E.base(p)
     changes = [
         EcoChange("resize", "_150_", "sg13g2_nand4_2"),
         EcoChange("buffer", "\\u_rx.q[3]/D", "sg13g2_buf_2"),
@@ -104,14 +134,15 @@ def test_edits_and_the_resumed_flow(counter_project):
     assert E.changes_file(changes) == (
         "resize\t_150_\tsg13g2_nand4_2\nbuffer\t\\u_rx.q[3]\tD\tsg13g2_buf_2\n"
     )
-    cfg = E.eco_config(p, changes, STEPS[2:])
+    cfg = E.eco_config(p, changes, steps, sealed)
     assert cfg["meta"]["flow"] == [*E.PREFIX, E.REPAIR, *STEPS[2:]]
     assert cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"] == 0.5
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.1
-    assert E.eco_config(p, changes[:1], STEPS[2:])["meta"]["flow"][3] == "OpenROAD.DetailedRouting"
+    flow = E.eco_config(p, changes[:1], steps, sealed)["meta"]["flow"]
+    assert flow[3] == "OpenROAD.DetailedRouting"
     # Names reach OpenROAD as data, never as script text.
-    script = E.edit_script({"tech_lef": "t.lef", "cell_lefs": ["c.lef"]}, "in.def")
-    assert "_150_" not in script and 'open "changes.txt" r' in script
+    script = E.edit_script({"tech_lef": "t.lef", "cell_lefs": ["c.lef"]}, "in.def", "changes.txt")
+    assert "_150_" not in script and "set changes_file {changes.txt}" in script
 
 
 def test_edit_results(counter_project):
@@ -176,3 +207,140 @@ def test_counter_eco_signs_off_again(counter_project):
     assert r.status == "pass", r.summary
     assert r.data["changes"][0]["result"] == f"was {cell.cell}"
     assert r.data["after"]["lvs_errors"] == 0
+
+
+# Only what ChipLeap recorded is reused, and nothing planted in the project runs.
+
+
+@pytest.fixture
+def fake_flow(tmp_path, monkeypatch, ihp_pdk):
+    """OpenROAD and LibreLane stand-ins outside the project. Each notes that it ran;
+    OpenROAD applies one edit and writes the DEF, LibreLane copies the configuration and
+    the state it was given to ``seen/`` and finishes the run."""
+    bin_dir = tmp_path / "trusted-bin"
+    seen = tmp_path / "seen"
+    bin_dir.mkdir()
+    seen.mkdir()
+    tools = {
+        "openroad": (
+            f'echo openroad >> "{seen}/ran"\n'
+            'echo "VERSION 5.8 ; # edited" > eco.def\n'
+            "echo 'CHIPLEAP-ECO done 0 sg13g2_inv_1'\n"
+            "echo 'CHIPLEAP-ECO end'\n"
+        ),
+        "librelane": (
+            f'echo librelane >> "{seen}/ran"\n'
+            'for a in "$@"; do last=$a; done\n'
+            f'cp "$last" "{seen}/config.json"\n'
+            "while [ $# -gt 0 ]; do\n"
+            f'  if [ "$1" = --with-initial-state ]; then cp "$2" "{seen}/state.json"; fi\n'
+            "  shift\n"
+            "done\n"
+            "mkdir -p runs/eco/final && echo '{}' > runs/eco/final/metrics.json\n"
+        ),
+    }
+    for name, body in tools.items():
+        exe = bin_dir / name
+        # A version probe is not a run.
+        exe.write_text('#!/bin/sh\ncase "$1" in -version | --version) exit 0 ;; esac\n' + body)
+        exe.chmod(0o755)
+        monkeypatch.setenv(f"CHIPLEAP_{name.upper()}", str(exe))
+    return seen
+
+
+def ran(seen):
+    f = seen / "ran"
+    return f.read_text().split() if f.exists() else []
+
+
+RESIZE = [EcoChange("resize", "_150_", "sg13g2_nand4_2")]
+
+
+def test_an_eco_passes_on_only_what_chipleap_recorded(counter_project, ihp_pdk, fake_flow):
+    """A Tcl script, a step and a hook planted in the routed run after ChipLeap recorded it
+    reach neither OpenROAD nor LibreLane."""
+    run = routed(counter_project, pdk=ihp_pdk)
+    (run / "03-openroad-detailedrouting/planted.tcl").write_text("exec touch pwned\n")
+    planted_step = run / "99-planted-hook"
+    planted_step.mkdir()
+    (planted_step / "config.json").write_text(json.dumps({"meta": {"step": "Odb.PlantedHook"}}))
+    r = E.eco(load_project(counter_project), RESIZE)
+    assert r.status == "pass", r.summary
+    assert ran(fake_flow) == ["openroad", "librelane"]
+    cfg = (fake_flow / "config.json").read_text()
+    state = json.loads((fake_flow / "state.json").read_text())
+    assert "planted" not in cfg.lower() and "planted" not in json.dumps(state).lower()
+    assert json.loads(cfg)["meta"]["flow"] == [*E.PREFIX, *STEPS[2:]]
+    assert state["def"].endswith("/eco/edit/eco.def")
+    assert not (counter_project / "pwned").exists()
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        # A configuration replaced after the run was recorded.
+        lambda pnr: (pnr / "config.json").write_text(
+            json.dumps({"DESIGN_NAME": "counter", "PLACEMENT_SCRIPT": "dir::planted.tcl"})
+        ),
+        # The state before detailed routing pointed at a planted script.
+        lambda pnr: (pnr / "runs/chipleap/03-openroad-detailedrouting/state_in.json").write_text(
+            json.dumps({"def": str(pnr / "planted.tcl")})
+        ),
+        # The database the ECO edits, swapped for another (its hash no longer matches).
+        lambda pnr: (pnr / "runs/chipleap/03-openroad-detailedrouting/counter.def").write_text(
+            "VERSION 5.8 ;\nDESIGN planted ;\n"
+        ),
+        # A source LibreLane would read again.
+        lambda pnr: (pnr / "src/counter.v").write_text(
+            'module counter; initial $system("touch pwned"); endmodule\n'
+        ),
+    ],
+    ids=["config", "state", "database", "source"],
+)
+def test_a_changed_run_is_refused_before_any_tool_runs(counter_project, ihp_pdk, fake_flow, plant):
+    routed(counter_project, pdk=ihp_pdk)
+    pnr = counter_project / "build/pnr"
+    (pnr / "planted.tcl").write_text("exec touch pwned\n")
+    plant(pnr)
+    r = E.eco(load_project(counter_project), RESIZE)
+    assert r.status == "fail" and "changed after ChipLeap recorded it" in r.summary, r.summary
+    assert ran(fake_flow) == []
+
+
+def test_a_routed_run_from_elsewhere_is_refused(counter_project, ihp_pdk, fake_flow, tmp_path):
+    """A build/pnr shipped with the repository, manifest and all, was not recorded with
+    this user's key."""
+    routed(counter_project, pdk=ihp_pdk)
+    os.environ["CHIPLEAP_BUILD_KEY"], key = (
+        str(tmp_path / "theirs.key"),
+        os.environ["CHIPLEAP_BUILD_KEY"],
+    )
+    try:
+        r = E.eco(load_project(counter_project), RESIZE)
+    finally:
+        os.environ["CHIPLEAP_BUILD_KEY"] = key
+    assert r.status == "fail" and "does not verify" in r.summary, r.summary
+    assert ran(fake_flow) == []
+
+
+def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
+    """Even in a recorded run, a variable that names a script, hook or plugin, a
+    substitution, or a file outside the sources ChipLeap copied is not passed on."""
+    routed(counter_project)
+    p = load_project(counter_project)
+    _, sealed, _, _ = E.base(p)
+    good = {"DESIGN_NAME": "counter", "VERILOG_FILES": ["dir::src/counter.v"]}
+    assert E._settings(p, good, sealed) == good
+    for bad, why in [
+        ({"PLACEMENT_SCRIPT": "x.tcl"}, "does not pass on"),
+        ({"PRE_GLOBAL_PLACEMENT_HOOK": 1}, "does not pass on"),
+        ({"DESIGN_NAME": "expr::[exec touch pwned]"}, "cannot go into a tool script"),
+        ({"DESIGN_NAME": "refg::$PDK_ROOT"}, "cannot go into a tool script"),
+        ({"DESIGN_NAME": "pdk_dir::x"}, "substitution"),
+        ({"VERILOG_FILES": ["dir::../../../etc/passwd"]}, "not a file ChipLeap wrote"),
+        ({"VERILOG_FILES": ["/abs/counter.v"]}, "not a file ChipLeap wrote"),
+        ({"VERILOG_FILES": ["dir::src/other.v"]}, "not a file ChipLeap recorded"),
+        ({"CLOCK_PERIOD": "10"}, "not a number"),
+    ]:
+        with pytest.raises(E.EcoError, match=why):
+            E._settings(p, bad, sealed)

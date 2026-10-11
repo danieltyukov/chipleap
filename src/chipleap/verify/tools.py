@@ -1,4 +1,14 @@
-"""Find the open-source tools the verification steps use."""
+"""Find the open-source tools the verification steps use.
+
+A tool is found by an absolute path, never through the current directory. The search
+path is ``PATH`` without its empty and relative entries (an empty entry is the current
+directory, which during a step is the project or a work directory in its ``build/``),
+and a ``CHIPLEAP_<TOOL>`` variable must name an absolute path or a command on that
+search path. While a step runs on a project (``excluding``), neither a tool nor any
+entry of the search paths ChipLeap hands its tools (``tool_env``: ``PATH``,
+``PYTHONPATH``, ``LD_LIBRARY_PATH``) may lie inside the project, so a repository cannot
+ship its own ``vvp``, ``fault`` or Python package and have a step run it.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +16,93 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+
+# Directories no tool may come from while a step runs: the project's.
+_EXCLUDED: ContextVar[tuple[Path, ...]] = ContextVar("chipleap_tools_excluded", default=())
+# Search paths a tool reads from its environment: an empty or relative entry in any of
+# them is resolved against the tool's working directory.
+SEARCH_PATHS = ("PATH", "PYTHONPATH", "LD_LIBRARY_PATH")
+
+
+@contextmanager
+def excluding(*dirs: Path) -> Iterator[None]:
+    """Within the block, in this thread, find no tool in ``dirs`` and leave them out of
+    every search path given to a tool. A step wraps its work in this with the project's
+    directory, which holds ``build/``."""
+    added = tuple(Path(d).resolve() for d in dirs)
+    token = _EXCLUDED.set((*_EXCLUDED.get(), *added))
+    try:
+        yield
+    finally:
+        _EXCLUDED.reset(token)
+
+
+def excluded(path: str | Path) -> bool:
+    """Whether ``path`` is relative, or inside a directory excluded here."""
+    if not os.path.isabs(path):
+        return True
+    try:
+        real = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return True
+    return any(real == d or real.is_relative_to(d) for d in _EXCLUDED.get())
+
+
+def trusted_entries(value: str | None) -> list[str]:
+    """The entries of a search path (``PATH`` and the like) that a tool may use: absolute,
+    and outside the excluded directories; empty and relative ones are dropped."""
+    out: list[str] = []
+    for entry in (value or "").split(os.pathsep):
+        if entry and not excluded(entry) and entry not in out:
+            out.append(entry)
+    return out
+
+
+def search_path() -> str:
+    """``PATH`` as ChipLeap searches it for a tool."""
+    return os.pathsep.join(trusted_entries(os.environ.get("PATH")))
+
+
+def which(name: str) -> str | None:
+    """The absolute path of the command ``name``: a path is taken as it is when it is
+    absolute, executable and not excluded, a bare name is looked up on ``search_path``."""
+    if not name:
+        return None
+    if os.sep in name or (os.altsep is not None and os.altsep in name):
+        ok = not excluded(name) and os.path.isfile(name) and os.access(name, os.X_OK)
+        return name if ok else None
+    found = shutil.which(name, path=search_path())
+    return found if found is not None and not excluded(found) else None
+
+
+def from_env(var: str) -> str | None:
+    """The tool a ``CHIPLEAP_<TOOL>`` variable names, through ``which``: None when the
+    variable is unset or names nothing ChipLeap would run."""
+    value = os.environ.get(var, "")
+    return which(value) if value else None
+
+
+def tool_env(base: dict[str, str] | None = None, prepend: tuple[str, ...] = ()) -> dict[str, str]:
+    """The environment for a tool: ``base`` (the process's own by default) with every
+    search path reduced to its trusted entries, ``prepend`` first on ``PATH``. A search
+    path left with no entry is removed."""
+    env = dict(os.environ if base is None else base)
+    for var in SEARCH_PATHS:
+        extra = [*prepend] if var == "PATH" else []
+        entries = trusted_entries(os.pathsep.join([*extra, env.get(var, "")]))
+        if entries:
+            env[var] = os.pathsep.join(entries)
+        else:
+            env.pop(var, None)
+    home = env.get("PYTHONHOME")
+    if home is not None and excluded(home):
+        env.pop("PYTHONHOME")
+    return env
 
 
 @dataclass(frozen=True)
@@ -23,8 +118,18 @@ class Tool:
 
 
 def _version(cmd: list[str], pattern: str) -> str:
+    # Out of the project, with the trusted search paths: a version probe runs nothing a
+    # repository put there.
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False)
+        out = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            cwd=os.sep,
+            env=tool_env(),
+        )
     except (OSError, subprocess.TimeoutExpired):
         return ""
     m = re.search(pattern, out.stdout + out.stderr)
@@ -45,8 +150,7 @@ def is_wrapper(path: str) -> bool:
 def find(
     name: str, version_args: list[str], pattern: str, purpose: str, env: str | None = None
 ) -> Tool:
-    path = os.environ.get(env, "") if env else ""
-    path = path or shutil.which(name) or ""
+    path = (from_env(env) if env and os.environ.get(env) else which(name)) or ""
     if not path:
         return Tool(name, None, "", purpose)
     if is_wrapper(path):
@@ -131,8 +235,8 @@ def gl_iverilog() -> Tool:
     them but leaves every flip-flop at X, so it needs 13 or newer: ``CHIPLEAP_GL_IVERILOG``,
     else ``iverilog`` on the path when it is new enough. Its ``vvp`` is the one beside it."""
     name = "iverilog-gl"
-    env = os.environ.get("CHIPLEAP_GL_IVERILOG", "")
-    path = env or shutil.which("iverilog") or ""
+    var = "CHIPLEAP_GL_IVERILOG"
+    path = (from_env(var) if os.environ.get(var) else which("iverilog")) or ""
     if not path:
         return Tool(name, None, "", GL_PURPOSE)
     version = _version([path, "-V"], r"Icarus Verilog version (\S+)")
@@ -146,8 +250,7 @@ def gl_vvp(tool: Tool) -> str | None:
     """The ``vvp`` that goes with a gate-level Icarus: the two must be the same version."""
     if tool.path is None:
         return None
-    vvp = Path(tool.path).parent / "vvp"
-    return str(vvp) if vvp.is_file() else None
+    return which(str(Path(tool.path).parent / "vvp"))
 
 
 def quaigh() -> Tool:
@@ -165,7 +268,8 @@ def nl2bench() -> Tool:
 
 
 def fault() -> Tool:
-    path = os.environ.get("CHIPLEAP_FAULT", "") or shutil.which("fault") or ""
+    var = "CHIPLEAP_FAULT"
+    path = (from_env(var) if os.environ.get(var) else which("fault")) or ""
     purpose = "ATPG and stuck-at fault coverage (Fault, with Quaigh)"
     if not path:
         return Tool("fault", None, "", purpose)
@@ -176,6 +280,7 @@ def fault() -> Tool:
             text=True,
             timeout=60,
             check=False,
+            cwd=os.sep,
             env=fault_env(path),
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -185,7 +290,9 @@ def fault() -> Tool:
 
 
 def _interpreter(script: str) -> str | None:
-    """The Python a console script runs under, from its first line."""
+    """The Python a console script runs under, from its first line, as ``which`` finds
+    it: a bare name after ``env`` is looked up on the trusted search path, not the
+    script's."""
     try:
         with open(script, "rb") as fh:
             head = fh.readline(400).decode(errors="replace").strip()
@@ -197,7 +304,7 @@ def _interpreter(script: str) -> str | None:
     if not words:
         return None
     exe = words[-1] if Path(words[0]).name == "env" else words[0]
-    return exe if "python" in Path(exe).name else None
+    return which(exe) if "python" in Path(exe).name else None
 
 
 def fault_env(fault_path: str, base: dict[str, str] | None = None) -> dict[str, str]:
@@ -209,10 +316,13 @@ def fault_env(fault_path: str, base: dict[str, str] | None = None) -> dict[str, 
     env = dict(os.environ if base is None else base)
     py = _interpreter(fault_path)
     if py is not None:
+        # Isolated (-I): no current directory, user site or PYTHON* variables, so only the
+        # interpreter's own installation answers.
         try:
             out = subprocess.run(
                 [
                     py,
+                    "-I",
                     "-c",
                     "import sys, sysconfig; print(sysconfig.get_paths()['purelib']); "
                     "print(sys.base_prefix)",
@@ -221,27 +331,26 @@ def fault_env(fault_path: str, base: dict[str, str] | None = None) -> dict[str, 
                 text=True,
                 timeout=60,
                 check=False,
+                cwd=os.sep,
+                env=tool_env(base),
             )
             lines = out.stdout.splitlines()
-            if out.returncode == 0 and len(lines) >= 2:
-                env["PYTHONPATH"] = os.pathsep.join(
-                    [lines[0], *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
-                )
+            if out.returncode == 0 and len(lines) >= 2 and not excluded(lines[1]):
+                env["PYTHONPATH"] = os.pathsep.join([lines[0], env.get("PYTHONPATH", "")])
                 env["PYTHONHOME"] = lines[1]
         except (OSError, subprocess.TimeoutExpired):
             pass
-    path = [env.get("PATH", "")]
-    q = quaigh()
-    if q.path:
-        path.insert(0, str(Path(q.path).parent))
+    first: list[str] = []
     gl = gl_iverilog()
     vvp = gl_vvp(gl)
     if gl.path and vvp:
         env["FAULT_IVERILOG"] = gl.path
         env["FAULT_VVP"] = vvp
-        path.insert(0, str(Path(gl.path).parent))
-    env["PATH"] = os.pathsep.join(path)
-    return env
+        first.append(str(Path(gl.path).parent))
+    q = quaigh()
+    if q.path:
+        first.append(str(Path(q.path).parent))
+    return tool_env(env, tuple(first))
 
 
 def riscv_gcc() -> Tool:
@@ -294,7 +403,7 @@ COMMERCIAL = (
 
 
 def commercial() -> list[Tool]:
-    return [Tool(n, shutil.which(n), "", purpose) for n, purpose in COMMERCIAL]
+    return [Tool(n, which(n), "", purpose) for n, purpose in COMMERCIAL]
 
 
 PDK_ROOTS = (

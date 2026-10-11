@@ -57,7 +57,7 @@ from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.verify import launch
 from chipleap.verify.pnr import PnrError, PnrResult, parse
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import librelane
+from chipleap.verify.tools import excluding, librelane
 
 RESUME_AT = "OpenROAD.DetailedRouting"
 # Before routing again: the edited DEF into LibreLane's database, legal placement, and
@@ -212,7 +212,8 @@ def base(project: Project) -> tuple[Path, Sealed, dict[str, Any], list[str]]:
     """The routed run, its manifest, its state before detailed routing, and the steps it
     ran from there."""
     run = run_dir(project, RUN_TAG)
-    if not (run / "final" / "metrics.json").is_file():
+    final = builddir.existing_dir(project.root, "build", "pnr", "runs", RUN_TAG, "final")
+    if final is None or not (final / "metrics.json").is_file():
         raise OpenroadUnavailable("no routed design: run the pnr step first")
     sealed = pnr_sealed(project)
     steps = _steps(run, sealed)
@@ -490,9 +491,10 @@ def apply_eco(project: Project, changes: list[EcoChange]) -> EcoResult:
     """Apply ``changes`` to the routed run and sign the result off again."""
     if not changes:
         raise EcoError("no changes to apply")
+    # First, so a symlinked build/ or build/pnr is refused before anything is read.
+    work = project.work_dir("pnr")
     run, sealed, state, steps = base(project)
     cfg = eco_config(project, changes, steps, sealed)
-    work = project.work_dir("pnr")
     # The ECO's own files; an earlier ECO of the same base is replaced as a whole.
     unseal(work, ECO_MANIFEST)
     builddir.work_dir(work, "runs", ECO_TAG, empty=True)
@@ -576,7 +578,8 @@ def eco(project: Project, changes: list[EcoChange] | None = None) -> StepResult:
     if not todo:
         return StepResult("eco", "skipped", "no eco changes in the project")
     try:
-        r = apply_eco(project, todo)
+        with excluding(project.root):
+            r = apply_eco(project, todo)
     except OpenroadUnavailable as exc:
         return StepResult("eco", "skipped", str(exc))
     except (EcoError, OpenroadError, ValueError) as exc:
@@ -678,23 +681,25 @@ def timing_paths(
         raise ValueError(f"corner must be one of {', '.join(CORNERS)}")
     if kind not in ("setup", "hold"):
         raise ValueError("kind must be setup or hold")
-    views = routed_views(project)
-    pdk = pdk_views(project, views.run)
-    job = Job(project.work_dir("paths"), f"paths_{kind}_{corner}")
-    files = pdk.stage_all(job, (corner,))
-    script = paths_script(
-        project,
-        files,
-        corner,
-        job.stage(views.netlist, sealed=views.sealed),
-        job.stage(views.sdc, sealed=views.sealed),
-        job.stage(views.spef, sealed=views.sealed) if views.spef else None,
-        "max" if kind == "setup" else "min",
-        max(1, min(count, PATHS_SHOWN)),
-    )
-    log, code = job.run(script)
-    if code != 0 or "CHIPLEAP-PATHS end" not in log:
-        raise failure("OpenSTA's report_checks", log, code)
+    with excluding(project.root):
+        work = project.work_dir("paths")
+        views = routed_views(project)
+        pdk = pdk_views(project, views.run)
+        job = Job(work, f"paths_{kind}_{corner}")
+        files = pdk.stage_all(job, (corner,))
+        script = paths_script(
+            project,
+            files,
+            corner,
+            job.stage(views.netlist, sealed=views.sealed),
+            job.stage(views.sdc, sealed=views.sealed),
+            job.stage(views.spef, sealed=views.sealed) if views.spef else None,
+            "max" if kind == "setup" else "min",
+            max(1, min(count, PATHS_SHOWN)),
+        )
+        log, code = job.run(script)
+        if code != 0 or "CHIPLEAP-PATHS end" not in log:
+            raise failure("OpenSTA's report_checks", log, code)
     found = parse_paths(log, "max" if kind == "setup" else "min")
     # Worst first across path groups; OpenSTA lists them group by group.
     return sorted(found, key=lambda p: p.slack_ns), project.rel(views.run)

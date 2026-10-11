@@ -24,9 +24,9 @@ from typing import Any
 
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
-from chipleap.rtl.openroad import PNR_MANIFEST, RUN_TAG
+from chipleap.rtl.openroad import ECO_MANIFEST, PNR_MANIFEST, RUN_TAG
 from chipleap.rtl.project import Project
-from chipleap.rtl.provenance import copy_file, seal, unseal
+from chipleap.rtl.provenance import Sealed, copy_file, seal, unseal
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
 from chipleap.verify.pnr import PnrError, PnrResult, parse, run_librelane, signoff
 from chipleap.verify.result import StepResult
@@ -205,14 +205,22 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     if not librelane().found:
         raise PnrError("LibreLane is not installed")
     work = project.work_dir(workdir or "pnr")
-    # The manifest goes first, so a run that stops halfway leaves none, and is written
-    # once LibreLane has finished: later steps reuse only what it records.
+    # The manifests go first, so a run that stops halfway leaves none (and an ECO of the
+    # previous run is no longer current); the new one is written once LibreLane has
+    # finished: later steps reuse only what it records.
     unseal(work, PNR_MANIFEST)
+    unseal(work, ECO_MANIFEST)
     cfg = config(project, work)
     metrics, gds = run_librelane(work, cfg, RUN_TAG)
-    seal(work, PNR_MANIFEST, "pnr", ["config.json", SDC_NAME, "src", f"runs/{RUN_TAG}"])
+    seal_routed(work)
     clk = project.fastest_clock
     return parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds)
+
+
+def seal_routed(work: Path) -> Sealed:
+    """Record the routed run in ``work`` (``build/pnr``): the configuration, the
+    constraints and sources ChipLeap copied beside it, and LibreLane's run directory."""
+    return seal(work, PNR_MANIFEST, "pnr", ["config.json", SDC_NAME, "src", f"runs/{RUN_TAG}"])
 
 
 def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:

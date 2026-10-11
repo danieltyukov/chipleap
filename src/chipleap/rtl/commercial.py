@@ -13,7 +13,6 @@ is copied too, and a path that exists only on the server is used where it is.
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +26,7 @@ from chipleap.verify.pnr import PnrError, PnrResult
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
 from chipleap.verify.result import StepResult
 from chipleap.verify.synth import SynthError
+from chipleap.verify.tools import which
 
 DEFAULT_PERIOD_NS = 10.0
 
@@ -163,7 +163,7 @@ def synthesize_with(
     """Genus or Design Compiler on the project at its fastest clock, in ``workdir``, a
     directory in the project's ``build/`` (``Project.work_dir``)."""
     st = csynth.get_synth_tool(tool)
-    if remote is None and shutil.which(st.binary) is None:
+    if remote is None and which(st.binary) is None:
         raise SynthError(
             f"{st.vendor} {st.name} ({st.binary}) is not on the path; run it on a server "
             "with --remote HOST"
@@ -246,7 +246,7 @@ def place_route_with(project: Project, workdir: Path, remote: Remote | None = No
     """Genus then Innovus on the project, here or on ``remote``, with the project's
     utilisation, placement density and die size, as LibreLane gets them. ``workdir`` is a
     directory in the project's ``build/`` (``Project.work_dir``)."""
-    if remote is None and (shutil.which("genus") is None or shutil.which("innovus") is None):
+    if remote is None and (which("genus") is None or which("innovus") is None):
         raise PnrError(
             "Cadence Genus and Innovus are not on the path; run them on a server with --remote HOST"
         )

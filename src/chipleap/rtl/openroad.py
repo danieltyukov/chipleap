@@ -267,10 +267,18 @@ def run_dir(project: Project, tag: str = RUN_TAG) -> Path:
     return project.build_dir / "pnr" / "runs" / tag
 
 
+def _pnr_dir(project: Project) -> Path:
+    """``build/pnr``, reached without a symlink (``builddir.existing_dir``)."""
+    pnr = builddir.existing_dir(project.root, "build", "pnr")
+    if pnr is None:
+        raise OpenroadUnavailable("no routed design: run the pnr step first")
+    return pnr
+
+
 def pnr_sealed(project: Project) -> Sealed:
     """The routed run's manifest, if ChipLeap on this machine wrote it."""
     try:
-        return open_sealed(project.build_dir / "pnr", PNR_MANIFEST, "pnr")
+        return open_sealed(_pnr_dir(project), PNR_MANIFEST, "pnr")
     except SealError as exc:
         raise OpenroadError(f"the routed design in build/pnr cannot be used: {exc}") from None
 
@@ -278,7 +286,7 @@ def pnr_sealed(project: Project) -> Sealed:
 def eco_sealed(project: Project, base: Sealed) -> Sealed | None:
     """The ECO's manifest when ChipLeap wrote it from the routed run ``base``, else None."""
     try:
-        sealed = open_sealed(project.build_dir / "pnr", ECO_MANIFEST, "eco")
+        sealed = open_sealed(_pnr_dir(project), ECO_MANIFEST, "eco")
     except SealError:
         return None
     return sealed if sealed.extra.get("base") == base.mac else None
@@ -301,7 +309,8 @@ def routed_run(project: Project) -> Path | None:
     """The routed result later steps read: the ECO run when ChipLeap made one from the
     current routed run, else the routed run itself; None when there is none. A routed run
     without a manifest from this machine fails the step."""
-    if not (run_dir(project) / "final" / "metrics.json").is_file():
+    final = builddir.existing_dir(project.root, "build", "pnr", "runs", RUN_TAG, "final")
+    if final is None or not (final / "metrics.json").is_file():
         return None
     base = pnr_sealed(project)
     return run_dir(project, ECO_TAG) if eco_sealed(project, base) else run_dir(project)

@@ -26,12 +26,14 @@ import json
 import os
 import re
 import shutil
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.netlist import (
     Chain,
@@ -39,9 +41,11 @@ from chipleap.rtl.netlist import (
     NetlistError,
     Nets,
     parse_netlist,
+    read_netlist,
     trace_chain,
 )
 from chipleap.rtl.openroad import (
+    Job,
     OpenroadError,
     OpenroadUnavailable,
     PdkViews,
@@ -51,14 +55,22 @@ from chipleap.rtl.openroad import (
     read_limited,
     routed_run,
     routed_views,
-    run_openroad,
-    stage,
 )
 from chipleap.rtl.project import DftConfig, Project
+from chipleap.rtl.provenance import Sealed, SealError, copy_file
 from chipleap.rtl.synth import SynthError, synthesize
 from chipleap.verify import launch
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import fault, fault_env, gl_iverilog, gl_vvp, nl2bench, quaigh
+from chipleap.verify.tools import (
+    excluding,
+    fault,
+    fault_env,
+    gl_iverilog,
+    gl_vvp,
+    nl2bench,
+    quaigh,
+    tool_env,
+)
 
 # IHP SG13G2's cells as the scan steps see them.
 SCAN_CELL_RE = re.compile(r"^sg13g2_sdf")
@@ -257,26 +269,28 @@ def chains_of(
 def insert_scan(project: Project, workdir: Path | None = None) -> ScanResult:
     """Synthesize the project and insert its scan chains."""
     cfg = project.dft or DftConfig()
-    work = (workdir or project.build_dir / "dft").resolve()
-    work.mkdir(parents=True, exist_ok=True)
+    work = project.work_dir(workdir or "dft")
     views = pdk_views(project)
     try:
         synth = synthesize(project, work / "synth")
     except SynthError as exc:
         raise DftError(f"synthesis failed: {exc}") from exc
-    pre = parse_netlist(read_limited(synth.netlist)).top(project.top)
+    pre = read_netlist([synth.netlist]).top(project.top)
     taken = [p for p in pre.ports if SCAN_PORT_RE.match(p)]
     if taken:
         raise DftError(
             f"the design already has a port named {taken[0]}, which scan insertion would add"
         )
-    files = views.stage_all(work)
-    netlist = stage(synth.netlist, work)
-    log, code = run_openroad(scan_script(project, files, netlist, cfg), work, "scan")
-    out = work / f"{project.top}.scan.v"
-    if code != 0 or not out.is_file():
+    job = Job(work, "scan")
+    files = views.stage_all(job)
+    netlist = job.stage(synth.netlist)
+    log, code = job.run(scan_script(project, files, netlist, cfg))
+    written = job.output(f"{project.top}.scan.v")
+    if code != 0 or not written.is_file():
         raise failure("OpenROAD scan insertion", log, code)
-    top = parse_netlist(read_limited(out)).top(project.top)
+    # Beside the step's other results, where place and route and the report find it.
+    out = builddir.write_text(work, written.name, read_limited(written))
+    top = read_netlist([out]).top(project.top)
     chains, clocks = chains_of(top, [c.port for c in project.clocks])
     flops = [i for i in top.instances if FLOP_CELL_RE.match(i.cell)]
     on_chain = {c for ch in chains for c in ch.cells}
@@ -323,6 +337,20 @@ def _bypass(project: Project) -> list[str]:
     return args
 
 
+def _stage(src: Path, work: Path, name: str | None = None, sealed: Sealed | None = None) -> str:
+    """Copy ``src`` into ``work`` (a directory the step just emptied) for a tool that runs
+    there; with ``sealed``, ``src`` must be a file it recorded, unchanged."""
+    dest = work / (name or src.name)
+    try:
+        if sealed is not None:
+            sealed.copy(src, dest)
+        else:
+            copy_file(src.resolve(), dest)
+    except SealError as exc:
+        raise DftError(str(exc)) from None
+    return dest.name
+
+
 def _run(cmd: list[str], work: Path, log: str, env: dict[str, str]) -> tuple[int, str]:
     limit = float(os.environ.get("CHIPLEAP_FAULT_TIMEOUT", str(FAULT_TIMEOUT_S)))
     try:
@@ -343,13 +371,10 @@ def run_atpg(project: Project, scan: ScanResult, views: PdkViews, workdir: Path)
     if not gl_iverilog().found:
         raise OpenroadUnavailable("Fault simulates with Icarus 13 or newer, not installed")
     assert tool.path is not None and conv.path is not None
-    work = workdir / "atpg"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
+    work = builddir.work_dir(workdir, "atpg", empty=True)
     top = project.top
-    shutil.copyfile(scan.prescan, work / f"{top}.nl.v")
-    (work / "scl.yml").write_text(yaml.safe_dump(FAULT_SCL, sort_keys=False))
+    _stage(scan.prescan, work, f"{top}.nl.v")
+    builddir.write_text(work, "scl.yml", yaml.safe_dump(FAULT_SCL, sort_keys=False))
     env = fault_env(tool.path)
     bypass = _bypass(project)
     code, log = _run(
@@ -360,13 +385,13 @@ def run_atpg(project: Project, scan: ScanResult, views: PdkViews, workdir: Path)
     )
     if code != 0 or not (work / f"{top}.cut.v").is_file():
         raise DftError(f"fault cut failed (exit {code}): {_last(log)}")
-    lib = stage(views.lib("typ"), work)
+    lib = _stage(views.lib("typ"), work)
     code, log = _run(
         [conv.path, "-o", f"{top}.bench", "-l", lib, f"{top}.cut.v"], work, "bench.log", env
     )
     if code != 0 or not (work / f"{top}.bench").is_file():
         raise DftError(f"nl2bench failed (exit {code}): {_last(log)}")
-    models = [stage(m, work) for m in views.models]
+    models = [_stage(m, work) for m in views.models]
     cmd = [
         tool.path,
         "atpg",
@@ -387,8 +412,13 @@ def run_atpg(project: Project, scan: ScanResult, views: PdkViews, workdir: Path)
         f"{top}.cut.v",
     ]
     code, log = _run(cmd, work, "atpg.log", env)
+    # Fault's per-thread scratch directories; a symlink among them is only unlinked.
     for junk in work.glob("thr0x*"):
-        shutil.rmtree(junk, ignore_errors=True)
+        if junk.is_symlink():
+            with suppress(OSError):
+                junk.unlink()
+        else:
+            shutil.rmtree(junk, ignore_errors=True)
     # Fault compacts the vectors after simulating them, but not the same way every run
     # (25 or 26 of the UART's 39), so ChipLeap keeps Quaigh's set, which is the same every
     # run and has the same coverage.
@@ -725,7 +755,7 @@ def write_bench_data(
         "po_mask": po_mask or ["0"],
     }
     for name, rows in files.items():
-        (work / f"{name}.mem").write_text("\n".join(rows) + "\n")
+        builddir.write_text(work, f"{name}.mem", "\n".join(rows) + "\n")
     return t_flush, bench.shift
 
 
@@ -875,25 +905,24 @@ def simulate_patterns(
     workdir: Path,
     netlist: Path | None = None,
     name: str = "sim",
+    sealed: Sealed | None = None,
 ) -> SimResult:
     """Run the flush pattern and ``patterns`` through the chains of ``netlist`` (the scan
-    netlist by default) on Icarus 13 with the cell models."""
+    netlist by default) on Icarus 13 with the cell models. A routed netlist comes with its
+    run's manifest, ``sealed``, and is simulated only as it was recorded."""
     tool = gl_iverilog()
     vvp = gl_vvp(tool)
     if not tool.found or tool.path is None or vvp is None:
         raise OpenroadUnavailable("Icarus 13 or newer is not installed (CHIPLEAP_GL_IVERILOG)")
-    work = workdir / name
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
-    top = parse_netlist(read_limited(netlist or scan.netlist)).top(project.top)
+    work = builddir.work_dir(workdir, name, empty=True)
+    dut = _stage(netlist or scan.netlist, work, sealed=sealed)
+    models = [_stage(m, work) for m in views.models]
+    top = read_netlist([work / dut]).top(project.top)
     clocks = [c.port for c in project.clocks]
     bench = _bench(scan, top, clocks, [r.port for r in project.resets])
     t_flush, _ = write_bench_data(bench, patterns, work)
-    (work / "tb.v").write_text(testbench(project, top, scan, bench, t_flush, len(patterns)))
-    dut = stage(netlist or scan.netlist, work)
-    models = [stage(m, work) for m in views.models]
-    env = dict(os.environ)
+    builddir.write_text(work, "tb.v", testbench(project, top, scan, bench, t_flush, len(patterns)))
+    env = tool_env()
     compile_cmd = [
         tool.path,
         "-g2012",
@@ -989,7 +1018,11 @@ def run_dft(
     project: Project,
 ) -> tuple[ScanResult, AtpgResult | None, SimResult | None, SimResult | None, list[str]]:
     cfg = project.dft or DftConfig()
-    work = (project.build_dir / "dft").resolve()
+    work = project.work_dir("dft")
+    # Pattern files of an earlier run are not this run's.
+    for stale in ("patterns.json", "patterns.stil"):
+        with suppress(FileNotFoundError):
+            (work / stale).unlink()
     scan = insert_scan(project, work)
     views = pdk_views(project)
     notes: list[str] = []
@@ -1001,15 +1034,15 @@ def run_dft(
         except OpenroadUnavailable as exc:
             notes.append(f"ATPG skipped: {exc}")
         if atpg is not None:
-            top = parse_netlist(read_limited(scan.netlist)).top(project.top)
+            top = read_netlist([scan.netlist]).top(project.top)
             data = read_json(atpg.vectors)
             if not isinstance(data, dict):
                 raise DftError("Fault's vectors file is not a mapping")
             patterns = map_patterns(data, scan, top)
-            (work / "patterns.json").write_text(
-                json.dumps(patterns_json(scan, patterns, atpg), indent=1)
+            builddir.write_text(
+                work, "patterns.json", json.dumps(patterns_json(scan, patterns, atpg), indent=1)
             )
-            (work / "patterns.stil").write_text(stil(project, scan, patterns, top))
+            builddir.write_text(work, "patterns.stil", stil(project, scan, patterns, top))
     elif scan.unscannable:
         notes.append(
             f"ATPG skipped: {len(scan.unscannable)} flip-flops or latches are not on a chain "
@@ -1036,14 +1069,21 @@ def simulate_routed(
     if run is None:
         return None
     views = routed_views(project, run)
-    top = parse_netlist(read_limited(views.netlist)).top(project.top)
+    top = parse_netlist(views.read_text(views.netlist)).top(project.top)
     if not any(SCAN_PORT_RE.match(p) for p in top.ports):
         return None
     chains, _ = chains_of(top, [c.port for c in project.clocks], BUFFERS)
     if [c.cells for c in chains] != [c.cells for c in scan.chains]:
         raise DftError("the routed netlist's scan chains are not the scan netlist's")
     return simulate_patterns(
-        project, scan, patterns, pdk_views(project, run), work, views.netlist, "sim-routed"
+        project,
+        scan,
+        patterns,
+        pdk_views(project, run),
+        work,
+        views.netlist,
+        "sim-routed",
+        views.sealed,
     )
 
 
@@ -1053,10 +1093,11 @@ def dft(project: Project) -> StepResult:
     if project.dft is None:
         return StepResult("dft", "skipped", "no dft section in the project")
     try:
-        scan, atpg, sim, routed, notes = run_dft(project)
+        with excluding(project.root):
+            scan, atpg, sim, routed, notes = run_dft(project)
     except OpenroadUnavailable as exc:
         return StepResult("dft", "skipped", str(exc))
-    except (DftError, OpenroadError, NetlistError) as exc:
+    except (DftError, OpenroadError, NetlistError, builddir.BuildDirError) as exc:
         return StepResult("dft", "fail", str(exc).splitlines()[0], {"error": str(exc)})
     cfg = project.dft
     data = dft_data(project, scan, atpg, sim, routed, notes)
