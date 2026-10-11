@@ -79,10 +79,87 @@ def test_symlinks_out_of_the_project_are_refused(counter_project, outside):
 
 
 def test_globs_cannot_leave_the_project(counter_project, outside):
-    refused(counter_project, "top: counter\nsources: ['../secrets/*.sv']\n", "outside")
-    refused(counter_project, f"top: counter\nsources: ['{outside}/*.sv']\n", "outside")
+    for pattern in ("../secrets/*.sv", f"{outside}/*.sv", "rtl/../../secrets/*.sv"):
+        refused(
+            counter_project,
+            f"top: counter\nsources: ['{pattern}']\n",
+            "a pattern stays inside the project",
+        )
+    # A symlinked file or directory that leads out is never followed, so a glob lists
+    # only the project's own files, whatever is outside.
     (counter_project / "rtl/key.sv").symlink_to(outside / "id_rsa.sv")
-    refused(counter_project, "top: counter\nsources: ['rtl/*.sv']\n", "outside")
+    (counter_project / "rtl/ext").symlink_to(outside, target_is_directory=True)
+    p = load_project(project(counter_project, "top: counter\nsources: ['rtl/**/*.sv']\n"))
+    assert [p.rel(x) for x in p.sources] == ["rtl/counter.sv"]
+    text = "top: counter\nsources: ['rtl/ext/*.sv']\n"
+    with_file = refused(counter_project, text, "outside the project directory")
+    (outside / "id_rsa.sv").unlink()
+    assert refused(counter_project, text) == with_file
+
+
+def test_paths_compare_by_component(counter_project, tmp_path):
+    evil = tmp_path / "counter-evil"
+    evil.mkdir()
+    (evil / "x.sv").write_text("module x; endmodule\n")
+    refused(counter_project, f"{BASE}golden: ../counter-evil/x.sv\n", "outside")
+    refused(counter_project, f"top: counter\nsources: [{evil}/x.sv]\n", "outside")
+
+
+def test_paths_are_resolved_once_and_kept(counter_project):
+    (counter_project / "rtl/alias.sv").symlink_to(counter_project / "rtl/counter.sv")
+    p = load_project(project(counter_project, "top: counter\nsources: [rtl/alias.sv]\n"))
+    assert p.sources == ((counter_project / "rtl/counter.sv").resolve(),)
+
+
+def test_includes_are_followed_and_confined(counter_project, outside):
+    rtl = counter_project / "rtl"
+    (rtl / "inc").mkdir()
+    (rtl / "inc/defs.svh").write_text('`include "more.svh"\n')
+    (rtl / "inc/more.svh").write_text("`define ONE 1\n")
+    src = rtl / "counter.sv"
+    body = src.read_text()
+    with_inc = f"{BASE}include_dirs: [rtl/inc]\n"
+    src.write_text('`include "defs.svh"\n' + body)
+    assert load_project(project(counter_project, with_inc)).top == "counter"
+    for line, message in (
+        (f'`include "{outside}/id_rsa.sv"', "absolute paths and .. are not allowed"),
+        ('`include "../../secrets/id_rsa.sv"', "absolute paths and .. are not allowed"),
+        ("`include `SECRET_FILE", "cannot be checked"),
+        ('`include "$HOME/x.vh"', "is not a plain file name"),
+    ):
+        src.write_text(line + "\n" + body)
+        refused(counter_project, with_inc, message)
+    # Through a symlink in an include directory, and from a file that is itself included.
+    (rtl / "inc/leak.svh").symlink_to(outside / "id_rsa.sv")
+    src.write_text('`include "leak.svh"\n' + body)
+    refused(counter_project, with_inc, '`include "leak.svh" leads outside')
+    src.write_text('`include "defs.svh"\n' + body)
+    (rtl / "inc/more.svh").write_text('`include "leak.svh"\n')
+    refused(counter_project, with_inc, "rtl/inc/more.svh", "leads outside")
+    # Commented out, it is not read.
+    (rtl / "inc/more.svh").write_text('// `include "leak.svh"\n/* `include "leak.svh" */\n')
+    assert load_project(project(counter_project, with_inc)).top == "counter"
+
+
+def test_only_the_user_can_allow_directories(counter_project, outside, monkeypatch):
+    import inspect
+
+    from chipleap import mcp_server
+    from chipleap.rtl.project import allowed_roots
+
+    for tool in (
+        "describe_project",
+        "lint_rtl",
+        "simulate_rtl",
+        "coverage_rtl",
+        "synthesize_rtl",
+        "verify_rtl",
+    ):
+        params = inspect.signature(getattr(mcp_server, tool)).parameters
+        assert not {"allow", "allow_path", "allowed"} & set(params), tool
+    monkeypatch.chdir(outside.parent)
+    monkeypatch.setenv(ALLOW_ENV, "secrets")
+    assert allowed_roots() == (outside.resolve(),)  # relative entries resolve once, here
 
 
 def test_filelists_cannot_leave_the_project(counter_project, outside):
@@ -219,3 +296,15 @@ def test_scripts_quote_and_refuse_as_a_second_layer(counter_project, tmp_path):
 )
 def test_reset_polarity_from_the_name(port, low):
     assert active_low_by_name(port) is low
+
+
+def test_librelane_configuration_is_checked_again(counter_project, tmp_path):
+    from chipleap.rtl.pnr import config
+    from chipleap.verify.pnr import PnrError
+
+    p = load_project(counter_project)
+    evil = dataclasses.replace(
+        p, pnr=dataclasses.replace(p.pnr, librelane={"FP_IO_MODE": "[exec id]"})
+    )
+    with pytest.raises(PnrError, match="LibreLane configuration"):
+        config(evil, tmp_path)

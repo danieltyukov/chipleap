@@ -165,6 +165,14 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
         cfg["DIE_AREA"] = [0, 0, w, h]
     cfg.update(signoff(*margins(project)))
     cfg.update(project.pnr.librelane)
+    # LibreLane hands these values to Tcl; refuse any a Tcl word could not hold as text.
+    for value in cfg.values():
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, str):
+                try:
+                    q.plain(item)
+                except q.QuoteError as exc:
+                    raise PnrError(f"LibreLane configuration: {exc}") from exc
     return cfg
 
 

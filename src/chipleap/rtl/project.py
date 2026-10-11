@@ -26,7 +26,6 @@ and a ``_parse_<name>`` function, a field on ``Project`` with a default, an entr
 
 from __future__ import annotations
 
-import glob
 import hashlib
 import os
 import re
@@ -34,7 +33,7 @@ import shlex
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -172,31 +171,37 @@ class Project:
         """Whether ``path`` resolves into the project or a directory the user allowed."""
         return _within(path.resolve(), (self.root, *self.allowed))
 
+    @property
+    def roots(self) -> tuple[Path, ...]:
+        return (self.root, *self.allowed)
+
+    def _files(self, directory: Path, suffixes: tuple[str, ...] = ()) -> list[tuple[Path, Path]]:
+        return [
+            (logical, real)
+            for logical, real in _walk(directory, self.roots)
+            if (not suffixes or real.suffix in suffixes) and not UNSAFE_PATH_RE.search(str(real))
+        ]
+
     def files_in(self, directory: Path, suffixes: tuple[str, ...] = ()) -> list[Path]:
-        """The files under ``directory`` that a run may read, copy or hash: inside the
-        project (symlinks followed), outside build directories, with safe names."""
-        out = []
-        for p in sorted(directory.rglob("*")):
-            if SKIP_DIRS & set(p.relative_to(directory).parts) or not p.is_file():
-                continue
-            if suffixes and p.suffix not in suffixes:
-                continue
-            if self.inside(p) and not UNSAFE_PATH_RE.search(str(p.resolve())):
-                out.append(p)
-        return out
+        """The files under ``directory`` that a run may read, copy or hash, resolved:
+        reached without leaving the project (a symlink out is never followed, so nothing
+        outside is even listed), outside build directories, with safe names."""
+        return [real for _, real in self._files(directory, suffixes)]
 
     def stage(self, path: Path, dest: Path) -> None:
-        """Copy a file, or a directory's ``files_in``, to ``dest``."""
+        """Copy a file, or a directory's ``files_in``, to ``dest``. Each file is resolved
+        and checked when it is copied, and the checked path is what gets read."""
         if path.is_dir():
-            for f in self.files_in(path):
-                target = dest / f.relative_to(path)
+            for logical, real in self._files(path):
+                target = dest / logical.relative_to(path)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(f, target)
-        elif self.inside(path):
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, dest)
-        else:
+                shutil.copy2(real, target)
+            return
+        real = path.resolve()
+        if not _within(real, self.roots):
             raise ProjectError(f"{path} is outside the project directory")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(real, dest)
 
     def input_files(self) -> list[Path]:
         """Every file whose content can change a result: the project file, the sources,
@@ -317,7 +322,73 @@ def _positive(value: Any, where: str, upper: float | None = None) -> float:
 
 
 def _within(path: Path, roots: Iterable[Path]) -> bool:
-    return any(path == r or r in path.parents for r in roots)
+    """Whether ``path`` (resolved) is one of ``roots`` or below one, compared by path
+    components, so /proj-evil is not inside /proj."""
+    return any(path.is_relative_to(r) for r in roots)
+
+
+def _walk(directory: Path, roots: tuple[Path, ...]) -> list[tuple[Path, Path]]:
+    """(path under ``directory``, resolved path) of every file reachable from it without
+    leaving ``roots``, sorted. A symlinked directory is entered only if it resolves inside
+    them, each directory once; build directories never. Nothing outside is listed."""
+    out: list[tuple[Path, Path]] = []
+    start = directory.resolve()
+    if not _within(start, roots):
+        return out
+    seen: set[Path] = set()
+    stack = [(directory, start)]
+    while stack:
+        logical, real = stack.pop()
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            entries = sorted(os.scandir(real), key=lambda e: e.name)
+        except OSError:
+            continue
+        for e in entries:
+            target = Path(e.path).resolve()
+            if not _within(target, roots):
+                continue
+            if target.is_dir():
+                if e.name not in SKIP_DIRS:
+                    stack.append((logical / e.name, target))
+            elif target.is_file():
+                out.append((logical / e.name, target))
+    return sorted(out)
+
+
+def _glob_regex(parts: tuple[str, ...]) -> re.Pattern[str]:
+    """A regular expression for a glob over path components: ``*``, ``?``, ``[...]`` and
+    ``**`` (any number of directories). Like glob, a wildcard does not match a leading
+    dot."""
+    out = []
+    for k, part in enumerate(parts):
+        last = k == len(parts) - 1
+        if part == "**":
+            out.append("(?:[^/]+/)*[^/]+" if last else "(?:[^/]+/)*")
+            continue
+        rx = "" if part.startswith(".") else r"(?!\.)"
+        i = 0
+        while i < len(part):
+            c = part[i]
+            if c == "*":
+                rx += "[^/]*"
+            elif c == "?":
+                rx += "[^/]"
+            elif c == "[" and part.find("]", i + 1) > i + 1:
+                j = part.find("]", i + 1)
+                body = part[i + 1 : j]
+                rx += "[" + ("^" + body[1:] if body.startswith("!") else body) + "]"
+                i = j
+            else:
+                rx += re.escape(c)
+            i += 1
+        out.append(rx if last else rx + "/")
+    return re.compile("".join(out))
+
+
+_INCLUDE_RE = re.compile(r'`include\s*(?:"([^"\n]*)"|<([^>\n]*)>|(\S*))')
 
 
 def allowed_roots(extra: Iterable[str | Path] = ()) -> tuple[Path, ...]:
@@ -377,21 +448,86 @@ class _Paths:
             )
         return real
 
+    def glob(self, base: Path, pattern: str, where: str) -> list[Path]:
+        """The files a glob pattern matches, sorted. The pattern may not be absolute or
+        hold "..", and the walk never leaves the project, so nothing outside is listed."""
+        parts = PurePosixPath(pattern).parts
+        if PurePosixPath(pattern).is_absolute() or ".." in parts:
+            raise ProjectError(
+                f"{where}: {pattern}: a pattern stays inside the project (no absolute path, no ..)"
+            )
+        fixed = next(k for k, part in enumerate(parts) if any(c in part for c in "*?["))
+        top = base.joinpath(*parts[:fixed])
+        if not _within(top.resolve(), self.roots):
+            raise ProjectError(f"{where}: {pattern} is outside the project directory")
+        rx = _glob_regex(parts[fixed:])
+        found = [
+            self.check(real, pattern, where)
+            for logical, real in _walk(top, self.roots)
+            if rx.fullmatch(logical.relative_to(top).as_posix())
+        ]
+        return sorted(dict.fromkeys(found))
+
     def files(self, base: Path, items: list[str], where: str) -> list[Path]:
         """Files, with glob patterns expanded in sorted order; every match is checked."""
         out: list[Path] = []
         for item in items:
             self._text(item, where)
             if any(ch in item for ch in "*?["):
-                pattern = item if Path(item).is_absolute() else str(base / item)
-                matches = sorted(Path(m) for m in glob.glob(pattern, recursive=True))
-                matches = [self.check(m, item, where) for m in matches if m.is_file()]
+                matches = self.glob(base, item, where)
                 if not matches:
                     raise ProjectError(f"{where}: {item} matches no files")
                 out += matches
             else:
                 out.append(self.path(base, item, where))
         return out
+
+    def check_includes(self, files: Iterable[Path], include_dirs: list[Path]) -> None:
+        """Follow every `include from ``files``, through the include directories, and
+        refuse one that names an absolute path, holds "..", uses a macro for its name, or
+        resolves (through a symlink) outside the project. The tools would read whatever it
+        named, and their messages could quote it."""
+        todo = list(files)
+        seen: set[Path] = set()
+        while todo:
+            f = todo.pop()
+            if f in seen:
+                continue
+            seen.add(f)
+            text = _strip_comments(f.read_text(errors="replace"))
+            here = f"{_shown(f, self.roots)}"
+            for m in _INCLUDE_RE.finditer(text):
+                name = m.group(1) if m.group(1) is not None else m.group(2)
+                if name is None:
+                    raise ProjectError(
+                        f"{here}: `include {m.group(3)!r} cannot be checked; name the file "
+                        "in quotes"
+                    )
+                ref = PurePosixPath(name)
+                if CONTROL_RE.search(name) or "$" in name or name.startswith("~"):
+                    raise ProjectError(f"{here}: `include {name!r} is not a plain file name")
+                if ref.is_absolute() or ".." in ref.parts:
+                    raise ProjectError(
+                        f'{here}: `include "{name}": absolute paths and .. are not allowed in '
+                        "an include; add its directory to include_dirs"
+                    )
+                candidates = [d / name for d in (f.parent, *include_dirs, self.root)]
+                for c in candidates:
+                    if not _within(c.resolve(), self.roots):
+                        raise ProjectError(
+                            f'{here}: `include "{name}" leads outside the project directory'
+                        )
+                found = next((c.resolve() for c in candidates if c.is_file()), None)
+                if found is not None:
+                    todo.append(found)
+
+
+def _shown(path: Path, roots: tuple[Path, ...]) -> str:
+    """``path`` relative to the root it is in, for messages."""
+    for r in roots:
+        if _within(path, [r]):
+            return path.relative_to(r).as_posix()
+    return str(path)
 
 
 @dataclass
@@ -713,20 +849,23 @@ def parse_project(
     for r in resets:
         if r.port in {c.port for c in clocks}:
             raise ProjectError(f"resets: {r.port} is also a clock")
+    tests = _parse_tests(data.get("tests"), paths, top)
+    include_dirs = list(dict.fromkeys(d.resolve() for d in includes))
+    paths.check_includes([*sources, *tests.sources], include_dirs)
     return Project(
         root=root,
         file=(file or root / PROJECT_FILE).resolve(),
         name=str(name),
         top=top,
         sources=tuple(sources),
-        include_dirs=tuple(dict.fromkeys(d.resolve() for d in includes)),
+        include_dirs=tuple(include_dirs),
         defines=defines,
         parameters=_parse_parameters(data.get("parameters")),
         timescale=_parse_timescale(data.get("timescale")),
         clocks=clocks,
         resets=resets,
         tech=tech,
-        tests=_parse_tests(data.get("tests"), paths, top),
+        tests=tests,
         golden=golden,
         lint=_parse_lint(data.get("lint"), paths),
         sdc=sdc,
@@ -789,13 +928,11 @@ def find_sources(directory: Path) -> list[Path]:
     """Verilog and SystemVerilog files under ``directory``, packages first, leaving out
     build directories, hidden directories and test directories."""
     found = []
-    for p in sorted(directory.rglob("*")):
+    for p, _ in _walk(directory, (directory.resolve(),)):
         rel = p.relative_to(directory).parts
         if (
-            not p.is_file()
-            or p.suffix not in (".sv", ".v")
-            or not _within(p.resolve(), [directory.resolve()])
-            or any(part.startswith(".") or part in SKIP_DIRS for part in rel[:-1])
+            p.suffix not in (".sv", ".v")
+            or any(part.startswith(".") for part in rel[:-1])
             or any(part in ("test", "tests", "tb", "sim") for part in rel[:-1])
         ):
             continue
