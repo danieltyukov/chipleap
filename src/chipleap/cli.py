@@ -542,6 +542,25 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_macro(args: argparse.Namespace) -> int:
+    from chipleap.macro import check_package, schema_text
+
+    if args.macro_cmd == "schema":
+        print(schema_text(), end="")
+        return 0
+    try:
+        report = check_package(args.dir, pdk=args.pdk)
+    except FileNotFoundError as exc:
+        print(f"chipleap: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        print(report.to_text())
+    failed = not report.passed or (args.strict and report.warnings > 0)
+    return 1 if failed else 0
+
+
 def cmd_mcp(args: argparse.Namespace) -> int:
     from chipleap.mcp_server import main as mcp_main
 
@@ -761,6 +780,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path", nargs="?", default="chipleap.yaml")
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_init)
+
+    s = sub.add_parser("macro", help="macro packages shared with aispice (macro/v1)")
+    msub = s.add_subparsers(dest="macro_cmd", required=True)
+    m = msub.add_parser(
+        "check", help="check a macro package against macro/v1 (exit code 1 when it fails)"
+    )
+    m.add_argument("dir", help="the package directory, e.g. tiny_ota.macro")
+    m.add_argument(
+        "--pdk", help="the PDK of the chip that places it: NAME or NAME@COMMIT, e.g. ihp-sg13g2"
+    )
+    m.add_argument("--strict", action="store_true", help="also fail on warnings")
+    m.add_argument("--json", action="store_true")
+    m.set_defaults(func=cmd_macro)
+    m = msub.add_parser("schema", help="print the JSON schema of macro.toml")
+    m.set_defaults(func=cmd_macro)
 
     s = sub.add_parser("mcp", help="run the MCP server on stdio")
     s.add_argument("--log-dir", help="append every tool call to a JSONL run log here")

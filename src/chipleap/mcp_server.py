@@ -62,7 +62,10 @@ lint_rtl, simulate_rtl, coverage_rtl and synthesize_rtl return structured diagno
 (file, line, severity, message, failing test) to fix the RTL in a loop; verify_rtl runs
 the steps and writes the report, place and route included when asked for.
 simulate_rtl, coverage_rtl and verify_rtl run the project's cocotb tests and golden
-model, which are code: use them only on projects the user trusts."""
+model, which are code: use them only on projects the user trusts.
+
+check_macro validates a macro package (an analog block from aispice, say) before a chip
+places it."""
 
 SPEC_REFERENCE = """# ChipLeap spec reference
 
@@ -542,6 +545,16 @@ def check_tools() -> dict[str, Any]:
     }
 
 
+def check_macro(path: str, pdk: str | None = None) -> dict[str, Any]:
+    """Check a macro package (macro/v1) before placing it in a chip."""
+    from chipleap.macro import check_package
+
+    try:
+        return check_package(Path(path).expanduser(), pdk=pdk).to_dict()
+    except FileNotFoundError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 TOOLS: dict[str, Callable[..., Any]] = {
     "list_models": list_models,
     "catalog": catalog,
@@ -559,9 +572,11 @@ TOOLS: dict[str, Callable[..., Any]] = {
     "coverage_rtl": coverage_rtl,
     "synthesize_rtl": synthesize_rtl,
     "verify_rtl": verify_rtl,
+    "check_macro": check_macro,
 }
-# Tools whose results depend on the machine or write files are logged but not replayed.
-SIDE_EFFECTS = {"generate_soc", "verify_soc", "check_tools", "verify_rtl"}
+# Tools whose results depend on the machine, on files or write files are logged but not
+# replayed.
+SIDE_EFFECTS = {"generate_soc", "verify_soc", "check_tools", "verify_rtl", "check_macro"}
 # Tools that read a project. Their results depend on its files and on the installed tools,
 # so their log entries also carry a digest of every input file and the tool versions, and
 # a replay that differs says which of the two changed.
@@ -868,6 +883,16 @@ def build_server(log_dir: str | None = None) -> Any:
             "say which uncovered points matter, and synthesize_rtl for area and the Fmax "
             "estimate. Never edit a test only to make it pass."
         )
+
+    @server.tool(
+        description="Check a macro package (macro/v1, the format ChipLeap and aispice share "
+        "for hardened blocks) before placing it: macro.toml against its schema, required "
+        "files, pins across GDS, LEF, liberty, Verilog and SPICE, size, measured specs, and "
+        "DRC and LVS evidence. pdk is the chip's PDK, NAME or NAME@COMMIT. Returns every "
+        "finding with its rule id, severity, file and message."
+    )
+    def check_macro(path: str, pdk: str | None = None) -> dict[str, Any]:
+        return logged("check_macro", TOOLS["check_macro"])(path=path, pdk=pdk)
 
     @server.resource(
         "chipleap://spec-reference",
