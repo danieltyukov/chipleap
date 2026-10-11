@@ -2,7 +2,15 @@
 
 import pytest
 
-from chipleap.rtl.netlist import NetlistError, Nets, parse_netlist, trace_chain
+from chipleap.rtl.netlist import (
+    Limits,
+    NetlistError,
+    Nets,
+    hierarchy,
+    parse_netlist,
+    read_netlist,
+    trace_chain,
+)
 
 # The shape OpenROAD's write_verilog gives a scan-inserted design: non-ANSI ports, escaped
 # names with a space before the bit select, assigns at the end.
@@ -108,12 +116,73 @@ def test_malformed_netlists_fail_cleanly(text):
         parse_netlist(text)
 
 
-def test_size_limit(monkeypatch):
-    from chipleap.rtl import netlist
-
-    monkeypatch.setattr(netlist, "MAX_BYTES", 10)
+def test_size_limit(tmp_path):
     with pytest.raises(NetlistError, match="larger than"):
-        parse_netlist(SCAN)
+        parse_netlist(SCAN, Limits(bytes=10))
+    # The byte limit holds across the files read together.
+    a, b = tmp_path / "a.v", tmp_path / "b.v"
+    a.write_text("module a(); endmodule\n")
+    b.write_text("module b(); endmodule\n")
+    assert set(read_netlist([a, b]).modules) == {"a", "b"}
+    with pytest.raises(NetlistError, match="larger than"):
+        read_netlist([a, b], Limits(bytes=30))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "module m(a); input [0:2147483647] a; endmodule",
+        "module m(input [2147483647:0] a); endmodule",
+        "module m(); wire [2147483647:0] w; endmodule",
+        "module m(); wire w; sg13g2_inv_1 u (.A(w[0:2147483647])); endmodule",
+        "module m(); sg13g2_inv_1 u (.A(2147483647'b0)); endmodule",
+        "module m(); sg13g2_inv_1 u (.A(" + "9" * 5000 + ")); endmodule",
+        "module m(); sg13g2_inv_1 u (.A(" + "{" * 100 + "1'b0" + "}" * 100 + ")); endmodule",
+    ],
+)
+def test_a_huge_bus_is_refused_before_its_bits_are_made(text):
+    with pytest.raises(NetlistError, match="bits wide|too long|too deeply|wider than"):
+        parse_netlist(text)
+
+
+def test_instances_over_the_cap():
+    # An instance array declaring 10**6 + 1 instances costs a few bytes of text.
+    with pytest.raises(NetlistError, match="more than 1000000 instances"):
+        parse_netlist("module m(); sg13g2_inv_1 u [0:1000000] (); endmodule")
+    many = "".join(f"sg13g2_inv_1 u{i} ();\n" for i in range(50))
+    with pytest.raises(NetlistError, match="more than 40 instances"):
+        parse_netlist(f"module m();\n{many}endmodule\n", Limits(instances=40))
+    # A hierarchy of 2 x 1000 x 1000 leaf cells holds 2 * 10**6 instances in under 40 kB.
+    leaf = "".join(f"sg13g2_inv_1 u{i} ();\n" for i in range(1000))
+    mid = "".join(f"leaf l{i} ();\n" for i in range(1000))
+    text = (
+        f"module leaf();\n{leaf}endmodule\nmodule mid();\n{mid}endmodule\n"
+        "module top(); mid a (); mid b (); endmodule\n"
+    )
+    nl = parse_netlist(text)
+    with pytest.raises(NetlistError, match="more than 1000000 instances"):
+        for _ in hierarchy(nl, "top"):
+            pass
+
+
+def test_a_module_that_contains_itself_is_refused():
+    nl = parse_netlist("module a(); a u (); endmodule")
+    with pytest.raises(NetlistError, match=r"module a contains itself \(a > a\)"):
+        list(hierarchy(nl, "a"))
+    nl = parse_netlist("module a(); b u (); endmodule module b(); a v (); endmodule")
+    with pytest.raises(NetlistError, match=r"contains itself \(a > b > a\)"):
+        list(hierarchy(nl, "a"))
+    deep = "".join(f"module m{i}(); m{i + 1} u (); endmodule\n" for i in range(80))
+    with pytest.raises(NetlistError, match="deeper than 64"):
+        list(hierarchy(parse_netlist(deep + "module m80(); endmodule\n"), "m0"))
+    two = parse_netlist("module a(); b u (); b v (); endmodule module b(); endmodule")
+    assert [p for p, _ in hierarchy(two, "a")] == ["", "u", "v"]
+
+
+def test_a_chain_longer_than_the_limit_is_refused():
+    top = parse_netlist(SCAN).top("top")
+    with pytest.raises(NetlistError, match="longer than 1 cells"):
+        trace_chain(Nets(top), "chain_0", "scan_in_0", "scan_out_0", through=BUFFERS, limit=1)
 
 
 def test_a_chain_may_end_on_a_functional_output():

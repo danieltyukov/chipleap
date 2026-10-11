@@ -11,6 +11,7 @@ Tool command lines need neither: they are argument vectors, and on a server
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable
 
@@ -43,3 +44,11 @@ def tcl(text: object) -> str:
 def tcl_list(items: Iterable[object]) -> str:
     """A Tcl list of words, each brace-quoted."""
     return "{" + " ".join(tcl(i) for i in items) + "}"
+
+
+def number(value: object) -> str:
+    """A number for a script, written plainly: a finite int or float, never a string that
+    merely looks like one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise QuoteError(f"{value!r} is not a finite number")
+    return f"{value:g}" if isinstance(value, float) else str(value)

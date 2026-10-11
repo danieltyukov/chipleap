@@ -15,6 +15,14 @@ Changes always apply to the original routed run, as a whole list, so an ECO resu
 function of the base and its changes, and the project's ``eco`` section reproduces it.
 The changes reach OpenROAD as a data file it reads line by line; no name from a project
 or an MCP client becomes script text.
+
+Everything an ECO takes from the routed run (the steps it ran, the state before detailed
+routing and every file that state names, LibreLane's configuration, the constraints and
+sources beside it) must be a file ChipLeap recorded in the run's manifest, with the hash
+it recorded (``chipleap.rtl.provenance``). The configuration passes on only the LibreLane
+variables ChipLeap writes and the project's own numeric settings, each a plain value: no
+variable that names a script, hook or plugin, and no substitution. A configuration or
+script found in ``build/`` that ChipLeap did not record is never run.
 """
 
 from __future__ import annotations
@@ -22,30 +30,30 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.openroad import (
-    ECO_MARKER,
+    ECO_MANIFEST,
     ECO_TAG,
     RUN_TAG,
+    Job,
     OpenroadError,
     OpenroadUnavailable,
-    base_digest,
     failure,
-    in_run,
     pdk_views,
+    pnr_sealed,
     read_json,
+    read_limited,
     routed_views,
     run_dir,
-    run_openroad,
-    stage,
 )
-from chipleap.rtl.pnr import margins, pnr_data
+from chipleap.rtl.pnr import SDC_NAME, margins, pnr_data
 from chipleap.rtl.project import CORNERS, EcoChange, Project
+from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.verify import launch
 from chipleap.verify.pnr import PnrError, PnrResult, parse
 from chipleap.verify.result import StepResult
@@ -56,6 +64,39 @@ RESUME_AT = "OpenROAD.DetailedRouting"
 # global routing for the nets that changed.
 PREFIX = ("OpenROAD.DEFtoODB", "OpenROAD.DetailedPlacement", "OpenROAD.GlobalRouting")
 REPAIR = "OpenROAD.ResizerTimingPostGRT"
+STEP_ID_RE = re.compile(r"[A-Z][A-Za-z]*\.[A-Z][A-Za-z0-9]*")
+# The LibreLane variables ChipLeap's place and route writes (chipleap.rtl.pnr.config and
+# chipleap.verify.pnr.signoff), by the kind of value each takes. An ECO resumes LibreLane
+# with these, and with the project's own pnr.librelane settings that are numbers or
+# booleans; anything else in the configuration fails the ECO.
+TEMPLATE_KEYS = {
+    "DESIGN_NAME": "text",
+    "VERILOG_FILES": "file",
+    "VERILOG_INCLUDE_DIRS": "dir",
+    "VERILOG_DEFINES": "text",
+    "SYNTH_PARAMETERS": "text",
+    "RUN_LINTER": "bool",
+    "CLOCK_PORT": "text",
+    "CLOCK_PERIOD": "number",
+    "PNR_SDC_FILE": "file",
+    "SIGNOFF_SDC_FILE": "file",
+    "FP_CORE_UTIL": "number",
+    "PL_TARGET_DENSITY_PCT": "number",
+    "FP_SIZING": "text",
+    "DIE_AREA": "number",
+    "RUN_MAGIC_DRC": "bool",
+    "DRT_ANTENNA_REPAIR_ITERS": "number",
+    "DEFAULT_CORNER": "text",
+    "RUN_POST_GRT_RESIZER_TIMING": "bool",
+    "PL_RESIZER_SETUP_SLACK_MARGIN": "number",
+    "GRT_RESIZER_SETUP_SLACK_MARGIN": "number",
+    "GRT_RESIZER_HOLD_SLACK_MARGIN": "number",
+    "KLAYOUT_DRC_THREADS": "number",
+}
+# Names of variables that run or locate code, whatever the project says.
+SCRIPT_KEY_RE = re.compile(
+    r"SCRIPT|HOOK|PLUGIN|TCL|CFG|CONFIG|FILE|DIR|PATH|CMD|COMMAND|EXTRA|META"
+)
 PATHS_SHOWN = 20
 
 
@@ -114,61 +155,75 @@ class TimingPath:
         }
 
 
-def _steps(run: Path) -> list[tuple[str, Path]]:
-    """The steps a LibreLane run ran, in order: each step directory's id."""
+def _steps(run: Path, sealed: Sealed) -> list[tuple[str, Path]]:
+    """The steps a LibreLane run ran, in order: each recorded step directory's id."""
+    prefix = run.relative_to(sealed.root).as_posix() + "/"
     out = []
-    dirs = [d for d in run.iterdir() if d.is_dir() and re.match(r"\d+-", d.name)]
-    for d in sorted(dirs, key=lambda d: int(d.name.split("-", 1)[0])):
-        cfg = d / "config.json"
-        if not cfg.is_file():
-            continue
-        meta = read_json(cfg).get("meta") or {}
+    configs = []
+    for rel in sealed.files:
+        m = re.fullmatch(re.escape(prefix) + r"(\d+)-[^/]+/config\.json", rel)
+        if m:
+            configs.append((int(m.group(1)), sealed.root / rel))
+    for _, cfg in sorted(configs):
+        meta = _read(sealed, cfg).get("meta") or {}
         step = meta.get("step") if isinstance(meta, dict) else None
         if isinstance(step, str):
-            out.append((step, d))
+            if not STEP_ID_RE.fullmatch(step):
+                raise EcoError(f"{cfg.parent.name} names a step ChipLeap does not know: {step!r}")
+            out.append((step, cfg.parent))
     return out
 
 
-def _confined_state(state: Any, run: Path) -> dict[str, Any]:
-    """A step's state with every file it names checked to be inside the run."""
-    if not isinstance(state, dict):
-        raise EcoError("the run's state is not a mapping")
+def _read(sealed: Sealed, path: Path) -> dict[str, Any]:
+    try:
+        data = sealed.read_json(path)
+    except SealError as exc:
+        raise EcoError(str(exc)) from None
+    if not isinstance(data, dict):
+        raise EcoError(f"{path.name} is not a mapping")
+    return data
 
-    def check(value: Any, key: str) -> None:
+
+def _check(sealed: Sealed, path: str | Path, what: str) -> Path:
+    try:
+        return sealed.check(path)
+    except SealError as exc:
+        raise EcoError(f"{what}: {exc}") from None
+
+
+def _confined_state(state: dict[str, Any], sealed: Sealed) -> dict[str, Any]:
+    """A step's state with every file it names checked to be a file the run recorded,
+    unchanged. A loop over an explicit stack."""
+    todo: list[tuple[str, Any]] = [(k, v) for k, v in state.items() if k != "metrics"]
+    while todo:
+        key, value = todo.pop()
         if isinstance(value, str):
-            in_run(value, run, f"state {key}")
+            _check(sealed, value, f"state {key}")
         elif isinstance(value, dict):
-            for k, v in value.items():
-                check(v, f"{key}.{k}")
+            todo += [(f"{key}.{k}", v) for k, v in value.items()]
         elif isinstance(value, list):
-            for v in value:
-                check(v, key)
+            todo += [(key, v) for v in value]
         elif value is not None and not isinstance(value, (int, float, bool)):
             raise EcoError(f"state {key} is not a path")
-
-    for key, value in state.items():
-        if key != "metrics":
-            check(value, key)
     return state
 
 
-def base(project: Project) -> tuple[Path, dict[str, Any], list[str]]:
-    """The routed run, its state before detailed routing, and the steps it ran from there."""
+def base(project: Project) -> tuple[Path, Sealed, dict[str, Any], list[str]]:
+    """The routed run, its manifest, its state before detailed routing, and the steps it
+    ran from there."""
     run = run_dir(project, RUN_TAG)
     if not (run / "final" / "metrics.json").is_file():
         raise OpenroadUnavailable("no routed design: run the pnr step first")
-    steps = _steps(run)
+    sealed = pnr_sealed(project)
+    steps = _steps(run, sealed)
     ids = [s for s, _ in steps]
     if RESUME_AT not in ids:
         raise EcoError(f"the routed run has no {RESUME_AT} step to resume from")
     i = ids.index(RESUME_AT)
-    state_file = steps[i][1] / "state_in.json"
-    if not state_file.is_file():
-        raise EcoError(f"{steps[i][1].name} has no state_in.json")
-    state = _confined_state(read_json(state_file), run)
+    state = _confined_state(_read(sealed, steps[i][1] / "state_in.json"), sealed)
     if not isinstance(state.get("def"), str):
         raise EcoError("the state before detailed routing has no DEF")
-    return run, state, ids[i:]
+    return run, sealed, state, ids[i:]
 
 
 def changes_file(changes: list[EcoChange]) -> str:
@@ -186,7 +241,7 @@ def changes_file(changes: list[EcoChange]) -> str:
 EDIT_SCRIPT = r"""
 set block [ord::get_db_block]
 set db [ord::get_db]
-set f [open "changes.txt" r]
+set f [open $changes_file r]
 set n 0
 while {[gets $f line] >= 0} {
     set w [split $line "\t"]
@@ -265,11 +320,12 @@ ERRORS = {
 }
 
 
-def edit_script(files: dict[str, Any], def_: str) -> str:
+def edit_script(files: dict[str, Any], def_: str, changes: str) -> str:
     head = [
         f"read_lef {q.tcl(files['tech_lef'])}",
         *(f"read_lef {q.tcl(f)}" for f in files["cell_lefs"]),
         f"read_def {q.tcl(def_)}",
+        f"set changes_file {q.tcl(changes)}",
     ]
     return "\n".join(head) + EDIT_SCRIPT
 
@@ -296,12 +352,77 @@ def parse_edits(log: str, edits: list[EcoChange]) -> list[str]:
     return done
 
 
-def eco_config(project: Project, changes: list[EcoChange], steps: list[str]) -> dict[str, Any]:
-    """The configuration the ECO resumes LibreLane with: the routed run's, with the step
-    list and, for a repair, the margins it asks for."""
-    cfg = read_json(project.build_dir / "pnr" / "config.json")
-    if not isinstance(cfg, dict):
-        raise EcoError("the routed run's config.json is not a mapping")
+def _plain_text(key: str, value: Any) -> str:
+    """A text value LibreLane takes as it is: no Tcl syntax and no substitution
+    (``expr::``, ``refg::``, ``pdk_dir::``)."""
+    if not isinstance(value, str):
+        raise EcoError(f"the routed run's configuration sets {key} to {value!r}, not text")
+    try:
+        q.plain(value)
+    except q.QuoteError as exc:
+        raise EcoError(f"the routed run's configuration sets {key}: {exc}") from None
+    if "::" in value:
+        raise EcoError(f"the routed run's configuration sets {key} to a substitution: {value!r}")
+    return value
+
+
+def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str, Any]:
+    """The routed run's configuration as an ECO passes it on: only ``TEMPLATE_KEYS`` and
+    the project's own numeric or boolean ``pnr.librelane`` settings, each with a plain
+    value, and every file it names one the run recorded beside it, unchanged."""
+    for key, value in cfg.items():
+        kind = TEMPLATE_KEYS.get(key)
+        if kind is None:
+            own = project.pnr.librelane
+            if key not in own or own[key] != value or SCRIPT_KEY_RE.search(key):
+                raise EcoError(
+                    f"the routed run's configuration sets {key}, which an ECO does not pass "
+                    "on to LibreLane; run the pnr step again"
+                )
+            kind = "setting"
+        for item in value if isinstance(value, list) else [value]:
+            if kind in ("file", "dir"):
+                _recorded(key, item, kind, sealed)
+            elif kind == "text":
+                _plain_text(key, item)
+            elif kind == "bool" and not isinstance(item, bool):
+                raise EcoError(f"the routed run's configuration sets {key} to {item!r}")
+            elif kind in ("number", "setting") and not (
+                isinstance(item, (int, float)) and (kind == "setting" or not isinstance(item, bool))
+            ):
+                raise EcoError(
+                    f"the routed run's configuration sets {key} to {item!r}, not a number"
+                )
+    return dict(cfg)
+
+
+def _recorded(key: str, item: Any, kind: str, sealed: Sealed) -> None:
+    """A ``dir::`` path to a source or the constraints ChipLeap copied beside the
+    configuration, which the run recorded."""
+    text = _plain_text(key, item.removeprefix("dir::") if isinstance(item, str) else item)
+    rel = Path(text)
+    if (
+        not item.startswith("dir::")
+        or rel.is_absolute()
+        or ".." in rel.parts
+        or not (rel.parts[:1] == ("src",) or text == SDC_NAME)
+    ):
+        raise EcoError(
+            f"the routed run's configuration sets {key} to {item!r}, not a file ChipLeap "
+            "wrote beside it"
+        )
+    if kind == "file":
+        _check(sealed, sealed.root / rel, key)
+    elif not any(f.startswith(rel.as_posix() + "/") for f in sealed.files):
+        raise EcoError(f"{key}: {text} is not a directory the run recorded")
+
+
+def eco_config(
+    project: Project, changes: list[EcoChange], steps: list[str], sealed: Sealed
+) -> dict[str, Any]:
+    """The configuration the ECO resumes LibreLane with: the routed run's recorded one,
+    through ``_settings``, with the step list and, for a repair, the margins it asks for."""
+    cfg = _settings(project, _read(sealed, sealed.root / "config.json"), sealed)
     flow = list(PREFIX)
     repairs = [c for c in changes if c.kind == "repair"]
     if repairs:
@@ -316,6 +437,9 @@ def eco_config(project: Project, changes: list[EcoChange], steps: list[str]) -> 
                 cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] = (
                     c.margin_ns if c.margin_ns is not None else 0.1
                 )
+    for step in steps:
+        if not STEP_ID_RE.fullmatch(step):
+            raise EcoError(f"the routed run names a step ChipLeap does not know: {step!r}")
     flow += steps
     cfg["meta"] = {"version": 2, "flow": flow}
     return cfg
@@ -327,7 +451,7 @@ def _run_librelane(
     tool = librelane()
     if not tool.found or tool.path is None:
         raise OpenroadUnavailable("LibreLane is not installed")
-    (work / "config.eco.json").write_text(json.dumps(cfg, indent=2))
+    builddir.write_text(work, "config.eco.json", json.dumps(cfg, indent=2))
     cmd = [
         tool.path,
         "--pdk",
@@ -349,10 +473,13 @@ def _run_librelane(
         raise EcoError(f"LibreLane timed out after {exc.seconds:g} s") from None
     final = run_dir_of(work) / "final"
     if not (final / "metrics.json").is_file():
-        tail = "\n".join(log.read_text(errors="replace").splitlines()[-15:])
+        tail = "\n".join(read_limited(log).splitlines()[-15:])
         raise EcoError(f"LibreLane did not finish the ECO (exit {code}):\n{tail}")
     gds = next(iter(sorted((final / "gds").glob("*.gds"))), None)
-    return read_json(final / "metrics.json"), gds
+    metrics = read_json(final / "metrics.json")
+    if not isinstance(metrics, dict):
+        raise EcoError("the ECO's metrics.json is not a mapping")
+    return metrics, gds
 
 
 def run_dir_of(work: Path) -> Path:
@@ -363,37 +490,38 @@ def apply_eco(project: Project, changes: list[EcoChange]) -> EcoResult:
     """Apply ``changes`` to the routed run and sign the result off again."""
     if not changes:
         raise EcoError("no changes to apply")
-    run, state, steps = base(project)
-    work = (project.build_dir / "pnr").resolve()
-    edit_dir = work / "eco"
-    if edit_dir.exists():
-        shutil.rmtree(edit_dir)
-    edit_dir.mkdir(parents=True)
+    run, sealed, state, steps = base(project)
+    cfg = eco_config(project, changes, steps, sealed)
+    work = project.work_dir("pnr")
+    # The ECO's own files; an earlier ECO of the same base is replaced as a whole.
+    unseal(work, ECO_MANIFEST)
+    builddir.work_dir(work, "runs", ECO_TAG, empty=True)
+    edit_dir = builddir.work_dir(work, "eco", empty=True)
     edits = [c for c in changes if c.kind != "repair"]
     done: list[str] = []
-    def_path = Path(state["def"])
+    def_path = _check(sealed, state["def"], "state def")
     if edits:
-        pdk = pdk_views(project, run)
-        files = pdk.stage_all(edit_dir)
-        (edit_dir / "changes.txt").write_text(changes_file(edits))
-        log, code = run_openroad(edit_script(files, stage(def_path, edit_dir)), edit_dir, "edit")
+        job = Job(edit_dir, "edit")
+        files = pdk_views(project, run).stage_all(job)
+        changes_txt = builddir.write_text(edit_dir, "changes.txt", changes_file(edits))
+        script = edit_script(files, job.stage(def_path, sealed=sealed), job.stage(changes_txt))
+        log, code = job.run(script)
         done = parse_edits(log, edits)
         if code != 0 or "CHIPLEAP-ECO end" not in log:
             raise failure("the ECO edits", log, code)
-        def_path = edit_dir / "eco.def"
-    state = {**state, "def": str(def_path)}
-    state_file = edit_dir / "state_in.json"
-    state_file.write_text(json.dumps(state, indent=1))
-    eco_run = run_dir(project, ECO_TAG)
-    if eco_run.exists():
-        shutil.rmtree(eco_run)  # an earlier ECO of the same base, which this one replaces
+        def_path = job.output("eco.def")
+        if not def_path.is_file():
+            raise EcoError("OpenROAD wrote no edited DEF")
+    state_file = builddir.write_text(
+        edit_dir, "state_in.json", json.dumps({**state, "def": str(def_path)}, indent=1)
+    )
     try:
-        metrics, gds = _run_librelane(work, eco_config(project, changes, steps), state_file)
+        metrics, gds = _run_librelane(work, cfg, state_file)
     except PnrError as exc:
         raise EcoError(str(exc)) from exc
     clk = project.fastest_clock
     mhz = clk.mhz if clk else 100.0
-    before = parse(read_json(run / "final" / "metrics.json"), mhz, None)
+    before = parse(_read(sealed, run / "final" / "metrics.json"), mhz, None)
     after = parse(metrics, mhz, gds)
     record = []
     k = 0
@@ -403,10 +531,14 @@ def apply_eco(project: Project, changes: list[EcoChange]) -> EcoResult:
             item["result"] = f"was {done[k]}" if c.kind == "resize" else f"new buffer {done[k]}"
             k += 1
         record.append(item)
-    (eco_run / ECO_MARKER).write_text(
-        json.dumps({"base_metrics_sha256": base_digest(project), "changes": record}, indent=1)
+    seal(
+        work,
+        ECO_MANIFEST,
+        "eco",
+        [f"runs/{ECO_TAG}", "eco"],
+        {"base": sealed.mac, "changes": record},
     )
-    return EcoResult(record, before, after, eco_run)
+    return EcoResult(record, before, after, run_dir_of(work))
 
 
 def eco_data(project: Project, r: EcoResult) -> dict[str, Any]:
@@ -480,7 +612,7 @@ def paths_script(
         "set_propagated_clock [all_clocks]",
         'puts "CHIPLEAP-PATHS begin"',
         f"report_checks -path_delay {'max' if kind == 'max' else 'min'} "
-        f"-group_path_count {int(count)} -digits 4",
+        f"-group_path_count {q.number(int(count))} -digits 4",
         'puts "CHIPLEAP-PATHS end"',
     ]
     return "\n".join(lines) + "\n"
@@ -548,20 +680,19 @@ def timing_paths(
         raise ValueError("kind must be setup or hold")
     views = routed_views(project)
     pdk = pdk_views(project, views.run)
-    work = (project.build_dir / "paths").resolve()
-    work.mkdir(parents=True, exist_ok=True)
-    files = pdk.stage_all(work, (corner,))
+    job = Job(project.work_dir("paths"), f"paths_{kind}_{corner}")
+    files = pdk.stage_all(job, (corner,))
     script = paths_script(
         project,
         files,
         corner,
-        stage(views.netlist, work),
-        stage(views.sdc, work),
-        stage(views.spef, work) if views.spef else None,
+        job.stage(views.netlist, sealed=views.sealed),
+        job.stage(views.sdc, sealed=views.sealed),
+        job.stage(views.spef, sealed=views.sealed) if views.spef else None,
         "max" if kind == "setup" else "min",
         max(1, min(count, PATHS_SHOWN)),
     )
-    log, code = run_openroad(script, work, f"paths_{kind}_{corner}")
+    log, code = job.run(script)
     if code != 0 or "CHIPLEAP-PATHS end" not in log:
         raise failure("OpenSTA's report_checks", log, code)
     found = parse_paths(log, "max" if kind == "setup" else "min")

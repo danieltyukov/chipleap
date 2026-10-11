@@ -19,13 +19,14 @@ installed, else the sources and include directories as they are.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
+from chipleap.rtl.openroad import PNR_MANIFEST, RUN_TAG
 from chipleap.rtl.project import Project
+from chipleap.rtl.provenance import copy_file, seal, unseal
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
 from chipleap.verify.pnr import PnrError, PnrResult, parse, run_librelane, signoff
 from chipleap.verify.result import StepResult
@@ -135,7 +136,7 @@ def _scan_netlist(project: Project, workdir: Path, src: Path) -> dict[str, Any]:
         scan = insert_scan(project, workdir / "scan")
     except (DftError, OpenroadError, NetlistError) as exc:
         raise PnrError(f"scan insertion (dft.insert) failed: {exc}") from exc
-    shutil.copyfile(scan.netlist, src / scan.netlist.name)
+    copy_file(scan.netlist, src / scan.netlist.name)
     return {"VERILOG_FILES": [f"dir::src/{scan.netlist.name}"], "RUN_LINTER": False}
 
 
@@ -204,8 +205,12 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     if not librelane().found:
         raise PnrError("LibreLane is not installed")
     work = project.work_dir(workdir or "pnr")
+    # The manifest goes first, so a run that stops halfway leaves none, and is written
+    # once LibreLane has finished: later steps reuse only what it records.
+    unseal(work, PNR_MANIFEST)
     cfg = config(project, work)
-    metrics, gds = run_librelane(work, cfg)
+    metrics, gds = run_librelane(work, cfg, RUN_TAG)
+    seal(work, PNR_MANIFEST, "pnr", ["config.json", SDC_NAME, "src", f"runs/{RUN_TAG}"])
     clk = project.fastest_clock
     return parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds)
 

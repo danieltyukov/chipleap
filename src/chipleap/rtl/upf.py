@@ -23,16 +23,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
-from chipleap.rtl.netlist import Module, Netlist, NetlistError, parse_netlist
+from chipleap.rtl.netlist import Netlist, NetlistError, hierarchy, read_netlist
 from chipleap.rtl.openroad import (
+    Job,
     OpenroadError,
     OpenroadUnavailable,
     failure,
     pdk_views,
     read_limited,
-    run_openroad,
-    stage,
 )
 from chipleap.rtl.project import PowerDomain, Project, UpfConfig
 from chipleap.rtl.synth import SynthError, synthesize
@@ -79,9 +79,12 @@ def write_upf(upf: UpfConfig, areas: dict[str, tuple[float, float, float, float]
             lines.append(f"create_power_domain {q.tcl(d.name)} -elements {{.}}")
     for d in upf.domains:
         if d.voltage is not None:
-            lines.append(f"set_domain_voltage -domain {q.tcl(d.name)} -voltage {d.voltage:g}")
+            lines.append(
+                f"set_domain_voltage -domain {q.tcl(d.name)} -voltage {q.number(float(d.voltage))}"
+            )
     for name, (x0, y0, x1, y1) in areas.items():
-        lines.append(f"set_domain_area {q.tcl(name)} -area {{{x0:g} {y0:g} {x1:g} {y1:g}}}")
+        box = " ".join(q.number(float(v)) for v in (x0, y0, x1, y1))
+        lines.append(f"set_domain_area {q.tcl(name)} -area {{{box}}}")
     return "\n".join(lines) + "\n"
 
 
@@ -110,7 +113,8 @@ class Flat:
 
 def flatten(nl: Netlist, top: str, domains: tuple[PowerDomain, ...]) -> Flat:
     """Leaf cells with their domain: the domain whose element is the longest prefix of the
-    cell's path, else the top domain."""
+    cell's path, else the top domain. The hierarchy is walked with ``netlist.hierarchy``,
+    which refuses loops and bounds its depth and size."""
     owner = {e: d.name for d in domains for e in d.elements}
     top_domain = next(d.name for d in domains if not d.elements)
     flat = Flat()
@@ -119,10 +123,10 @@ def flatten(nl: Netlist, top: str, domains: tuple[PowerDomain, ...]) -> Flat:
         for b in mod.bits(p):
             flat.ports[b] = mod.directions.get(p, "")
     found: set[str] = set()
-
-    def walk(m: Module, path: str, domain: str, depth: int) -> None:
-        if depth > 64:
-            raise UpfError("the module hierarchy is deeper than 64")
+    # Each module's domain, set when its parent is visited, which is always first.
+    domain_of: dict[str, str] = {"": top_domain}
+    for path, m in hierarchy(nl, top):
+        domain = domain_of.pop(path)
         prefix = f"{path}/" if path else ""
         for lhs, rhs in m.assigns:
             for a, b in zip(reversed(lhs), reversed(rhs), strict=False):
@@ -140,9 +144,7 @@ def flatten(nl: Netlist, top: str, domains: tuple[PowerDomain, ...]) -> Flat:
             for pin, bits in inst.pins.items():
                 for a, b in zip(reversed(child.bits(pin)), reversed(bits), strict=False):
                     flat.union(f"{ipath}/{a}", prefix + b)
-            walk(child, ipath, dom, depth + 1)
-
-    walk(mod, "", top_domain, 0)
+            domain_of[ipath] = dom
     missing = sorted(set(owner) - found)
     if missing:
         raise UpfError(f"power domain element {missing[0]} is not an instance in the design")
@@ -235,11 +237,12 @@ def upf_script(
         f"read_verilog {q.tcl(netlist)}",
         f"link_design -hier {q.tcl(project.top)}",
         f"read_upf -file {q.tcl(upf_file)}",
-        f"initialize_floorplan -die_area {{0 0 {die:g} {die:g}}} "
-        f"-core_area {{{cs:g} {cs:g} {cs + core:g} {cs + core:g}}} -site {SITE}",
+        f"initialize_floorplan -die_area {{0 0 {q.number(die)} {q.number(die)}}} "
+        f"-core_area {{{q.number(cs)} {q.number(cs)} {q.number(cs + core)} {q.number(cs + core)}}} "
+        f"-site {q.tcl(SITE)}",
         "make_tracks",
         "place_pins -hor_layers Metal3 -ver_layers Metal2",
-        f"global_placement -skip_io -density {density:g}",
+        f"global_placement -skip_io -density {q.number(density)}",
         "detailed_placement",
         # A cell detailed placement could not legalize is a finding, not a crash.
         "if {[catch {check_placement} err]} {",
@@ -297,25 +300,21 @@ def analyze(project: Project) -> UpfResult:
     upf = project.upf
     if upf is None:
         raise OpenroadUnavailable("no upf section in the project")
-    work = (project.build_dir / "upf").resolve()
-    work.mkdir(parents=True, exist_ok=True)
+    work = project.work_dir("upf")
     views = pdk_views(project)
     try:
         synth = synthesize(project, work / "synth", flatten=False)
     except SynthError as exc:
         raise UpfError(f"synthesis failed: {exc}") from exc
-    nl = parse_netlist(read_limited(synth.netlist))
+    nl = read_netlist([synth.netlist])
     lib = read_lef("\n".join(read_limited(p) for p in views.cell_lefs))
     flat = flatten(nl, project.top, upf.domains)
     cell_area, areas, core = domain_areas(flat, lib, project)
-    upf_text = write_upf(upf, areas)
-    (work / f"{project.top}.upf").write_text(upf_text)
-    files = views.stage_all(work)
-    log, code = run_openroad(
-        upf_script(project, files, stage(synth.netlist, work), f"{project.top}.upf", core),
-        work,
-        "upf",
-    )
+    upf_file = builddir.write_text(work, f"{project.top}.upf", write_upf(upf, areas))
+    job = Job(work, "upf")
+    files = views.stage_all(job)
+    script = upf_script(project, files, job.stage(synth.netlist), job.stage(upf_file), core)
+    log, code = job.run(script)
     if code != 0 or "CHIPLEAP-UPF end" not in log:
         raise failure("OpenROAD with the UPF", log, code)
     placed = parse_placed(log)
@@ -338,11 +337,11 @@ def analyze(project: Project) -> UpfResult:
                 "placed_outside": outside if d.elements else None,
             }
         )
-    roundtrip = work / "openroad.upf"
+    roundtrip = job.output("openroad.upf")
     return UpfResult(
         domains=domains,
         crossings=crossings(flat, lib, upf.domains),
-        upf=work / f"{project.top}.upf",
+        upf=upf_file,
         roundtrip=read_limited(roundtrip, 1 << 20) if roundtrip.is_file() else "",
         placement_check=placement_check(log),
     )

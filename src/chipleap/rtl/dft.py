@@ -163,12 +163,14 @@ def scan_script(project: Project, files: dict[str, Any], netlist: str, cfg: DftC
     ]
     for c in project.clocks:
         lines.append(
-            f"create_clock -name {q.tcl(c.port)} -period {float(c.period_ns):g} "
+            f"create_clock -name {q.tcl(c.port)} -period {q.number(float(c.period_ns))} "
             f"[get_ports {q.tcl(c.port)}]"
         )
-    opts = f"-max_length {int(cfg.max_chain_length)} -clock_mixing {q.tcl(cfg.clock_mixing)}"
+    opts = (
+        f"-max_length {q.number(int(cfg.max_chain_length))} -clock_mixing {q.tcl(cfg.clock_mixing)}"
+    )
     if cfg.max_chains:
-        opts += f" -max_chains {int(cfg.max_chains)}"
+        opts += f" -max_chains {q.number(int(cfg.max_chains))}"
     lines += [
         f"set_dft_config {opts}",
         "scan_replace",

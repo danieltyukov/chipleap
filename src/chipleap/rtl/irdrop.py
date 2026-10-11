@@ -21,16 +21,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.openroad import (
+    Job,
     OpenroadError,
     OpenroadUnavailable,
     failure,
     pdk_views,
     read_limited,
     routed_views,
-    run_openroad,
-    stage,
 )
 from chipleap.rtl.power import activity
 from chipleap.rtl.project import CORNERS, Project
@@ -100,7 +100,7 @@ def ir_script(
         lines.append(f"read_spef {q.tcl(spef)}")
     lines += [
         "set_propagated_clock [all_clocks]",
-        f"set_power_activity -input -activity {float(project.power.input_activity):g}",
+        f"set_power_activity -input -activity {q.number(float(project.power.input_activity))}",
     ]
     if vcd:
         lines.append(f"read_vcd -scope {q.tcl(scope)} {q.tcl(vcd)}")
@@ -111,7 +111,7 @@ def ir_script(
         '    if {$kind ne "POWER" && $kind ne "GROUND"} { continue }',
         "    set name [$net getName]",
         '    puts "CHIPLEAP-IR net $i $kind $name"',
-        f'    set_pdnsim_net_voltage -net $name -voltage [expr {{$kind eq "POWER" ? {voltage:g} : 0}}]',
+        f'    set_pdnsim_net_voltage -net $name -voltage [expr {{$kind eq "POWER" ? {q.number(voltage)} : 0}}]',
         '    analyze_power_grid -net $name -voltage_file "ir_$i.csv"',
         "    incr i",
         "}",
@@ -256,18 +256,16 @@ def analyze(project: Project) -> IrResult:
     cfg = project.ir_drop
     views = routed_views(project)
     pdk = pdk_views(project, views.run)
-    work = (project.build_dir / "ir_drop").resolve()
-    work.mkdir(parents=True, exist_ok=True)
-    act = activity(project, views.netlist, pdk, True)
-    files = pdk.stage_all(work, (cfg.corner,))
-    def_ = stage(views.def_, work)
-    sdc = stage(views.sdc, work)
-    spef = stage(views.spef, work) if views.spef else None
-    vcd = stage(act[0], work) if act else None
-    log, code = run_openroad(
-        ir_script(project, files, cfg.corner, def_, sdc, spef, vcd, act[1] if act else ""),
-        work,
-        "ir_drop",
+    work = project.work_dir("ir_drop", empty=True)
+    act = activity(project, views.netlist, pdk, True, views.sealed)
+    job = Job(work, "pdnsim")
+    files = pdk.stage_all(job, (cfg.corner,))
+    def_ = job.stage(views.def_, sealed=views.sealed)
+    sdc = job.stage(views.sdc, sealed=views.sealed)
+    spef = job.stage(views.spef, sealed=views.sealed) if views.spef else None
+    vcd = job.stage(act[0], sealed=act[2]) if act else None
+    log, code = job.run(
+        ir_script(project, files, cfg.corner, def_, sdc, spef, vcd, act[1] if act else "")
     )
     if code != 0 or "CHIPLEAP-IR end" not in log:
         raise failure("OpenROAD IR drop analysis", log, code)
@@ -275,13 +273,13 @@ def analyze(project: Project) -> IrResult:
     if not parsed:
         raise IrDropError("the routed DEF has no power or ground nets")
     supply = corner_voltage(cfg.corner)
-    head = read_limited(views.def_)[: 1 << 16]
+    head = views.read_text(views.def_)[: 1 << 16]
     die = die_area(head)
     nets, maps = [], {}
     for index, kind, name, rep in parsed:
         if "worst" not in rep:
             raise IrDropError(f"PDNSim reported nothing for {name}")
-        csv_file = work / f"ir_{index}.csv"
+        csv_file = job.output(f"ir_{index}.csv")
         points = (
             parse_voltages(read_limited(csv_file), kind, supply if kind == "POWER" else 0.0)
             if csv_file.is_file()
@@ -300,8 +298,7 @@ def analyze(project: Project) -> IrResult:
         svg = voltage_map_svg(net, die)
         if svg:
             safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
-            maps[name] = work / f"{safe}.svg"
-            maps[name].write_text(svg)
+            maps[name] = builddir.write_text(work, f"{safe}.svg", svg)
     source = (
         "the tests' VCD"
         if act

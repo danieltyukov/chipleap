@@ -14,6 +14,11 @@ netlist has them, are forced to their functional values.
 
 Activity is measured per clock period, so the clock in the VCD is checked against the
 constraints' and a difference over 1 % is reported.
+
+The tests run on a copy of the netlist: of a routed one, checked against the routed run's
+manifest (``chipleap.rtl.provenance``). The VCD and what it was made from are recorded in
+a manifest of their own, so the IR drop step reuses a VCD only when ChipLeap made it here
+from the same netlist and tests.
 """
 
 from __future__ import annotations
@@ -23,16 +28,17 @@ import itertools
 import json
 import os
 import re
-import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
-from chipleap.rtl.netlist import parse_netlist
+from chipleap.rtl.netlist import NetlistError, read_netlist
 from chipleap.rtl.openroad import (
+    Job,
     OpenroadError,
     OpenroadUnavailable,
     PdkViews,
@@ -41,10 +47,9 @@ from chipleap.rtl.openroad import (
     read_limited,
     routed_run,
     routed_views,
-    run_openroad,
-    stage,
 )
 from chipleap.rtl.project import CORNERS, Project
+from chipleap.rtl.provenance import Sealed, SealError, copy_file, file_digest, open_sealed, seal
 from chipleap.rtl.sim import RUNNER, TestResult, cocotb_python, manifest, parse_results
 from chipleap.rtl.synth import SynthError, synthesize
 from chipleap.verify import launch
@@ -54,6 +59,8 @@ from chipleap.verify.tools import gl_iverilog
 GROUPS = ("Sequential", "Combinational", "Clock", "Macro", "Pad", "Total")
 SCAN_PORT_RE = re.compile(r"^scan_(enable|in)_\d+$")
 VCD_NAME = "gl.vcd"
+ACTIVITY_MARKER = "activity.sha256"
+GL_MANIFEST = "chipleap-gl.manifest.json"
 # Rising edges of the clock read from a VCD to measure its period; the rest is skipped.
 EDGES = 200
 VCD_HEADER_LIMIT = 16 << 20
@@ -73,6 +80,7 @@ class GateRun:
     vcd: Path | None
     scope: str
     error: str = ""
+    sealed: Sealed | None = None  # the manifest that records the VCD
 
     @property
     def failed(self) -> list[TestResult]:
@@ -117,9 +125,16 @@ def _verilog_string(path: Path) -> str:
 
 
 def gate_level_run(
-    project: Project, netlist: Path, views: PdkViews, workdir: Path, routed: bool
+    project: Project,
+    netlist: Path,
+    views: PdkViews,
+    workdir: Path,
+    routed: bool,
+    sealed: Sealed | None = None,
 ) -> GateRun:
-    """Run the project's cocotb tests on ``netlist`` with the cell models, dumping a VCD."""
+    """Run the project's cocotb tests on a copy of ``netlist`` (checked against ``sealed``
+    when it comes from a routed run) with the cell models, dumping a VCD into
+    ``workdir/gl``, which is emptied first."""
     if project.tests.dir is None:
         raise OpenroadUnavailable("the project has no tests to take activity from")
     tool = gl_iverilog()
@@ -128,25 +143,35 @@ def gate_level_run(
     python = cocotb_python()
     if python is None:
         raise OpenroadUnavailable("cocotb is not installed: pip install 'chipleap[rtl]'")
-    work = workdir / "gl"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
     scope = project.power.scope or project.tests.toplevel
     if not project.power.scope and project.tests.toplevel != project.top:
         raise PowerError(
             f"the tests' top is {project.tests.toplevel}, not {project.top}: set power.scope "
             "to the design's instance in it, such as tb/u_dut"
         )
-    top = parse_netlist(read_limited(netlist)).top(project.top)
+    work = builddir.work_dir(workdir, "gl", empty=True)
+    local = work / f"{project.top}.gl.v"
+    try:
+        if sealed is not None:
+            sealed.copy(netlist, local)
+        else:
+            copy_file(netlist.resolve(), local)
+    except SealError as exc:
+        raise PowerError(str(exc)) from None
+    try:
+        top = read_netlist([local]).top(project.top)
+    except NetlistError as exc:
+        raise PowerError(f"the gate-level netlist: {exc}") from None
     forced = [p for p in top.ports if SCAN_PORT_RE.match(p)]
     vcd = work / VCD_NAME
-    (work / "chipleap_gl_aux.v").write_text(dump_module(scope.replace("/", "."), vcd, forced))
+    aux = builddir.write_text(
+        work, "chipleap_gl_aux.v", dump_module(scope.replace("/", "."), vcd, forced)
+    )
     m = manifest(project, "icarus", work)
     m["sources"] = [
-        str(netlist),
+        str(local),
         *(str(p) for p in views.models),
-        str(work / "chipleap_gl_aux.v"),
+        str(aux),
         *(str(s) for s in project.tests.sources),
     ]
     if project.tests.toplevel == project.top:
@@ -156,8 +181,8 @@ def gate_level_run(
     params = {f"CHIPLEAP_PARAM_{k}": str(v) for k, v in project.parameters.items()}
     m["env"] = {**m["env"], **params, "GATES": "yes", "CHIPLEAP_GATES": "1"}
     m["vcd"] = True
-    (work / "manifest.json").write_text(json.dumps(m, indent=1))
-    (work / RUNNER).write_text(resources.files("chipleap.rtl").joinpath(RUNNER).read_text())
+    builddir.write_text(work, "manifest.json", json.dumps(m, indent=1))
+    builddir.write_text(work, RUNNER, resources.files("chipleap.rtl").joinpath(RUNNER).read_text())
     env = dict(os.environ)
     env.pop("PYTEST_CURRENT_TEST", None)
     env["COCOTB_ANSI_OUTPUT"] = "0"
@@ -170,7 +195,10 @@ def gate_level_run(
     except launch.Busy as exc:
         raise PowerError(str(exc)) from None
     outcome_file = work / "outcome.json"
-    outcome = json.loads(outcome_file.read_text()) if outcome_file.is_file() else {}
+    try:
+        outcome = json.loads(read_limited(outcome_file, 1 << 20)) if outcome_file.is_file() else {}
+    except json.JSONDecodeError:
+        outcome = {}
     tests: list[TestResult] = []
     results = work / "results.xml"
     if results.is_file():
@@ -178,7 +206,12 @@ def gate_level_run(
             tests = parse_results(read_limited(results), project)
         except ET.ParseError as exc:
             raise PowerError(f"the gate-level results are not valid XML: {exc}") from None
-    error = "" if outcome.get("stage") == "done" else str(outcome.get("error", "no outcome"))
+    stage_done = isinstance(outcome, dict) and outcome.get("stage") == "done"
+    error = (
+        ""
+        if stage_done
+        else str(outcome.get("error", "no outcome") if isinstance(outcome, dict) else "no outcome")
+    )
     run = GateRun(
         netlist=netlist,
         routed=routed,
@@ -188,39 +221,41 @@ def gate_level_run(
         error=error,
     )
     if run.vcd is not None:
-        (work / ACTIVITY_MARKER).write_text(_activity_key(project, netlist))
+        builddir.write_text(work, ACTIVITY_MARKER, _activity_key(project, file_digest(local)))
+        run.sealed = seal(work, GL_MANIFEST, "gl", [VCD_NAME, ACTIVITY_MARKER])
     return run
 
 
-ACTIVITY_MARKER = "activity.sha256"
-
-
-def _activity_key(project: Project, netlist: Path) -> str:
+def _activity_key(project: Project, netlist_sha256: str) -> str:
     """What a VCD depends on: the netlist, the project's files (its tests) and the scope."""
-    h = hashlib.sha256(netlist.read_bytes())
+    h = hashlib.sha256(netlist_sha256.encode())
     h.update(project.inputs_digest().encode())
     h.update(project.power.scope.encode())
     return h.hexdigest()
 
 
 def activity(
-    project: Project, netlist: Path, views: PdkViews, routed: bool
-) -> tuple[Path, str] | None:
-    """A VCD of the tests on ``netlist`` and its scope: the power step's when it was made
-    from this netlist and these tests, else a new gate-level run; None when the tests
-    cannot run here."""
-    work = (project.build_dir / "power").resolve()
-    gl = work / "gl"
-    marker = gl / ACTIVITY_MARKER
+    project: Project, netlist: Path, views: PdkViews, routed: bool, sealed: Sealed | None = None
+) -> tuple[Path, str, Sealed] | None:
+    """A VCD of the tests on ``netlist``, its scope and the manifest that records it: the
+    power step's when ChipLeap made it from this netlist and these tests, else a new
+    gate-level run; None when the tests cannot run here."""
+    gl = project.build_dir / "power" / "gl"
     scope = project.power.scope or project.tests.toplevel
-    fresh = marker.is_file() and (gl / VCD_NAME).is_file()
-    if fresh and marker.read_text() == _activity_key(project, netlist):
-        return gl / VCD_NAME, scope
     try:
-        run = gate_level_run(project, netlist, views, work, routed)
+        digest = sealed.locate(netlist)[1] if sealed is not None else file_digest(netlist)
+        made = open_sealed(gl, GL_MANIFEST, "gl")
+        if made.read_text(gl / ACTIVITY_MARKER, 1 << 10) == _activity_key(project, digest):
+            return gl / VCD_NAME, scope, made
+    except (SealError, OSError):
+        pass
+    try:
+        run = gate_level_run(project, netlist, views, project.work_dir("power"), routed, sealed)
     except OpenroadUnavailable:
         return None
-    return (run.vcd, run.scope) if run.vcd is not None else None
+    if run.vcd is None or run.sealed is None:
+        return None
+    return run.vcd, run.scope, run.sealed
 
 
 def vcd_clock_period_ns(vcd: Path, scope: str, clock: str) -> float | None:
@@ -301,7 +336,7 @@ def power_script(
     if spef:
         lines += [f"read_spef {q.tcl(spef)}", "set_propagated_clock [all_clocks]"]
     lines += [
-        f"set_power_activity -input -activity {float(project.power.input_activity):g}",
+        f"set_power_activity -input -activity {q.number(float(project.power.input_activity))}",
         'puts "CHIPLEAP-POWER vectorless"',
         "report_power -digits 9",
     ]
@@ -357,7 +392,7 @@ def parse_power(log: str) -> dict[str, Any]:
 def simple_sdc(project: Project) -> str:
     """Clocks for the synthesized netlist: power needs their periods, not the I/O timing."""
     lines = [
-        f"create_clock -name {q.tcl(c.port)} -period {float(c.period_ns):g} "
+        f"create_clock -name {q.tcl(c.port)} -period {q.number(float(c.period_ns))} "
         f"[get_ports {q.tcl(c.port)}]"
         for c in project.clocks
     ]
@@ -376,16 +411,17 @@ class PowerResult:
 
 def analyze(project: Project) -> PowerResult:
     cfg = project.power
-    work = (project.build_dir / "power").resolve()
-    work.mkdir(parents=True, exist_ok=True)
+    work = project.work_dir("power")
     run = routed_run(project) if cfg.netlist in ("auto", "routed") else None
     if cfg.netlist == "routed" and run is None:
         raise OpenroadUnavailable("power.netlist is routed but there is no routed design yet")
     notes: list[str] = []
     librelane_mw = None
+    sealed: Sealed | None = None
     if run is not None:
         views = routed_views(project, run)
         pdk = pdk_views(project, run)
+        sealed = views.sealed
         netlist, sdc_src, spef = views.netlist, views.sdc, views.spef
         total = views.metrics.get("power__total")
         librelane_mw = float(total) * 1000 if isinstance(total, (int, float)) else None
@@ -395,28 +431,31 @@ def analyze(project: Project) -> PowerResult:
             netlist = synthesize(project, work / "synth").netlist
         except SynthError as exc:
             raise PowerError(f"synthesis failed: {exc}") from exc
-        sdc_src = work / "clocks.sdc"
-        sdc_src.write_text(simple_sdc(project))
+        sdc_src = builddir.write_text(work, "clocks.sdc", simple_sdc(project))
         spef = None
         notes.append("synthesized netlist: no parasitics")
     gl: GateRun | None = None
     try:
-        gl = gate_level_run(project, netlist, pdk, work, run is not None)
+        gl = gate_level_run(project, netlist, pdk, work, run is not None, sealed)
     except OpenroadUnavailable as exc:
         notes.append(f"vectorless only: {exc}")
-    files = pdk.stage_all(work, cfg.corners)
-    staged = stage(netlist, work)
-    sdc = stage(sdc_src, work)
-    spef_staged = stage(spef, work) if spef else None
-    vcd = stage(gl.vcd, work) if gl and gl.vcd else None
     if gl is not None and gl.vcd is None:
         notes.append(f"the gate-level tests wrote no VCD: {gl.error or 'no dump'}")
     corners = []
     for corner in cfg.corners:
+        job = Job(work, f"power_{corner}")
+        files = pdk.stage_all(job, (corner,))
         script = power_script(
-            project, files, corner, staged, sdc, spef_staged, vcd, gl.scope if gl else ""
+            project,
+            files,
+            corner,
+            job.stage(netlist, sealed=sealed),
+            job.stage(sdc_src, sealed=sealed if run is not None else None),
+            job.stage(spef, sealed=sealed) if spef else None,
+            job.stage(gl.vcd, sealed=gl.sealed) if gl and gl.vcd else None,
+            gl.scope if gl else "",
         )
-        log, code = run_openroad(script, work, f"power_{corner}")
+        log, code = job.run(script)
         if code != 0 or "CHIPLEAP-POWER end" not in log:
             raise failure(f"OpenROAD power at {corner}", log, code)
         parsed = parse_power(log)

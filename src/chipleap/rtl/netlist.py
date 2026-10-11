@@ -9,17 +9,42 @@ concatenations appear in connections; attributes, compiler directives, parameter
 defparams are skipped.
 
 Every connection is reduced to single bits named ``name`` or ``name[i]``, so two
-references to the same wire compare equal however they were written. The text is read
-once, with a size limit, and every loop ends at the end of the input.
+references to the same wire compare equal however they were written.
+
+A netlist may come from a project's ``build/`` directory, so the reader is bounded in
+everything it builds (``Limits``): bytes across the files read, modules, instances, net
+bits, the width of any one bus or constant (``[0:2**31]`` is refused before a bit is
+made), and when the hierarchy is walked, its depth, the instances under the top, and
+modules that contain themselves. Tokens are read as they are needed, every traversal is
+a loop over an explicit stack, and every loop ends at the end of the input.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
-MAX_BYTES = 64 << 20
+
+@dataclass(frozen=True)
+class Limits:
+    """What one netlist may hold. The defaults are far above the designs the
+    implementation steps run on (the UART has 346 cells) and far below what would
+    exhaust memory."""
+
+    bytes: int = 64 << 20  # across every file read
+    modules: int = 10_000
+    instances: int = 1_000_000  # in all modules, an instance array counting its width
+    bits: int = 8_000_000  # net bits declared and connected
+    bus_width: int = 1 << 16  # bits in one declaration, select, constant or connection
+    depth: int = 64  # levels of hierarchy below the top
+    flat: int = 1_000_000  # instances in the flattened hierarchy
+    chain: int = 100_000  # cells on one scan chain
+    digits: int = 80  # characters in one number
+
+
+LIMITS = Limits()
 
 _TOKEN_RE = re.compile(
     r"""
@@ -93,25 +118,51 @@ def _tokens(text: str) -> Iterator[tuple[str, str]]:
             yield kind, value
 
 
-class _Parser:
-    def __init__(self, text: str) -> None:
-        if len(text) > MAX_BYTES:
-            raise NetlistError(f"the netlist is larger than {MAX_BYTES >> 20} MB")
-        self.toks = list(_tokens(text))
-        self.i = 0
+@dataclass
+class _Budget:
+    """What the netlists read so far have used of ``limits``."""
 
-    def peek(self, ahead: int = 0) -> str:
-        j = self.i + ahead
-        return self.toks[j][1] if j < len(self.toks) else ""
+    limits: Limits
+    bytes: int = 0
+    modules: int = 0
+    instances: int = 0
+    bits: int = 0
+
+    def add(self, what: str, n: int = 1) -> None:
+        total = getattr(self, what) + n
+        setattr(self, what, total)
+        cap = getattr(self.limits, what)
+        if total > cap:
+            noun = {"bytes": "bytes", "modules": "modules", "instances": "instances"}
+            raise NetlistError(
+                f"the netlist has more than {cap} {noun.get(what, 'net bits')}"
+                if what != "bytes"
+                else f"the netlist is larger than {cap >> 20} MB"
+            )
+
+
+class _Parser:
+    """A recursive-descent parser without recursion over the input: every construct it
+    reads is flat, and concatenations nest with an explicit stack."""
+
+    def __init__(self, text: str, budget: _Budget) -> None:
+        budget.add("bytes", len(text.encode()))
+        self.budget = budget
+        self.limits = budget.limits
+        self.toks = _tokens(text)
+        self.cur: tuple[str, str] | None = next(self.toks, None)
+
+    def peek(self) -> str:
+        return self.cur[1] if self.cur is not None else ""
 
     def kind(self) -> str:
-        return self.toks[self.i][0] if self.i < len(self.toks) else "eof"
+        return self.cur[0] if self.cur is not None else "eof"
 
     def take(self) -> str:
-        if self.i >= len(self.toks):
+        if self.cur is None:
             raise NetlistError("the netlist ends in the middle of a statement")
-        value = self.toks[self.i][1]
-        self.i += 1
+        value = self.cur[1]
+        self.cur = next(self.toks, None)
         return value
 
     def expect(self, value: str) -> None:
@@ -122,7 +173,7 @@ class _Parser:
     def skip_to(self, end: str) -> None:
         """Skip past the next ``end`` at nesting depth zero."""
         depth = 0
-        while self.i < len(self.toks):
+        while self.cur is not None:
             t = self.take()
             if t in "([{":
                 depth += 1
@@ -136,9 +187,18 @@ class _Parser:
         t = self.take()
         if not t.isdigit():
             raise NetlistError(f"expected a number, found {t!r}")
+        if len(t) > self.limits.digits:
+            raise NetlistError(f"the number {t[:20]}... is too long")
         return int(t)
 
-    def range_(self) -> tuple[int, int] | None:
+    def width(self, hi: int, lo: int, what: str) -> int:
+        n = abs(hi - lo) + 1
+        if n > self.limits.bus_width:
+            raise NetlistError(f"{what} is {n} bits wide, more than {self.limits.bus_width}")
+        return n
+
+    def range_(self, what: str, bus: bool = True) -> tuple[int, int] | None:
+        """A ``[msb:lsb]``, if one is next; a bus no wider than the limit."""
         if self.peek() != "[":
             return None
         self.take()
@@ -146,15 +206,23 @@ class _Parser:
         self.expect(":")
         lsb = self.number()
         self.expect("]")
+        if bus:
+            self.width(msb, lsb, what)
         return msb, lsb
 
-    def parse(self) -> Netlist:
-        out = Netlist()
-        while self.i < len(self.toks):
+    def parse(self, out: Netlist) -> None:
+        while self.cur is not None:
             if self.take() == "module":
                 mod = self.module()
+                if mod.name in out.modules:
+                    raise NetlistError(f"module {mod.name} is defined twice")
+                self.budget.add("modules")
                 out.modules[mod.name] = mod
-        return out
+
+    def declare(self, mod: Module, name: str, rng: tuple[int, int] | None) -> None:
+        if rng is not None:
+            mod.ranges[name] = rng
+        self.budget.add("bits", self.width(*rng, name) if rng else 1)
 
     def module(self) -> Module:
         mod = Module(self.take())
@@ -166,26 +234,23 @@ class _Parser:
             direction = ""
             rng: tuple[int, int] | None = None
             while self.peek() != ")":
+                if self.peek() == "[":
+                    rng = self.range_(f"a port of {mod.name}")
+                    continue
                 t = self.take()
                 if t in ("input", "output", "inout"):
                     direction, rng = t, None
-                elif t in DECLARATIONS:
-                    continue
-                elif t == "[":
-                    self.i -= 1
-                    rng = self.range_()
-                elif t == ",":
+                elif t in DECLARATIONS or t in (",", "signed"):
                     continue
                 else:
                     mod.ports.append(t)
                     if direction:
                         mod.directions[t] = direction
-                        if rng is not None:
-                            mod.ranges[t] = rng
+                        self.declare(mod, t, rng)
             self.take()
         self.expect(";")
         while True:
-            if self.i >= len(self.toks):
+            if self.cur is None:
                 raise NetlistError(f"module {mod.name} has no endmodule")
             t = self.peek()
             if t == "endmodule":
@@ -224,7 +289,7 @@ class _Parser:
             if t in ("signed", "wire", "reg", "logic"):
                 self.take()
             elif t == "[":
-                rng = self.range_()
+                rng = self.range_(f"a declaration in {mod.name}")
             else:
                 break
         while True:
@@ -233,8 +298,7 @@ class _Parser:
                 mod.directions[name] = kind
                 if name not in mod.ports:
                     mod.ports.append(name)
-            if rng is not None:
-                mod.ranges[name] = rng
+            self.declare(mod, name, rng)
             if self.peek() == "=":  # wire x = y;
                 self.take()
                 rhs = self.expr(mod)
@@ -251,8 +315,9 @@ class _Parser:
             self.take()
             self.skip_paren()
         name = self.take()
-        if self.peek() == "[":
-            self.range_()
+        # An instance array counts as many instances as it is wide.
+        rng = self.range_(f"instance array {name}", bus=False)
+        self.budget.add("instances", abs(rng[0] - rng[1]) + 1 if rng else 1)
         inst = Instance(cell, name)
         self.expect("(")
         index = 0
@@ -274,40 +339,64 @@ class _Parser:
         mod.instances.append(inst)
 
     def expr(self, mod: Module) -> list[str]:
-        """The bits of a connection, MSB first."""
-        if self.peek() == "{":
-            self.take()
-            bits: list[str] = []
+        """The bits of a connection, MSB first. Concatenations nest on an explicit stack."""
+        stack: list[list[str]] = []
+        while True:
+            if self.peek() == "{":
+                self.take()
+                stack.append([])
+                if len(stack) > self.limits.depth:
+                    raise NetlistError("concatenations nest too deeply")
+                continue
+            bits = self.operand(mod)
             while True:
-                bits += self.expr(mod)
-                t = self.take()
-                if t == "}":
+                if not stack:
                     return bits
-                if t != ",":
+                stack[-1] += bits
+                if len(stack[-1]) > self.limits.bus_width:
+                    raise NetlistError(
+                        f"a concatenation is wider than {self.limits.bus_width} bits"
+                    )
+                t = self.take()
+                if t == ",":
+                    break
+                if t != "}":
                     raise NetlistError(f"unexpected {t!r} in a concatenation")
+                bits = stack.pop()
+
+    def operand(self, mod: Module) -> list[str]:
         if self.kind() == "number":
-            return _constant(self.take())
-        name = self.take()
-        if self.peek() != "[":
-            return mod.bits(name)
-        self.take()
-        hi = self.number()
-        lo = hi
-        if self.peek() == ":":
-            self.take()
-            lo = self.number()
-        self.expect("]")
-        step = -1 if hi >= lo else 1
-        return [f"{name}[{i}]" for i in range(hi, lo + step, step)]
+            out = _constant(self.take(), self.limits)
+        else:
+            name = self.take()
+            if self.peek() != "[":
+                out = mod.bits(name)
+            else:
+                self.take()
+                hi = self.number()
+                lo = hi
+                if self.peek() == ":":
+                    self.take()
+                    lo = self.number()
+                self.expect("]")
+                self.width(hi, lo, f"a select of {name}")
+                step = -1 if hi >= lo else 1
+                out = [f"{name}[{i}]" for i in range(hi, lo + step, step)]
+        self.budget.add("bits", len(out))
+        return out
 
 
-def _constant(text: str) -> list[str]:
+def _constant(text: str, limits: Limits = LIMITS) -> list[str]:
+    if len(text) > limits.digits:
+        raise NetlistError(f"the constant {text[:20]}... is too long")
     if "'" not in text:
-        return [f"1'b{b}" for b in format(int(text), "032b")]
+        return [f"1'b{b}" for b in format(int(text) & 0xFFFFFFFF, "032b")]
     width_text, _, rest = text.partition("'")
     rest = rest.lstrip("sS")
     base, digits = rest[0].lower(), rest[1:].replace("_", "").lower()
     width = int(width_text) if width_text else 32
+    if not 0 < width <= limits.bus_width:
+        raise NetlistError(f"the constant {text} is {width} bits wide")
     if base == "b":
         bits = digits
     elif base == "h" and not set(digits) & set("xz?"):
@@ -322,9 +411,53 @@ def _constant(text: str) -> list[str]:
     return [f"1'b{b}" for b in bits]
 
 
-def parse_netlist(text: str) -> Netlist:
+def parse_netlist(text: str, limits: Limits = LIMITS) -> Netlist:
     """The modules of a structural Verilog netlist."""
-    return _Parser(text).parse()
+    out = Netlist()
+    _Parser(text, _Budget(limits)).parse(out)
+    return out
+
+
+def read_netlist(paths: Sequence[Path], limits: Limits = LIMITS) -> Netlist:
+    """The modules of the netlist files ``paths``, read with one budget: the byte limit
+    holds across them, and each is refused before it is read when it would exceed it."""
+    budget = _Budget(limits)
+    out = Netlist()
+    for path in paths:
+        size = path.stat().st_size
+        if budget.bytes + size > limits.bytes:
+            raise NetlistError(f"the netlist is larger than {limits.bytes >> 20} MB")
+        with path.open("rb") as fh:
+            text = fh.read(limits.bytes - budget.bytes + 1).decode(errors="replace")
+        _Parser(text, budget).parse(out)
+    return out
+
+
+def hierarchy(nl: Netlist, top: str, limits: Limits = LIMITS) -> Iterator[tuple[str, Module]]:
+    """Every module in the hierarchy under ``top`` as (instance path, module), the top as
+    ``""``, depth first. A loop over an explicit stack; refuses a module that contains
+    itself, directly or through others, a hierarchy deeper than ``limits.depth``, and more
+    than ``limits.flat`` instances under the top in all."""
+    root = nl.top(top)
+    todo: list[tuple[str, Module, tuple[str, ...]]] = [("", root, (root.name,))]
+    count = 0
+    while todo:
+        path, mod, ancestors = todo.pop()
+        yield path, mod
+        count += len(mod.instances)
+        if count > limits.flat:
+            raise NetlistError(f"the hierarchy under {top} holds more than {limits.flat} instances")
+        prefix = f"{path}/" if path else ""
+        for inst in reversed(mod.instances):
+            child = nl.modules.get(inst.cell)
+            if child is None:
+                continue
+            if child.name in ancestors:
+                loop = " > ".join([*ancestors[ancestors.index(child.name) :], child.name])
+                raise NetlistError(f"module {child.name} contains itself ({loop})")
+            if len(ancestors) > limits.depth:
+                raise NetlistError(f"the hierarchy under {top} is deeper than {limits.depth}")
+            todo.append((prefix + inst.name, child, (*ancestors, child.name)))
 
 
 class Nets:
@@ -382,7 +515,7 @@ def trace_chain(
     si_pin: str = "SCD",
     q_pins: Iterable[str] = ("Q",),
     through: dict[str, tuple[str, str]] | None = None,
-    limit: int = 1_000_000,
+    limit: int = LIMITS.chain,
 ) -> Chain:
     """The flip-flops a chain links, from ``scan_in`` to its scan output: each cell's scan
     input is reached from the previous cell's output. ``scan_out`` is the output bit, or
