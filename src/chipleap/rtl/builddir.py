@@ -20,7 +20,9 @@ delete or overwrite files there. So ChipLeap never reaches them through a symlin
   if it carries that mark, so a directory of the user's is never emptied.
 
 Where the system has no descriptor-relative calls (Windows) the same checks are made on
-paths, each just before the path is used.
+paths, each just before the path is used. There a directory junction, or any other
+reparse point, counts as a symlink: it is refused on the way, removed inside a work
+directory and never entered, so what it leads to is never touched.
 
 A race is left. A step hands the checked directory to its tools by name, so a process
 that swaps a directory for a symlink after the check, while the step runs, is not
@@ -99,8 +101,8 @@ def output_dir(path: Path, *, empty: bool = False) -> Path:
         p.mkdir(parents=True)
         made = True
     st = os.lstat(p)
-    if stat.S_ISLNK(st.st_mode):
-        raise BuildDirError(f"{p} is a symlink; name the directory it leads to instead")
+    if kind := _link(st):
+        raise BuildDirError(f"{p} is {kind}; name the directory it leads to instead")
     _refuse(p, st, directory=True)
     if made:
         write_text(p, MARKER, _MARK)
@@ -123,7 +125,7 @@ def output_dir(path: Path, *, empty: bool = False) -> Path:
             finally:
                 os.close(fd)
         else:
-            _clean_path(p, True, keep=MARKER)
+            _clean_path(p.resolve(), True, keep=MARKER)
     return p.resolve()
 
 
@@ -165,12 +167,25 @@ def _names(parts: Iterable[str]) -> list[str]:
     return out
 
 
+def _link(st: os.stat_result) -> str:
+    """What kind of link ``st`` (from lstat) describes, or "" for none. On Windows a
+    directory junction is a directory to lstat, and neither ``os.path.islink`` nor
+    ``DirEntry.is_symlink`` reports it, yet it leads anywhere a symlink can; only its
+    reparse-point attribute gives it away. Any reparse point counts, so ChipLeap enters
+    none of them. Other systems have no such attribute."""
+    if stat.S_ISLNK(st.st_mode):
+        return "a symlink"
+    if getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return "a junction or another reparse point"
+    return ""
+
+
 def _refuse(path: Path, st: os.stat_result, directory: bool) -> None:
     """Raise if what ``st`` describes is not what ChipLeap may use at ``path``."""
-    if stat.S_ISLNK(st.st_mode):
+    if kind := _link(st):
         raise BuildDirError(
-            f"{path} is a symlink, and ChipLeap does not delete or write through one: "
-            "remove the symlink and run again"
+            f"{path} is {kind}, and ChipLeap does not delete or write through one: "
+            "remove it and run again"
         )
     if directory and not stat.S_ISDIR(st.st_mode):
         raise BuildDirError(f"{path} is not a directory")
@@ -224,7 +239,8 @@ def _clean(fd: int, everything: bool, keep: str = "") -> None:
 
 
 def _descend_paths(root: Path, names: list[str]) -> None:
-    """``_descend`` on paths, for systems without descriptor-relative calls."""
+    """``_descend`` on paths, for systems without descriptor-relative calls: each part is
+    looked at with lstat, and a link of any kind (``_link``) is refused."""
     here = root
     for name in names:
         here = here / name
@@ -233,16 +249,55 @@ def _descend_paths(root: Path, names: list[str]) -> None:
         _refuse(here, os.lstat(here), directory=True)
 
 
-def _clean_path(path: Path, everything: bool, keep: str = "") -> None:
-    """``_clean`` on paths."""
+def _clean_path(top: Path, everything: bool, keep: str = "") -> None:
+    """``_clean`` on paths. ``top`` is a resolved path whose parts were checked.
+
+    What scandir reports about an entry may be stale by the time it is used, and on
+    Windows it calls a junction a directory that is not a symlink, so each entry is looked
+    at with lstat just before it is used instead. A link of any kind is removed, never
+    entered. A directory is looked at again just before it is listed and just before it
+    is removed, and the step stops if it is no longer the directory seen or no longer
+    leads to a place inside ``top``."""
+    st = os.lstat(top)
+    _refuse(top, st, directory=True)
+    _clean_tree(top, st, top, everything, keep)
+
+
+def _clean_tree(
+    path: Path, seen: os.stat_result, top: Path, everything: bool, keep: str = ""
+) -> None:
+    """``_clean_path`` for ``path``, which lstat described as ``seen``."""
+    _unchanged(path, seen, top)
     with os.scandir(path) as it:
-        entries = [(Path(e.path), e.is_dir(follow_symlinks=False), e.is_symlink()) for e in it]
-    for p, is_dir, is_link in entries:
-        if p.name == keep:
+        names = [e.name for e in it]
+    for name in names:
+        if name == keep:
             continue
-        if is_dir:
-            _clean_path(p, everything)
+        p = path / name
+        st = os.lstat(p)
+        if _link(st):
+            # Removing a link never touches what it leads to. Windows removes a junction,
+            # which lstat calls a directory, with rmdir.
+            if stat.S_ISDIR(st.st_mode):
+                os.rmdir(p)
+            else:
+                os.unlink(p)
+        elif stat.S_ISDIR(st.st_mode):
+            _clean_tree(p, st, top, everything)
             if everything:
-                p.rmdir()
-        elif everything or is_link:
-            p.unlink()
+                _unchanged(p, st, top)
+                os.rmdir(p)
+        elif everything:
+            os.unlink(p)
+
+
+def _unchanged(path: Path, seen: os.stat_result, top: Path) -> None:
+    """Raise unless ``path`` is still the directory ``seen`` describes, not a link, and
+    still leads to a place inside ``top``."""
+    try:
+        st = os.lstat(path)
+        same = not _link(st) and os.path.samestat(seen, st) and path.resolve().is_relative_to(top)
+    except OSError:
+        same = False
+    if not same:
+        raise BuildDirError(f"{path} changed while ChipLeap was emptying it")
