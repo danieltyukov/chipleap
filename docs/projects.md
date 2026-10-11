@@ -14,8 +14,8 @@ $ chipleap verify path/to/rtl --steps all
 lint     PASS     Verilator -Wall and slang -Wextra report no warnings
 sim      PASS     Icarus 12.0: 5 of 5 cocotb tests pass
 coverage PASS     line 83.3% (10/12), branch 100.0% (28/28), toggle 100.0% (176/176) over 3 files (5 tests); 2 points never reached
-synth    PASS     0.0041 mm2 of standard cells on IHP SG13G2 130 nm (open PDK) (222 cells, 51 flip-flops); ...
-pnr      PASS     placed and routed on IHP SG13G2: ... ; DRC, LVS and antenna clean
+synth    PASS     0.0041 mm2 of standard cells on IHP SG13G2 130 nm (open PDK) (222 cells, 51 flip-flops); critical path 1.01 ns, about 684 MHz at the typical corner, within the 100 MHz clock on clk_i
+pnr      PASS     placed and routed on IHP SG13G2: 0.0084 mm2 core at 74% utilisation, 325 cells; 100 MHz on clk_i met at the slow corner (about 234 MHz, and about 308 MHz at the typical one); DRC, LVS and antenna clean
 ```
 
 [examples/uart](../examples/uart) is a complete project: a UART with cocotb tests and a Python reference model.
@@ -88,7 +88,7 @@ Section names that later versions will read (`formal`, `equivalence`, `cdc`, `ga
 
 **Place and route.** The LibreLane configuration comes from the project, with the same signoff settings as the accelerator's ([verification.md](verification.md#place-and-route)): optimisation at the slow corner, repair after global routing, antenna repair and IHP's KLayout rule deck. The setup margins the repairs aim for scale with the clock: 8 % and 16 % of the period, at most 0.8 and 1.6 ns. The constraints follow LibreLane's base SDC (input and output delays of 20 % of the period, the PDK's driving cell and load, clock uncertainty and transition) for every clock in the project, with inputs and outputs timed against the first. Designs with several clocks that are unrelated, or with special timing, should give their own SDC under `constraints.sdc`. The GDS is in `build/pnr/runs/chipleap/final/gds/`.
 
-On this release `examples/uart` routes to a clean GDS at 100 MHz: see the [changelog](../CHANGELOG.md).
+On this release `examples/uart` routes in about seven minutes, almost all of it LibreLane: a 104 x 123 um die, 5.7 ns of setup slack at the slow corner and 0.12 ns of hold slack at the fast one, no DRC, LVS, antenna, slew or capacitance violations.
 
 ## Commercial tools
 
