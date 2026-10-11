@@ -68,7 +68,7 @@ These are the designs routed with this flow at 100 MHz, each with 16-word buffer
 | Weight-stationary 4 x 4 | 1 | +0.47 ns, about 105 MHz | about 160 MHz | the accumulator update |
 | Output-stationary 4 x 4 | 1 | +0.62 ns, about 107 MHz | about 161 MHz | unpacking packed weights |
 | GEMV 4 x 8 | 2 | -0.13 ns, about 99 MHz | about 149 MHz | the buffer slot select into the accumulators |
-| GEMV 2 x 8 | 4 | -4.02 ns, about 71 MHz | about 104 MHz | the DMA handing words to its four ports in turn |
+| GEMV 2 x 8 | 4 | +0.37 ns, about 104 MHz | about 157 MHz | unpacking packed weights into the operand registers |
 
 The model's clock limit for the accelerator on IHP SG13G2 comes from these runs ([model.md](model.md#technology-data)), so designs the explorer recommends are clocked where they close timing at the slow corner.
 

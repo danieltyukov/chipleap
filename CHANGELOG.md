@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - The LibreLane signoff settings live in one function, `chipleap.verify.pnr.signoff`, that the accelerator's and a project's place and route share.
+- Timing: the accelerator's DMA serves its read ports in parallel. It used to hand the words of a transfer to the ports one after another within a cycle, so each port's word waited on the ports before it: a chain of 32-bit compares and adds that grew with the number of ports and set the clock of every design with four. Now port `p` reads words `p`, `p + ports`, `p + 2 ports` and so on, with an address generator of its own. After routing with LibreLane the GEMV 2 x 8 engine with four ports meets 100 MHz at the slow corner (1.08 V, 125 C) with 0.37 ns to spare, about 104 MHz, where it met about 71 MHz; its worst paths are now the weight unpacking and the dot product, as with one port. Cycle counts without stalls are unchanged and the cycle model stays exact. Under random stalls a transfer waits for its slowest port, and the model adds that port's expected lateness. A read port costs 2.5 kGE, and the area and synthesized-delay fits are repeated on the new RTL.
+- The GEMV adder tree gives each adder operands cut to the width its sum needs, so synthesis builds one carry-save sum per lane whatever order Yosys visits the design in. Left to Yosys, a change elsewhere in the RTL could leave one adder full width and split the tree into three carry-propagate adders in series.
 
 ### Fixed
 
