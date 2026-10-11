@@ -29,6 +29,7 @@ spec.yaml ──> workload (operators) ──> evaluate(workload, design) ──
 | `chipleap.verify` | Tool discovery, the consistency check, Verilator simulation, Yosys synthesis, X-HEEP checks, and the orchestration behind `chipleap verify`. |
 | `chipleap.rtl` | RTL the user wrote: the project file (`project.py`), diagnostics (`diag.py`), lint, the cocotb runner and simulation, coverage, synthesis, place and route, commercial backends, reports and the orchestration behind `chipleap verify PROJECT`. |
 | `chipleap.report` | Text, Markdown, JSON and self-contained HTML reports; the floorplan sketch. |
+| `chipleap.macro` | Macro packages shared with aispice: the manifest, the schema interpreter, readers for GDS, LEF, liberty, Verilog and SPICE, the validator and evidence writing. The format is [macro-package.md](macro-package.md). |
 | `chipleap.mcp_server` | The MCP tools, prompt and resource, the run log and replay. |
 | `chipleap.cli` | The command line. |
 

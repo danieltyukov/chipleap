@@ -1,0 +1,5 @@
+# The macro package contract shared with aispice is pinned by SHA-256, so its
+# files keep their bytes as committed on every platform.
+docs/macro-package.md -text
+src/chipleap/macro/macro-v1.schema.json -text
+tests/fixtures/macro/** -text

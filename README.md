@@ -99,6 +99,16 @@ The accelerator model is the same tile schedule the RTL runs, so it is checked a
 
 The other nodes are scaled from published figures and say so. [docs/model.md](docs/model.md) lists every number and its source; [docs/verification.md](docs/verification.md) explains each check.
 
+## Analog blocks from aispice
+
+Mixed-signal chips need blocks from both sides. ChipLeap and its analog counterpart, [aispice](https://github.com/danieltyukov/aispice), hand hardened blocks to each other as macro packages: GDS, LEF, liberty, a Verilog model, a SPICE netlist, measured specs and DRC and LVS evidence, described by one `macro.toml`. Both tools check a package with the same rules before placing it:
+
+```sh
+chipleap macro check tiny_ota.macro --pdk ihp-sg13g2
+```
+
+[docs/macro-package.md](docs/macro-package.md) is the format, shared word for word with aispice.
+
 ## Learn more
 
 | Guide | What it covers |
@@ -110,6 +120,7 @@ The other nodes are scaled from published figures and say so. [docs/model.md](do
 | [Platforms](docs/platforms.md) | X-HEEP or AXI4 IP, and how to integrate each |
 | [Commercial tools](docs/commercial-tools.md) | Cadence, Synopsys and Siemens tools, remote servers, your own PDK |
 | [X-HEEP integration](docs/xheep.md) | How the accelerator plugs into the SoC |
+| [Macro packages](docs/macro-package.md) | The block format ChipLeap and aispice share, and the rules both check |
 | [Where it fits](docs/landscape.md) | Agentic EDA, workload-to-chip services and academic tools, compared |
 
 ## Contributing
