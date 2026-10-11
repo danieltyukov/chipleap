@@ -157,12 +157,27 @@ def test_mcp_lists_the_tools():
 
     async def go():
         async with Client(server) as c:
-            names = {t.name for t in (await c.list_tools()).tools}
+            tools = {t.name: t.description or "" for t in (await c.list_tools()).tools}
             prompts = {p.name for p in (await c.list_prompts()).prompts}
             ref = (await c.read_resource("chipleap://project-reference")).contents[0].text
-            return names, prompts, ref
+            return tools, prompts, ref
 
-    names, prompts, ref = asyncio.run(go())
+    tools, prompts, ref = asyncio.run(go())
+    names = set(tools)
+    # Every tool that runs the project's own code (its tests, golden model, design or
+    # constraints) tells the assistant it is for trusted projects only.
+    for name in (
+        "simulate_rtl",
+        "coverage_rtl",
+        "verify_rtl",
+        "dft_rtl",
+        "power_rtl",
+        "ir_drop_rtl",
+        "upf_rtl",
+        "timing_paths_rtl",
+        "eco_rtl",
+    ):
+        assert "only for projects the user trusts" in tools[name], name
     assert {
         "dft_rtl",
         "power_rtl",

@@ -68,7 +68,10 @@ After place and route: dft_rtl (scan chains, ATPG coverage, patterns simulated),
 power_rtl (gate-level power from the tests, at corners), ir_drop_rtl (worst supply drop),
 upf_rtl (power domains in OpenROAD), timing_paths_rtl (the worst paths, stage by stage)
 and eco_rtl (resize gates, add buffers or repair timing on the routed design, then sign
-off again). power_rtl runs the tests too.
+off again). These run the project's own code too: they synthesize and simulate its
+design, OpenROAD and LibreLane run its constraints (an SDC file is Tcl), and power_rtl
+(and ir_drop_rtl, when no recorded activity exists) runs its tests. Use them only on
+projects the user trusts.
 
 check_macro validates a macro package (an analog block from aispice, say) before a chip
 places it."""
@@ -162,7 +165,9 @@ identifiers without $, parameter values integers, define values short literals. 
 `include names a quoted relative file without "..", and a $readmemh file given as a
 string must be inside the project. On Linux, lint and Yosys synthesis read only the
 project and their own files (Landlock). Simulation runs the project's cocotb tests and
-golden model, which are code: only for projects the user trusts.
+golden model, which are code: only for projects the user trusts. So do the steps after
+place and route (dft, power, ir_drop, upf, eco): they synthesize and simulate the design,
+OpenROAD and LibreLane run its constraints (an SDC file is Tcl), and power runs the tests.
 
 ```yaml
 schema: project/v1
@@ -1008,7 +1013,9 @@ def build_server(log_dir: str | None = None) -> Any:
         description="Insert scan chains with OpenROAD into an RTL project with a dft section, "
         "generate stuck-at patterns with Fault and Quaigh, and simulate a flush pattern and "
         "the first patterns through the chains on Icarus 13 (also on the routed netlist when "
-        "it has the chains). Returns chains, coverage, pattern files and mismatches."
+        "it has the chains). Returns chains, coverage, pattern files and mismatches. "
+        "Synthesizes and simulates the project's design, which is code: only for projects "
+        "the user trusts."
     )
     @_stops_its_runs
     def dft_rtl(project: str) -> dict[str, Any]:
@@ -1018,8 +1025,8 @@ def build_server(log_dir: str | None = None) -> Any:
         description="Gate-level power of an RTL project: its cocotb tests run on the routed "
         "netlist (else the synthesized one) with the cell models, and OpenROAD reports power "
         "from that activity and vectorless, per group, at each corner (corners: comma "
-        "separated typ, slow, fast). Runs the project's tests, which are code: only for "
-        "projects the user trusts."
+        "separated typ, slow, fast). Runs the project's tests and its constraints (an SDC "
+        "file is Tcl), which are code: only for projects the user trusts."
     )
     @_stops_its_runs
     def power_rtl(project: str, corners: str = "") -> dict[str, Any]:
@@ -1028,7 +1035,9 @@ def build_server(log_dir: str | None = None) -> Any:
     @server.tool(
         description="Static IR drop of a routed RTL project with OpenROAD PDNSim, with "
         "currents from the tests' activity: worst and average drop per supply net, the worst "
-        "cells, and a map. corner: typ, slow or fast."
+        "cells, and a map. corner: typ, slow or fast. Runs the project's constraints (Tcl) "
+        "and, when the power step has not recorded their activity, its tests, which are "
+        "code: only for projects the user trusts."
     )
     @_stops_its_runs
     def ir_drop_rtl(project: str, corner: str = "") -> dict[str, Any]:
@@ -1037,7 +1046,8 @@ def build_server(log_dir: str | None = None) -> Any:
     @server.tool(
         description="Read an RTL project's upf section into OpenROAD: power domains, their "
         "cells placed in their areas, and the signals between domains, with level shifters "
-        "flagged where voltages differ. No open tool simulates power intent."
+        "flagged where voltages differ. No open tool simulates power intent. Synthesizes "
+        "the project's design, which is code: only for projects the user trusts."
     )
     @_stops_its_runs
     def upf_rtl(project: str) -> dict[str, Any]:
@@ -1046,7 +1056,8 @@ def build_server(log_dir: str | None = None) -> Any:
     @server.tool(
         description="The worst setup or hold paths of a routed RTL project at a corner "
         "(check: setup or hold; corner: typ, slow or fast), each stage with its pin, "
-        "instance, cell and delay: what eco_rtl changes are chosen from."
+        "instance, cell and delay: what eco_rtl changes are chosen from. OpenROAD runs the "
+        "project's constraints, which are Tcl code: only for projects the user trusts."
     )
     @_stops_its_runs
     def timing_paths_rtl(
@@ -1062,7 +1073,9 @@ def build_server(log_dir: str | None = None) -> Any:
         "again. changes: resize:INSTANCE=CELL (same pins, another size), "
         "buffer:INSTANCE/PIN=CELL (after a driver or before a sink), repair:setup or "
         "repair:hold, optionally @MARGIN_NS. Changes always apply to the original routed "
-        "design, so pass the whole list each time. Takes minutes."
+        "design, so pass the whole list each time. Takes minutes. LibreLane and OpenROAD run "
+        "the project's design and constraints (Tcl), which are code: only for projects the "
+        "user trusts."
     )
     @_stops_its_runs
     def eco_rtl(project: str, changes: list[str]) -> dict[str, Any]:
