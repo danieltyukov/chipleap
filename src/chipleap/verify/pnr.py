@@ -177,6 +177,8 @@ def place_and_route(accel: Accel, clock_mhz: float, workdir: Path) -> PnrResult:
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
     try:
         code = launch.run(cmd, workdir, log, limit)
+    except launch.Busy as exc:
+        raise PnrError(f"LibreLane did not start: {exc}") from None
     except launch.TimedOut as exc:
         raise PnrError(_timed_out(exc, log)) from None
     final = workdir / "runs" / tag / "final"
@@ -198,6 +200,8 @@ def _timed_out(exc: launch.TimedOut, log: Path) -> str:
     )
     if exc.left:
         msg += f"; docker could not stop {_count(len(exc.left), 'container')}: {' '.join(exc.left)}"
+    if exc.unchecked:
+        msg += "; docker did not answer, so its containers were not checked"
     return f"{msg}\n{_tail(log)}"
 
 

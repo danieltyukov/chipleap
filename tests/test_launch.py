@@ -505,6 +505,27 @@ def test_a_container_docker_cannot_stop_is_reported(tmp_path, docker, monkeypatc
     )
 
 
+def test_containers_docker_could_not_list_are_reported(tmp_path, docker, monkeypatch):
+    _, state, _ = docker
+    monkeypatch.setenv("FAKE_DOCKER_PS_FAILS", "1")
+    step = _pnr_with(tmp_path, monkeypatch, state)
+    assert step.summary == (
+        "LibreLane timed out after 1 s (CHIPLEAP_PNR_TIMEOUT); its processes were stopped; "
+        "docker did not answer, so its containers were not checked"
+    )
+
+
+def test_pnr_step_reports_a_busy_work_directory(tmp_path, docker, monkeypatch):
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(_script(tmp_path / "librelane", WRAPPER)))
+    monkeypatch.setenv("CHIPLEAP_PNR_TIMEOUT", "1")
+    work = _dir(tmp_path / "pnr")
+    with (work / ".chipleap-run.lock").open("w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        step = place_route(GEMV, work)
+    assert step.status == "fail"
+    assert step.summary == f"LibreLane did not start: another run is using {work}"
+
+
 def test_time_limits_read_in_their_unit():
     assert pnr._span(10800) == "3 h" and pnr._span(5400) == "1.5 h"
     assert pnr._span(120) == "2 min" and pnr._span(1) == "1 s"
