@@ -15,7 +15,6 @@ import re
 import statistics
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,15 +24,8 @@ from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_logic_kge, get_tech
 from chipleap.verify import backends, pnr, sim, synth, xheep
 from chipleap.verify.remote import Remote
+from chipleap.verify.result import StepResult
 from chipleap.verify.tools import verilator
-
-
-@dataclass
-class StepResult:
-    name: str
-    status: str  # pass | fail | skipped
-    summary: str
-    data: dict[str, Any] = field(default_factory=dict)
 
 
 def consistency(design: Design, bundle: Path) -> StepResult:
