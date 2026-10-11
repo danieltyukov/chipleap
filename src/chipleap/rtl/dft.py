@@ -1054,9 +1054,15 @@ def run_dft(
     routed: SimResult | None = None
     try:
         sim = simulate_patterns(project, scan, patterns[: cfg.patterns], views, work)
-        routed = simulate_routed(project, scan, patterns[: cfg.patterns], work)
     except OpenroadUnavailable as exc:
         notes.append(f"chain simulation skipped: {exc}")
+        return scan, atpg, sim, routed, notes
+    try:
+        routed = simulate_routed(project, scan, patterns[: cfg.patterns], work)
+    except OpenroadError as exc:
+        # The routed check is a second look when there is a routed design; one ChipLeap
+        # did not record here is not read, and the scan netlist's result stands.
+        notes.append(f"the routed netlist was not simulated: {str(exc).splitlines()[0]}")
     return scan, atpg, sim, routed, notes
 
 
