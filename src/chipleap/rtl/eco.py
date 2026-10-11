@@ -428,6 +428,9 @@ def eco_config(
     repairs = [c for c in changes if c.kind == "repair"]
     if repairs:
         flow.append(REPAIR)
+        # The routed run may have had the repair turned off (pnr.librelane); this is the
+        # step that turns it on.
+        cfg["RUN_POST_GRT_RESIZER_TIMING"] = True
         _, route = margins(project)
         for c in repairs:
             if c.target == "setup":

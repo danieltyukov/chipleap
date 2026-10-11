@@ -38,7 +38,10 @@ KEY_BYTES = 32
 # A manifest lists the files of one run; this many is far beyond any LibreLane run.
 MAX_FILES = 100_000
 MANIFEST_LIMIT = 32 << 20
-READ_LIMIT = 256 << 20
+# Files are hashed and copied in chunks, so this only bounds the time a step spends on
+# one (a long test's VCD can be gigabytes); files read into memory have a lower limit.
+READ_LIMIT = 16 << 30
+TEXT_LIMIT = 64 << 20
 _CHUNK = 1 << 20
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
@@ -111,7 +114,7 @@ def _open_regular(path: Path, limit: int) -> int:
         raise SealError(f"{path.name} is not a regular file")
     if st.st_size > limit:
         os.close(fd)
-        raise SealError(f"{path.name} is larger than {limit >> 20} MB")
+        raise SealError(f"{path.name} is larger than {limit >> 20} MiB")
     return fd
 
 
@@ -122,7 +125,7 @@ def _chunks(path: Path, limit: int) -> Iterable[bytes]:
         while chunk := fh.read(_CHUNK):
             read += len(chunk)
             if read > limit:
-                raise SealError(f"{path.name} is larger than {limit >> 20} MB")
+                raise SealError(f"{path.name} is larger than {limit >> 20} MiB")
             yield chunk
 
 
@@ -262,7 +265,7 @@ class Sealed:
             )
         return real
 
-    def read_bytes(self, path: str | Path, limit: int = READ_LIMIT) -> bytes:
+    def read_bytes(self, path: str | Path, limit: int = TEXT_LIMIT) -> bytes:
         real, digest = self.locate(path)
         try:
             data = b"".join(_chunks(real, limit))
@@ -275,10 +278,10 @@ class Sealed:
             )
         return data
 
-    def read_text(self, path: str | Path, limit: int = READ_LIMIT) -> str:
+    def read_text(self, path: str | Path, limit: int = TEXT_LIMIT) -> str:
         return self.read_bytes(path, limit).decode(errors="replace")
 
-    def read_json(self, path: str | Path, limit: int = 64 << 20) -> Any:
+    def read_json(self, path: str | Path, limit: int = TEXT_LIMIT) -> Any:
         try:
             return json.loads(self.read_bytes(path, limit))
         except ValueError as exc:
