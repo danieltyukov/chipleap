@@ -714,16 +714,17 @@ PROJECT_TOOLS = {
 def project_context(project: str) -> dict[str, Any]:
     """The inputs digest and tool versions a project tool's result depends on."""
     from chipleap.rtl.sim import cocotb_python, cocotb_version
-    from chipleap.verify.tools import iverilog, slang, sv2v, verilator, yosys
+    from chipleap.verify.tools import iverilog, slang, sv2v, verilator, yosys, z3
 
     try:
         digest = _project(project).inputs_digest()
     except ToolError:
         digest = None
     py = cocotb_python()
+    # SymbiYosys and EQY built from a Yosys tag report no version; Yosys's stands for them.
     tools: dict[str, str | None] = {
         t.name: t.version if t.found else None
-        for t in (verilator(), slang(), iverilog(), yosys(), sv2v())
+        for t in (verilator(), slang(), iverilog(), yosys(), sv2v(), z3())
     }
     tools["cocotb"] = cocotb_version(py) if py else None
     return {"inputs_sha256": digest, "tools": tools}
@@ -1008,10 +1009,11 @@ def build_server(log_dir: str | None = None) -> Any:
         "editing it: each assertion is a boolean SystemVerilog expression over the module's "
         "signals ($past, $rose, $fell, $stable, $changed, $countones, $onehot, $onehot0, "
         "$isunknown, $signed and $unsigned allowed; no statements), kind assert, assume or "
-        "cover, and an optional name. They are sampled at the "
-        "project's clock outside reset. Each comes back holds, fails (with step and the "
-        "counterexample values), unknown, reached or unreachable. The design's own "
-        "assertions are left out of this run, so each answer is the proposal's own."
+        "cover, and an optional name. They are sampled at the project's clock outside "
+        "reset. Each assertion comes back holds, fails (with step and the counterexample "
+        "values) or unknown; each cover reached or unreached; assumptions constrain the "
+        "others. The design's own assertions are left out of this run, so each answer is "
+        "the proposal's own."
     )
     def check_assertions(
         project: str,
@@ -1037,7 +1039,7 @@ def build_server(log_dir: str | None = None) -> Any:
         "against ChipLeap's synthesized netlist) and synth-pnr (LibreLane's synthesized "
         "netlist against its routed one, after place and route). Each pair is proved, "
         "bounded (some points equal only for N cycles from reset), differs (with a "
-        "counterexample from reset) or skipped."
+        "counterexample from reset), skipped or error."
     )
     def equivalence_rtl(project: str, check: str = "") -> dict[str, Any]:
         return logged("equivalence_rtl", TOOLS["equivalence_rtl"])(project=project, check=check)

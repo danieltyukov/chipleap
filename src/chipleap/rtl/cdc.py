@@ -950,13 +950,20 @@ def cdc(project: Project) -> StepResult:
         return StepResult("cdc", "skipped", "Yosys is not installed")
     data = check(project)
     errors = [f for f in data["findings"] if f["severity"] == "error" and not f.get("waived")]
-    doms = ", ".join(f"{d} ({n})" for d, n in data["domains"].items())
+    doms = ", ".join(f"{d} ({n} flip-flops)" for d, n in data["domains"].items())
     ok = [a for a in data["accepted"] if a["rule"] != "reset_synchronizer"]
     if errors:
         first = errors[0]
         more = f" and {len(errors) - 1} more" if len(errors) > 1 else ""
         return StepResult("cdc", "fail", f"{first['message']}{more}", data)
-    note = f"; {data['warnings']} warnings" if data["warnings"] else ""
+
+    def count(n: int, noun: str) -> str:
+        return f"{n} {noun}" + ("" if n == 1 else "s")
+
+    note = f"; {count(data['warnings'], 'warning')}" if data["warnings"] else ""
     note += f"; {data['waived']} waived" if data["waived"] else ""
-    what = f"{len(ok)} crossings, each synchronized" if ok else "no crossing between domains"
+    each = "each " if len(ok) > 1 else ""
+    what = (
+        f"{count(len(ok), 'crossing')}, {each}synchronized" if ok else "no crossing between domains"
+    )
     return StepResult("cdc", "pass", f"domains {doms}: {what}{note}", data)

@@ -54,13 +54,25 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install Verilator, Yosys and Icarus
-        run: sudo apt-get update && sudo apt-get install -y verilator yosys iverilog
+      - name: Install Verilator, Yosys (with its headers for EQY) and Icarus
+        run: sudo apt-get update && sudo apt-get install -y verilator yosys yosys-dev iverilog
       - name: Install sv2v
         run: |
           curl -sSL -o sv2v.zip https://github.com/zachjs/sv2v/releases/download/${SV2V_VERSION}/sv2v-Linux.zip
           unzip -q sv2v.zip && sudo install sv2v-Linux/sv2v /usr/local/bin/sv2v
       - run: pip install -e ".[dev,xheep]"
+      # SymbiYosys and EQY are Python scripts that start with "#!/usr/bin/env python3",
+      # which is this job's Python, so click goes there.
+      - name: Install SymbiYosys, EQY and z3 4.15 (formal, equivalence) and Icarus 13 (gate level)
+        run: |
+          pip install click
+          scripts/install_formal_tools.sh "$RUNNER_TEMP/yosyshq"
+          scripts/install_iverilog13.sh "$RUNNER_TEMP/iverilog-13"
+          {
+            echo "CHIPLEAP_SBY=$RUNNER_TEMP/yosyshq/bin/sby"
+            echo "CHIPLEAP_EQY=$RUNNER_TEMP/yosyshq/bin/eqy"
+            echo "CHIPLEAP_IVERILOG=$RUNNER_TEMP/iverilog-13/bin/iverilog"
+          } >> "$GITHUB_ENV"
       - name: RTL tests
         run: pytest tests/test_rtl.py tests/test_gen.py tests/test_commercial.py -v
       - name: Generate, lint, simulate and check a design with X-HEEP
@@ -69,16 +81,21 @@ jobs:
           chipleap verify out --steps consistency,lint,sim,xheep --fetch-xheep
       - name: X-HEEP accepts every bus and accelerator configuration
         run: pytest tests/test_xheep.py -v
-      - name: Fetch the IHP SG13G2 typical-corner liberty
+      # Gate-level simulation finds the cell models in verilog/ beside the liberty's lib/.
+      - name: Fetch the IHP SG13G2 typical-corner liberty and cell models
         run: |
-          mkdir -p "$RUNNER_TEMP/ihp"
-          curl -sSfL -o "$RUNNER_TEMP/ihp/sg13g2_stdcell_typ_1p20V_25C.lib" \
-            "https://raw.githubusercontent.com/IHP-GmbH/IHP-Open-PDK/${IHP_PDK_COMMIT}/ihp-sg13g2/libs.ref/sg13g2_stdcell/lib/sg13g2_stdcell_typ_1p20V_25C.lib"
-          echo "CHIPLEAP_LIBERTY=$RUNNER_TEMP/ihp/sg13g2_stdcell_typ_1p20V_25C.lib" >> "$GITHUB_ENV"
-      - name: RTL projects (cocotb on Icarus, Verilator lint, Yosys synthesis)
-        run: pytest tests/test_project*.py -v
+          cells="$RUNNER_TEMP/ihp/sg13g2_stdcell"
+          url="https://raw.githubusercontent.com/IHP-GmbH/IHP-Open-PDK/${IHP_PDK_COMMIT}/ihp-sg13g2/libs.ref/sg13g2_stdcell"
+          mkdir -p "$cells/lib" "$cells/verilog"
+          curl -sSfL -o "$cells/lib/sg13g2_stdcell_typ_1p20V_25C.lib" "$url/lib/sg13g2_stdcell_typ_1p20V_25C.lib"
+          for f in sg13g2_stdcell.v sg13g2_udp.v; do
+            curl -sSfL -o "$cells/verilog/$f" "$url/verilog/$f"
+          done
+          echo "CHIPLEAP_LIBERTY=$cells/lib/sg13g2_stdcell_typ_1p20V_25C.lib" >> "$GITHUB_ENV"
+      - name: RTL projects (cocotb, lint, synthesis, formal, CDC, equivalence, gate level)
+        run: pytest tests/test_project*.py tests/test_vcd.py tests/test_tool_path.py -v
       - name: Verify the example RTL project
-        run: chipleap verify examples/uart --steps lint,sim,synth
+        run: chipleap verify examples/uart --steps lint,sim,formal,cdc,synth,equiv
       - uses: actions/upload-artifact@v7
         if: always()
         with:
