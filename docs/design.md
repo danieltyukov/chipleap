@@ -27,6 +27,7 @@ spec.yaml ──> workload (operators) ──> evaluate(workload, design) ──
 | `chipleap.explore` | Scoring against a spec (`score.py`), single-decision moves (`moves.py`), the agent loop, sampling and the Pareto front (`engine.py`). |
 | `chipleap.gen` | The X-HEEP configuration (`xheep.py`), RTL, driver and testbench (`rtl.py` and the sources in `rtl/`, `sw/`, `tb/`), register map and datasheet (`datasheet.py`), the bundle writer (`bundle.py`). |
 | `chipleap.verify` | Tool discovery, the consistency check, Verilator simulation, Yosys synthesis, X-HEEP checks, and the orchestration behind `chipleap verify`. |
+| `chipleap.rtl` | RTL the user wrote: the project file (`project.py`), diagnostics (`diag.py`), lint, the cocotb runner and simulation, coverage, synthesis, place and route, commercial backends, reports and the orchestration behind `chipleap verify PROJECT`. |
 | `chipleap.report` | Text, Markdown, JSON and self-contained HTML reports; the floorplan sketch. |
 | `chipleap.mcp_server` | The MCP tools, prompt and resource, the run log and replay. |
 | `chipleap.cli` | The command line. |
@@ -49,6 +50,8 @@ spec.yaml ──> workload (operators) ──> evaluate(workload, design) ──
 
 **Open tools only, and say when they are missing.** Every verification step runs on open-source tools and skips itself with a reason when its tool is absent. Yosys 0.33 cannot read the RTL's SystemVerilog directly, so synthesis goes through sv2v; the RTL avoids constructs both cannot handle (2-D unpacked arrays are flattened, for instance).
 
+**Your RTL through the same steps.** A user's design is described by a project file of its own, not by a kind of spec or design, because it has neither a workload nor a design point and lives in the user's repository. Its steps return the same `StepResult` as the accelerator's and share the place-and-route signoff settings (`verify.pnr.signoff`), so a change to signoff applies to both. Simulation is cocotb only: one test suite runs on Icarus, Verilator and the three commercial simulators. Every problem comes back as a `Diagnostic` with a file and line relative to the project, which is what lets an assistant fix RTL in a loop and lets `chipleap replay` compare results across machines.
+
 **Data with provenance.** Every technology number either comes from the IHP SG13G2 PDK (measured, `scripts/calibrate_sg13g2.py`) or is scaled from a cited source and labelled as such. LLM shapes are copied from each model's `config.json`, with the URL in the code.
 
 ## Adding things
@@ -58,3 +61,4 @@ spec.yaml ──> workload (operators) ──> evaluate(workload, design) ──
 - **An external memory:** add an `ExternalMemory` in `hw/memory.py`, including `phy_max_node_nm` and `min_mts`.
 - **A move:** add it to `explore/moves.py` with a `kind`, a label and the hypothesis an engineer would state; make sure it produces a valid `Design`.
 - **An RTL change:** keep `model/accel.py` in step, run `pytest tests/test_rtl.py`, and check that the cycle error without stalls is still zero.
+- **A project section** (formal properties, macros, a pad ring): a frozen dataclass and a parser in `rtl/project.py`, a field on `Project` with a default, the key in `SECTIONS` and out of `RESERVED`; `input_files` lists any file it names, so replay notices when it changes.

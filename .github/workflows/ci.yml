@@ -45,14 +45,17 @@ jobs:
     timeout-minutes: 30
     env:
       SV2V_VERSION: v0.0.13
+      # The open IHP PDK commit whose typical-corner liberty the RTL project tests
+      # synthesize to; only that file is fetched, nothing is committed.
+      IHP_PDK_COMMIT: 22f2a25f1734796de3debbbf29cf697cbbc54081
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install Verilator and Yosys
-        run: sudo apt-get update && sudo apt-get install -y verilator yosys
+      - name: Install Verilator, Yosys and Icarus
+        run: sudo apt-get update && sudo apt-get install -y verilator yosys iverilog
       - name: Install sv2v
         run: |
           curl -sSL -o sv2v.zip https://github.com/zachjs/sv2v/releases/download/${SV2V_VERSION}/sv2v-Linux.zip
@@ -66,8 +69,20 @@ jobs:
           chipleap verify out --steps consistency,lint,sim,xheep --fetch-xheep
       - name: X-HEEP accepts every bus and accelerator configuration
         run: pytest tests/test_xheep.py -v
+      - name: Fetch the IHP SG13G2 typical-corner liberty
+        run: |
+          mkdir -p "$RUNNER_TEMP/ihp"
+          curl -sSfL -o "$RUNNER_TEMP/ihp/sg13g2_stdcell_typ_1p20V_25C.lib" \
+            "https://raw.githubusercontent.com/IHP-GmbH/IHP-Open-PDK/${IHP_PDK_COMMIT}/ihp-sg13g2/libs.ref/sg13g2_stdcell/lib/sg13g2_stdcell_typ_1p20V_25C.lib"
+          echo "CHIPLEAP_LIBERTY=$RUNNER_TEMP/ihp/sg13g2_stdcell_typ_1p20V_25C.lib" >> "$GITHUB_ENV"
+      - name: RTL projects (cocotb on Icarus, Verilator lint, Yosys synthesis)
+        run: pytest tests/test_project*.py -v
+      - name: Verify the example RTL project
+        run: chipleap verify examples/uart --steps lint,sim,synth
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bundle
-          path: out/
+          path: |
+            out/
+            examples/uart/build/verify/

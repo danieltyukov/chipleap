@@ -2,7 +2,7 @@
   <img src="assets/logo.svg" alt="ChipLeap" width="280">
 </p>
 
-<p align="center"><b>Tell it the model and the speed you need. ChipLeap designs the chip,<br>explains every choice, writes the RTL and checks it.</b></p>
+<p align="center"><b>From a spec or from your RTL to GDS. Tell it the model and the speed you need, and ChipLeap<br>designs the chip, explains every choice and writes the RTL; or bring RTL of your own. Either way it checks it down to the layout.</b></p>
 
 <p align="center">
   <a href="https://github.com/danieltyukov/chipleap/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/danieltyukov/chipleap/ci.yml?branch=main&label=CI" alt="CI status"></a>
@@ -32,6 +32,8 @@ You describe a workload (say, Llama 3.2 1B decoding), a target (5 tokens per sec
 3. **Generates the hardware.** Accelerator RTL in SystemVerilog, an X-HEEP RISC-V SoC configuration or AXI4 IP for any host, a C driver, a testbench and a datasheet.
 4. **Checks it.** Simulation against a golden model, synthesis, place and route, and the SoC generator's own checks, on open-source tools or the commercial ones you already have.
 
+The generator is the path for AI workloads. For anything else, the checks run on RTL you wrote: see [Your own RTL](#your-own-rtl).
+
 <p align="center">
   <img src="docs/img/decisions.gif" alt="The agent's decisions for Llama 3.2 1B: each step's floorplan drawn to the same scale, from a bare microcontroller to a 16 nm design with a GEMV engine and LPDDR5" width="760">
   <br><sub>The agent's decisions for Llama 3.2 1B at 5 tokens per second. Every floorplan is drawn to the same scale.</sub>
@@ -50,6 +52,18 @@ Open `out/report.html` to see each decision, the Pareto front and where the time
 
 <p align="center"><img src="docs/img/report.png" alt="The HTML report: the recommended design, the Pareto front of 2,154 evaluated designs and the agent's progress toward the target" width="560"></p>
 
+## Your own RTL
+
+Point ChipLeap at a directory of Verilog or SystemVerilog with cocotb tests:
+
+```sh
+chipleap project init path/to/rtl       # writes project.yaml: top, sources, clock, reset, tests
+chipleap verify path/to/rtl             # lint, simulation, coverage, synthesis
+chipleap verify path/to/rtl --steps all # and place and route to a GDS
+```
+
+Lint runs Verilator and slang, simulation runs the cocotb tests on Icarus or Verilator, coverage reports line, branch and toggle coverage, synthesis maps to the IHP SG13G2 cells, and LibreLane routes it with the same slow-corner signoff as the accelerators. Failing tests come back by name, and every problem with its file and line, which is also what an assistant gets through MCP to fix the RTL in a loop. [examples/uart](examples/uart) is a UART that routes to a clean GDS; [docs/projects.md](docs/projects.md) describes the project file.
+
 ## Ask your AI assistant
 
 ChipLeap is also an MCP server, so Claude, Cursor, VS Code or Codex can drive it:
@@ -58,13 +72,14 @@ ChipLeap is also an MCP server, so Claude, Cursor, VS Code or Codex can drive it
 claude mcp add chipleap -s user -- chipleap mcp
 ```
 
-Then ask things like *"Design the smallest chip on the IHP open PDK that runs SmolLM2 135M at two tokens per second"* or *"Why is this design memory bound, and what is the cheapest fix?"*. [docs/mcp.md](docs/mcp.md) covers the other clients.
+Then ask things like *"Design the smallest chip on the IHP open PDK that runs SmolLM2 135M at two tokens per second"*, *"Why is this design memory bound, and what is the cheapest fix?"* or *"Make my RTL in ./uart lint clean and pass its tests"*. [docs/mcp.md](docs/mcp.md) covers the other clients.
 
 ## Works with what you have
 
 - **Any workload:** twelve LLM presets (SmolLM2, Qwen, Gemma, Llama, Phi, TinyLlama), or your own network of convolutions and matrix multiplies.
+- **Any RTL:** your own Verilog or SystemVerilog with cocotb tests, through the same checks down to the layout ([projects](docs/projects.md)).
 - **Any host:** a complete X-HEEP RISC-V SoC, or the accelerator alone as AXI4 IP for an Arm, RISC-V or FPGA SoC ([platforms](docs/platforms.md)).
-- **Open tools:** Verilator, Yosys and LibreLane (OpenROAD, KLayout, Netgen) on the IHP SG13G2 open PDK.
+- **Open tools:** Verilator, Icarus, slang, cocotb, Yosys and LibreLane (OpenROAD, KLayout, Netgen) on the IHP SG13G2 open PDK.
 - **Commercial tools:** Cadence Xcelium and Genus, Synopsys VCS and Design Compiler, Siemens Questa, on your machine or on a design server over ssh ([guide](docs/commercial-tools.md)).
 - **Your own PDK:** `chipleap tech add` measures it from its liberty files and keeps the numbers on your machine.
 
@@ -89,6 +104,7 @@ The other nodes are scaled from published figures and say so. [docs/model.md](do
 | Guide | What it covers |
 |---|---|
 | [Spec format](docs/spec.md) | Workloads, targets, constraints and what the explorer may change |
+| [Your own RTL](docs/projects.md) | The project file, and lint, simulation, coverage, synthesis and place and route on your design |
 | [The model](docs/model.md) | Timing, energy and area, with sources |
 | [Verification](docs/verification.md) | Simulation, synthesis, place and route, X-HEEP checks |
 | [Platforms](docs/platforms.md) | X-HEEP or AXI4 IP, and how to integrate each |

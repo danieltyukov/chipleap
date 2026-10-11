@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Bring your own RTL: every step after architecture runs on Verilog or SystemVerilog you wrote. A project file, `project.yaml`, names the top, sources or a filelist, include directories, defines, parameters, clocks, resets, technology, cocotb tests and an optional Python golden model; `chipleap project init` writes one for existing RTL, guessing the top, clock and reset, and `chipleap project check` shows it with every default filled in. [docs/projects.md](docs/projects.md) describes it.
+- `chipleap verify PROJECT` runs lint (Verilator `-Wall`, and slang `-Wextra` when installed), the cocotb tests (Icarus or Verilator 5.036 or newer), coverage (Verilator line, branch and toggle, per file, with the points never reached), synthesis (Yosys on the technology's cells: area, flip-flops, critical path, an Fmax estimate and the mapped netlist) and, with `--steps all`, place and route with LibreLane on IHP SG13G2 with the accelerator's slow-corner signoff and constraints written from the project's clocks. Results go to `build/verify/report.html`, `VERIFY.md` and `verify.json`. A failing test is reported by name with the file and line where it failed.
+- Commercial tools for projects: the cocotb tests on Xcelium, VCS or Questa, synthesis with Genus or Design Compiler, place and route with Genus and Innovus, here or on a server with `--remote`.
+- MCP tools for projects: `describe_project`, `lint_rtl`, `simulate_rtl`, `coverage_rtl`, `synthesize_rtl` and `verify_rtl`, with structured diagnostics (tool, severity, file, line, column, code, failing test) so an assistant can fix RTL in a loop; a `fix_rtl` prompt and a `chipleap://project-reference` resource. `chipleap replay` re-runs the project tools, and when a result differs it says whether the project's files or the tools changed since the call.
+- `examples/uart`: a UART with cocotb tests and a reference model. It routes on IHP SG13G2 at 100 MHz with clean DRC, LVS and antenna checks: 325 cells on a 0.0084 mm2 core, 5.7 ns of setup slack at the slow corner (about 234 MHz there, 308 MHz at the typical corner).
+- `chipleap doctor` lists Icarus and slang; `pip install "chipleap[rtl]"` adds cocotb.
+
+### Changed
+
+- The LibreLane signoff settings live in one function, `chipleap.verify.pnr.signoff`, that the accelerator's and a project's place and route share.
+
 ### Fixed
 
 - Place and route: at `CHIPLEAP_PNR_TIMEOUT` (3 h by default), on Ctrl-C, SIGTERM or SIGHUP, and when the MCP server cancels a `verify_soc` call or shuts down, ChipLeap now stops LibreLane's container as well. It used to stop only the `docker` client, so the container went on routing to the end, and a cancelled MCP call or a server shutdown stopped nothing. The run's containers are recognised by a label of their own, and no other container is touched. A run that times out fails the step with the limit in its summary instead of ending `chipleap verify` with a traceback, and a second run in the same work directory fails at once instead of overwriting the first. LibreLane no longer inherits ChipLeap's standard input: a containerised run switched the terminal to raw mode through it, so Ctrl-C never reached ChipLeap, and under the MCP server it could read the client's requests.
