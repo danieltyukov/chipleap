@@ -168,8 +168,7 @@ def synthesize(project: Project, workdir: Path | None = None) -> RtlSynthResult:
             else "add it with chipleap tech add --liberty, or use ihp-sg13g2"
         )
         raise SynthUnavailable(f"no liberty file for {project.tech}: {hint}")
-    work = (workdir or project.build_dir / "synth").resolve()
-    work.mkdir(parents=True, exist_ok=True)
+    work = project.work_dir(workdir or "synth")
     files, raw = prepare_verilog(project, work)
     clk = project.fastest_clock
     target = (clk.period_ns if clk else DEFAULT_PERIOD_NS) / 2

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from chipleap.hw.tech import get_tech
+from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.project import Project
 from chipleap.verify import cpnr, csynth, innovus
@@ -33,9 +34,7 @@ DEFAULT_PERIOD_NS = 10.0
 def stage_rtl(project: Project, workdir: Path) -> tuple[list[str], list[str]]:
     """Copy the sources and include directories under ``workdir/src``; returns their
     names relative to the work directory."""
-    src = workdir / "src"
-    if src.exists():
-        shutil.rmtree(src)
+    src = builddir.work_dir(workdir, "src", empty=True)
 
     def put(p: Path) -> str:
         rel = project.rel(p)
@@ -161,7 +160,8 @@ def _lefs(tech_key: str, lib: str) -> tuple[str, ...]:
 def synthesize_with(
     project: Project, tool: str, workdir: Path, remote: Remote | None = None
 ) -> dict[str, Any]:
-    """Genus or Design Compiler on the project at its fastest clock."""
+    """Genus or Design Compiler on the project at its fastest clock, in ``workdir``, a
+    directory in the project's ``build/`` (``Project.work_dir``)."""
     st = csynth.get_synth_tool(tool)
     if remote is None and shutil.which(st.binary) is None:
         raise SynthError(
@@ -172,7 +172,7 @@ def synthesize_with(
     lib, host = synth_liberty(project.tech)
     if host and (remote is None or remote.host != host):
         raise SynthError(f"the {project.tech} liberty is on {host}; run with --remote {host}")
-    workdir.mkdir(parents=True, exist_ok=True)
+    workdir = project.work_dir(workdir)
     for old in [*workdir.glob("area_*.rpt"), *workdir.glob("timing_*.rpt")]:
         old.unlink()
     files, includes = stage_rtl(project, workdir)
@@ -244,7 +244,8 @@ def synth_step(project: Project, tool: str, remote: Remote | None = None) -> Ste
 
 def place_route_with(project: Project, workdir: Path, remote: Remote | None = None) -> PnrResult:
     """Genus then Innovus on the project, here or on ``remote``, with the project's
-    utilisation, placement density and die size, as LibreLane gets them."""
+    utilisation, placement density and die size, as LibreLane gets them. ``workdir`` is a
+    directory in the project's ``build/`` (``Project.work_dir``)."""
     if remote is None and (shutil.which("genus") is None or shutil.which("innovus") is None):
         raise PnrError(
             "Cadence Genus and Innovus are not on the path; run them on a server with --remote HOST"
@@ -261,7 +262,7 @@ def place_route_with(project: Project, workdir: Path, remote: Remote | None = No
         raise PnrError(
             f"technology {project.tech!r} names no LEF files; add them with tech add --lef"
         )
-    workdir.mkdir(parents=True, exist_ok=True)
+    workdir = project.work_dir(workdir)
     for old in ("chipleap_pnr.txt", "innovus.out", "genus.out"):
         (workdir / old).unlink(missing_ok=True)
     try:

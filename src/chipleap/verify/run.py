@@ -22,6 +22,7 @@ from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_logic_kge, get_tech
+from chipleap.rtl import builddir
 from chipleap.verify import backends, pnr, sim, synth, xheep
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
@@ -287,7 +288,7 @@ def _simulate_on(
     """Simulation on a commercial simulator (``chipleap.verify.backends``)."""
     try:
         results, name = backends.simulate_with(
-            design, tool, bundle / "verify" / tool, remote, cases, seed
+            design, tool, builddir.work_dir(bundle, "verify", tool), remote, cases, seed
         )
     except sim.SimError as exc:
         return StepResult("sim", "fail", str(exc).splitlines()[0], {"error": str(exc)})
@@ -301,7 +302,9 @@ def _synthesize_on(
 ) -> StepResult:
     """Synthesis with Genus or Design Compiler (``chipleap.verify.backends``)."""
     try:
-        data = backends.synthesize_with(design, tool, bundle / "verify" / tool, remote, tech)
+        data = backends.synthesize_with(
+            design, tool, builddir.work_dir(bundle, "verify", tool), remote, tech
+        )
     except synth.SynthError as exc:
         msg = str(exc).splitlines()[0]
         status = "skipped" if "not on the path" in msg or "no accelerator" in msg else "fail"
@@ -318,7 +321,9 @@ def _synthesize_on(
 def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | None) -> StepResult:
     """Place and route with Genus and Innovus (``chipleap.verify.cpnr``)."""
     try:
-        r, clock = backends.place_route_with(design, bundle / "verify" / "innovus", remote, tech)
+        r, clock = backends.place_route_with(
+            design, builddir.work_dir(bundle, "verify", "innovus"), remote, tech
+        )
     except pnr.PnrError as exc:
         msg = str(exc).splitlines()[0]
         status = "skipped" if "not on the path" in msg or "no accelerator" in msg else "fail"
@@ -383,6 +388,9 @@ def verify_bundle(
     from chipleap.gen.bundle import load_design
 
     design, _ = load_design(bundle)
+    # The steps write into the bundle's verify/, so the bundle may not be a symlink, and
+    # verify/ and each step's directory in it are reached without following one.
+    builddir.output_dir(bundle)
     results: list[StepResult] = []
     for step in steps:
         if step == "consistency":
@@ -396,24 +404,25 @@ def verify_bundle(
         elif step == "synth" and synth_tool != "yosys":
             results.append(_synthesize_on(design, synth_tool, synth_tech, bundle, remote))
         elif step == "synth":
-            results.append(synthesize(design, bundle / "verify" / "synth"))
+            results.append(synthesize(design, builddir.work_dir(bundle, "verify", "synth")))
         elif step == "xheep":
             results.append(check_xheep(bundle, design, xheep_dir, fetch_xheep))
         elif step == "pnr" and pnr_tool == "innovus":
             results.append(_place_route_on(design, synth_tech, bundle, remote))
         elif step == "pnr":
-            results.append(place_route(design, bundle / "verify" / "pnr"))
+            results.append(place_route(design, builddir.work_dir(bundle, "verify", "pnr")))
         else:
             raise ValueError(f"unknown verification step {step!r}")
-    out = bundle / "verify"
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "verify.json").write_text(
+    out = builddir.work_dir(bundle, "verify")
+    builddir.write_text(
+        out,
+        "verify.json",
         json.dumps(
             [{"step": r.name, "status": r.status, "summary": r.summary, **r.data} for r in results],
             indent=2,
-        )
+        ),
     )
     lines = [f"# Verification of {design.name}", ""]
     lines += [f"- **{r.name}**: {r.status}. {r.summary}." for r in results]
-    (out / "VERIFY.md").write_text("\n".join(lines) + "\n")
+    builddir.write_text(out, "VERIFY.md", "\n".join(lines) + "\n")
     return results
