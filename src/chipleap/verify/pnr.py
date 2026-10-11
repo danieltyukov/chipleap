@@ -14,14 +14,13 @@ from __future__ import annotations
 
 import json
 import os
-import signal
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
+from chipleap.verify import launch
 from chipleap.verify.synth import _sv2v
 from chipleap.verify.tools import librelane
 
@@ -175,26 +174,42 @@ def place_and_route(accel: Accel, clock_mhz: float, workdir: Path) -> PnrResult:
     tag = "chipleap"
     cmd = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", tag, "--overwrite", "config.json"]
     log = workdir / "librelane.log"
-    with log.open("w") as fh:
-        proc = subprocess.Popen(
-            cmd, cwd=workdir, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True
-        )
-        try:
-            proc.wait(timeout=float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800")))
-        except BaseException:
-            # SIGTERM first: a containerised LibreLane forwards it and stops its container,
-            # which a SIGKILL to the client would leave running.
-            os.killpg(proc.pid, signal.SIGTERM)
-            try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-            raise
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    try:
+        code = launch.run(cmd, workdir, log, limit)
+    except launch.TimedOut as exc:
+        raise PnrError(_timed_out(exc, log)) from None
     final = workdir / "runs" / tag / "final"
     metrics_file = final / "metrics.json"
     if not metrics_file.is_file():
-        tail = "\n".join(log.read_text(errors="replace").splitlines()[-25:])
-        raise PnrError(f"LibreLane did not finish (exit {proc.returncode}):\n{tail}")
+        raise PnrError(f"LibreLane did not finish (exit {code}):\n{_tail(log)}")
     gds = next(iter(sorted((final / "gds").glob("*.gds"))), None)
     return parse(json.loads(metrics_file.read_text()), clock_mhz, gds)
+
+
+def _timed_out(exc: launch.TimedOut, log: Path) -> str:
+    """What a run stopped at the time limit reports; the first line is the step's summary."""
+    stopped = "its processes"
+    if exc.containers:
+        stopped += f" and {_count(len(exc.containers), 'container')}"
+    msg = (
+        f"LibreLane timed out after {_span(exc.seconds)} (CHIPLEAP_PNR_TIMEOUT); "
+        f"{stopped} were stopped"
+    )
+    if exc.left:
+        msg += f"; docker could not stop {_count(len(exc.left), 'container')}: {' '.join(exc.left)}"
+    return f"{msg}\n{_tail(log)}"
+
+
+def _tail(log: Path) -> str:
+    return "\n".join(log.read_text(errors="replace").splitlines()[-25:])
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" + ("" if n == 1 else "s")
+
+
+def _span(seconds: float) -> str:
+    if seconds >= 3600:
+        return f"{seconds / 3600:.3g} h"
+    return f"{seconds / 60:.3g} min" if seconds >= 60 else f"{seconds:.3g} s"

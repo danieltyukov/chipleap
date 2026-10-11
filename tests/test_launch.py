@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from chipleap.verify import launch
+from chipleap.hw import Accel, Design
+from chipleap.verify import launch, pnr
+from chipleap.verify.run import place_route
 
 FAKE_DOCKER = Path(__file__).with_name("fake_docker.py")
 
@@ -231,3 +233,42 @@ def test_a_run_that_finishes_returns_its_exit_code(tmp_path, docker):
     tool = _script(tmp_path / "librelane", "#!/bin/sh\necho routed\nexit 3\n")
     assert launch.run([str(tool)], work, work / "librelane.log", timeout=600) == 3
     assert (work / "librelane.log").read_text() == "routed\n"
+
+
+def test_pnr_step_reports_the_time_limit(tmp_path, docker, monkeypatch):
+    _, state, _ = docker
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(_script(tmp_path / "librelane", WRAPPER)))
+    monkeypatch.setenv("CHIPLEAP_PNR_TIMEOUT", "1")
+    _hold_cleanup(monkeypatch, lambda wd: bool(_own(state, wd)))
+    design = Design(accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2))
+    step = place_route(design, tmp_path / "pnr")
+    assert step.status == "fail"
+    assert step.summary == (
+        "LibreLane timed out after 1 s (CHIPLEAP_PNR_TIMEOUT); "
+        "its processes and 1 container were stopped"
+    )
+    (rec,) = _created(state)
+    assert _survivors([rec["pid"], rec["client"]]) == []
+    with pytest.raises(pnr.PnrError, match="timed out after 1 s"):
+        pnr.place_and_route(design.accel, 100.0, tmp_path / "again")
+
+
+def test_a_container_docker_cannot_stop_is_reported(tmp_path, docker, monkeypatch):
+    _, state, _ = docker
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(_script(tmp_path / "librelane", WRAPPER)))
+    monkeypatch.setenv("CHIPLEAP_PNR_TIMEOUT", "1")
+    monkeypatch.setenv("FAKE_DOCKER_STOP_FAILS", "1")
+    _hold_cleanup(monkeypatch, lambda wd: bool(_own(state, wd)))
+    design = Design(accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2))
+    step = place_route(design, tmp_path / "pnr")
+    (rec,) = _created(state)
+    assert step.status == "fail"
+    assert step.summary == (
+        "LibreLane timed out after 1 s (CHIPLEAP_PNR_TIMEOUT); its processes were stopped; "
+        f"docker could not stop 1 container: {rec['id']}"
+    )
+
+
+def test_time_limits_read_in_their_unit():
+    assert pnr._span(10800) == "3 h" and pnr._span(5400) == "1.5 h"
+    assert pnr._span(120) == "2 min" and pnr._span(1) == "1 s"
