@@ -31,6 +31,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.pnr import routed_run
 from chipleap.rtl.project import Project
@@ -139,12 +140,12 @@ def prepare(project: Project, workdir: Path) -> tuple[Project, tuple[str, ...], 
     text = project.read(netlist).decode(errors="replace")
     args: tuple[str, ...] = ()
     if sdf is not None:
-        local_sdf = workdir / sdf.name
-        local_sdf.write_text(normalize_sdf(project.read(sdf).decode(errors="replace")))
+        local_sdf = builddir.write_text(
+            workdir, sdf.name, normalize_sdf(project.read(sdf).decode(errors="replace"))
+        )
         text = annotated(text, project.top, local_sdf)
         args = ("-gspecify", "-ginterconnect", f"-T{project.gate_sim.delays}")
-    copy = workdir / f"{project.top}.gls.v"
-    copy.write_text(text)
+    copy = builddir.write_text(workdir, f"{project.top}.gls.v", text)
     gate = dataclasses.replace(project, sources=(*sources, copy), include_dirs=(), parameters={})
     used = {
         "netlist": project.rel(netlist),
@@ -168,10 +169,7 @@ def gls(project: Project, test_filter: str = "") -> StepResult:
             f"gate-level simulation of IHP cells needs Icarus 13 or newer, found {found}: "
             f"{INSTALL_HINT}",
         )
-    workdir = (project.build_dir / "gls").resolve()
-    if workdir.exists():
-        shutil.rmtree(workdir)
-    workdir.mkdir(parents=True)
+    workdir = project.work_dir("gls", empty=True)
     try:
         gate, args, used = prepare(project, workdir)
     except GlsUnavailable as exc:

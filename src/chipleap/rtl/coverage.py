@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chipleap.rtl import builddir
 from chipleap.rtl.project import Project, ProjectError
 from chipleap.rtl.sim import SimError, SimUnavailable, choose, run_tests, summarize
 from chipleap.verify.remote import Remote
@@ -269,7 +270,9 @@ def coverage(project: Project, remote: Remote | None = None) -> StepResult:
     change = delta(last.get("uncovered") if last else None, every)
     if change is not None:
         data.update(change)
-    (dat.parent / SUMMARY).write_text(
+    builddir.write_text(
+        dat.parent,
+        SUMMARY,
         json.dumps(
             {
                 "inputs_sha256": project.inputs_digest(),
@@ -277,7 +280,7 @@ def coverage(project: Project, remote: Remote | None = None) -> StepResult:
                 "uncovered": every,
             },
             indent=1,
-        )
+        ),
     )
     if not s.kinds:
         return StepResult("coverage", "fail", "no coverage points in the design sources", data)

@@ -24,6 +24,7 @@ from typing import Any
 
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
+from chipleap.rtl.builddir import BuildDirError
 from chipleap.rtl.project import Project
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
 from chipleap.verify.pnr import PnrError, PnrResult, parse, run_librelane, signoff
@@ -36,9 +37,20 @@ RUN_TAG = "chipleap"
 
 def routed_run(project: Project) -> Path | None:
     """The LibreLane run of ``chipleap verify --steps pnr``, if it finished: its final
-    netlist is there. Equivalence and gate-level simulation read it."""
-    run = project.build_dir / "pnr" / "runs" / RUN_TAG
-    return run if (run / "final" / "nl" / f"{project.top}.nl.v").is_file() else None
+    netlist is there. Equivalence and gate-level simulation read it. A project from
+    someone else's repository can ship ``build`` or ``build/pnr`` as a symlink, so the
+    directories down to the run must be the project's own: one reached through a symlink
+    is refused (BuildDirError), never read."""
+    parts = ("build", "pnr", "runs", RUN_TAG)
+    run = project.root.joinpath(*parts)
+    if not (run / "final" / "nl" / f"{project.top}.nl.v").is_file():
+        return None
+    if run.resolve() != project.root.resolve().joinpath(*parts):
+        raise BuildDirError(
+            f"{'/'.join(parts)} leads through a symlink; ChipLeap reads only a run in the "
+            "project's own build directory: remove the symlink and run place and route again"
+        )
+    return run
 
 
 def sdc(project: Project) -> str:

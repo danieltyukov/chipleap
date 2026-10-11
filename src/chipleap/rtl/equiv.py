@@ -38,14 +38,13 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.rtl import confine
+from chipleap.rtl import builddir, confine
 from chipleap.rtl import quote as q
 from chipleap.rtl.pnr import routed_run
 from chipleap.rtl.project import Project, ProjectError
@@ -83,6 +82,12 @@ class Side:
 def _librelane_synth(run: Path, top: str) -> Path | None:
     found = sorted(run.glob(f"*-yosys-synthesis/{top}.nl.v"))
     return found[-1] if found else None
+
+
+def _copy_in(project: Project, netlist: Path, workdir: Path, name: str) -> Path:
+    """``netlist`` copied into the work directory through ``Project.read``, which reads
+    only inside the project, so the tools read the copy and never follow a symlink out."""
+    return builddir.write_bytes(workdir, name, project.read(netlist))
 
 
 def _netlist(liberty: Path, netlist: Path) -> list[str]:
@@ -130,7 +135,7 @@ def sides(
             )
         gate = Side(
             "ChipLeap's synthesized netlist",
-            _netlist(liberty, gate_netlist),
+            _netlist(liberty, _copy_in(project, gate_netlist, workdir, "gate.v")),
             [project.rel(gate_netlist)],
         )
         return gold, gate
@@ -143,9 +148,15 @@ def sides(
             )
         final = gate_netlist or run / "final" / "nl" / f"{project.top}.nl.v"
         gold = Side(
-            "LibreLane's synthesized netlist", _netlist(liberty, synth), [project.rel(synth)]
+            "LibreLane's synthesized netlist",
+            _netlist(liberty, _copy_in(project, synth, workdir, "gold.v")),
+            [project.rel(synth)],
         )
-        gate = Side("the routed netlist", _netlist(liberty, final), [project.rel(final)])
+        gate = Side(
+            "the routed netlist",
+            _netlist(liberty, _copy_in(project, final, workdir, "gate.v")),
+            [project.rel(final)],
+        )
         return gold, gate
     raise ValueError(f"unknown pair {pair!r}; pairs: {', '.join(PAIRS)}")
 
@@ -301,8 +312,7 @@ def _yosys(script: str, workdir: Path, name: str, reads: list[Path]) -> str:
     tool = yosys()
     if tool.path is None:
         raise EquivUnavailable("Yosys is not installed")
-    path = workdir / f"{name}.ys"
-    path.write_text(script)
+    path = builddir.write_text(workdir, f"{name}.ys", script)
     out = _run([tool.path, "-q", "-l", f"{name}.log", path.name], workdir, reads)
     log = workdir / f"{name}.log"
     return (log.read_text(errors="replace") if log.is_file() else "") + out
@@ -317,10 +327,7 @@ def check_pair(project: Project, pair: str, *, gate_netlist: Path | None = None)
         return {**head, "status": "skipped", "reason": f"no liberty file for {project.tech}"}
     if engine == "eqy" and not eqy().found:
         return {**head, "status": "skipped", "reason": "EQY is not installed (CHIPLEAP_EQY)"}
-    workdir = (project.build_dir / "equiv" / pair).resolve()
-    if workdir.exists():
-        shutil.rmtree(workdir)
-    workdir.mkdir(parents=True)
+    workdir = project.work_dir(Path("equiv") / pair, empty=True)
     try:
         gold, gate = sides(project, pair, liberty.resolve(), workdir, gate_netlist, engine)
     except EquivUnavailable as exc:
@@ -329,14 +336,13 @@ def check_pair(project: Project, pair: str, *, gate_netlist: Path | None = None)
     reads = [*project.roots, workdir, liberty.resolve()]
     if engine == "eqy":
         tool = eqy()
-        cfg = workdir / f"{pair}.eqy"
-        cfg.write_text(eqy_text(gold, gate, project.top))
+        cfg = builddir.write_text(workdir, f"{pair}.eqy", eqy_text(gold, gate, project.top))
         cmd = [str(tool.path), "-f", "-k", "-j", str(os.cpu_count() or 2)]
         ys = yosys()
         if ys.path:
             cmd += ["--yosys", ys.path]
         out = _run([*cmd, cfg.name], workdir, reads)
-        (workdir / f"{pair}.log").write_text(out)
+        builddir.write_text(workdir, f"{pair}.log", out)
         proof = parse_eqy(out)
     else:
         log = _yosys(yosys_script(gold, gate, project.top, 5), workdir, "equiv", reads)

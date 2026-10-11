@@ -25,13 +25,12 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import signal
 import subprocess
 from pathlib import Path
 from typing import Any
 
-from chipleap.rtl import confine
+from chipleap.rtl import builddir, confine
 from chipleap.rtl import quote as q
 from chipleap.rtl.project import FormalCheck, Project, ProjectError, active_low_by_name
 from chipleap.rtl.vcd import read_trace
@@ -219,12 +218,11 @@ def run_check(
     tool = sby()
     if tool.path is None:
         raise RuntimeError(f"SymbiYosys (sby) is not installed: {INSTALL_HINT}")
-    workdir.mkdir(parents=True, exist_ok=True)
     srcs = files if files is not None else _sources(project)
-    config = workdir / f"{check.name}.sby"
-    config.write_text(sby_text(project, check, srcs, includes=includes, after=after))
+    text = sby_text(project, check, srcs, includes=includes, after=after)
+    config = builddir.write_text(workdir, f"{check.name}.sby", text)
     out = _run([tool.path, "-f", "-d", check.name, config.name], workdir, project, workdir)
-    (workdir / f"{check.name}.log").write_text(out)
+    builddir.write_text(workdir, f"{check.name}.log", out)
     result = parse_log(out, project, workdir, check.name)
     head = {
         "name": check.name,
@@ -249,9 +247,8 @@ def run_sby_file(project: Project, path: Path, workdir: Path) -> dict[str, Any]:
         raise RuntimeError(f"SymbiYosys (sby) is not installed: {INSTALL_HINT}")
     name = f"sby_{path.stem}"
     dest = workdir / name
-    workdir.mkdir(parents=True, exist_ok=True)
     out = _run([tool.path, "-f", "-d", str(dest), str(path)], path.parent, project, workdir)
-    (workdir / f"{name}.log").write_text(out)
+    builddir.write_text(workdir, f"{name}.log", out)
     result = parse_log(out, project, path.parent, name)
     head = {"name": f"sby:{path.stem}", "mode": "", "depth": 0, "engine": "", "top": ""}
     return {**head, **_with_traces(result, project)}
@@ -261,9 +258,7 @@ def prove(project: Project, only: str = "") -> list[dict[str, Any]]:
     """Every check of the project (or the one named ``only``), then its own .sby files."""
     if project.formal is None:
         return []
-    workdir = (project.build_dir / "formal").resolve()
-    if workdir.exists():
-        shutil.rmtree(workdir)
+    workdir = project.work_dir("formal", empty=True)
     checks = [c for c in project.formal.checks if not only or c.name == only]
     results = [run_check(project, c, workdir) for c in checks]
     for path in project.formal.sby:
@@ -505,10 +500,7 @@ def check_assertions(
     if sby().path is None:
         raise RuntimeError(f"SymbiYosys (sby) is not installed: {INSTALL_HINT}")
     original, text = _defining_file(project, module)
-    workdir = (project.build_dir / "formal" / "proposed").resolve()
-    if workdir.exists():
-        shutil.rmtree(workdir)
-    workdir.mkdir(parents=True)
+    workdir = project.work_dir(Path("formal") / "proposed", empty=True)
     # Only the proposals are checked: the design's own assertions and covers go.
     keep = ["chformal -assert -cover -remove t:$assert t:$cover %u n:chipleap_* %d"]
     results: dict[str, dict[str, Any]] = {}
@@ -517,10 +509,10 @@ def check_assertions(
     def run(selected: list[dict[str, str]], check_mode: str, tag: str) -> dict[str, Any]:
         # Each run keeps its own copy, so the lines its results name stay valid.
         assumes = [p for p in props if p["kind"] == "assume"]
-        copy = workdir / f"src_{tag}" / original.name
-        copy.parent.mkdir()
-        copy.write_text(
-            _insert(text, module, _block([*assumes, *selected], clk, rst, low, from_reset))
+        copy = builddir.write_text(
+            workdir,
+            f"src_{tag}/{original.name}",
+            _insert(text, module, _block([*assumes, *selected], clk, rst, low, from_reset)),
         )
         files = [copy if f == original else f for f in _sources(project)]
         check = FormalCheck(tag, check_mode, depth, module, "smtbmc z3")

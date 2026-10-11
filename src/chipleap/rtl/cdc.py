@@ -48,7 +48,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 from collections import defaultdict
@@ -57,7 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from chipleap.rtl import confine
+from chipleap.rtl import builddir, confine
 from chipleap.rtl import quote as q
 from chipleap.rtl.project import Project
 from chipleap.rtl.synth import prepare_verilog, read_commands
@@ -888,8 +887,7 @@ def netlist(project: Project, workdir: Path) -> dict[str, Any]:
         "opt_clean",
         f"write_json {q.yosys(out)}",
     ]
-    ys = workdir / "netlist.ys"
-    ys.write_text("\n".join(script) + "\n")
+    ys = builddir.write_text(workdir, "netlist.ys", "\n".join(script) + "\n")
     timeout = float(os.environ.get("CHIPLEAP_CDC_TIMEOUT", "900"))
     cmd = [tool.path, "-q", "-l", "netlist.log", ys.name]
     with confine.confined(cmd, [*project.roots, workdir]) as (argv, env):
@@ -917,10 +915,7 @@ def netlist(project: Project, workdir: Path) -> dict[str, Any]:
 
 def check(project: Project) -> dict[str, Any]:
     """Domains, crossings, accepted structures and findings, as data."""
-    workdir = (project.build_dir / "cdc").resolve()
-    if workdir.exists():
-        shutil.rmtree(workdir)
-    workdir.mkdir(parents=True)
+    workdir = project.work_dir("cdc", empty=True)
     g = build(netlist(project, workdir))
     c = Checker(g, project)
     c.run()
