@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from chipleap.rtl import gls
+from chipleap.rtl.pnr import seal_routed
 from chipleap.rtl.project import load_project
 from chipleap.rtl.sim import cocotb_python
 from chipleap.rtl.synth import liberty_for
@@ -73,7 +74,14 @@ def uart(tmp_path: Path, netlist: str = "routed", *, routed: bool = True) -> Pat
         (final / "sdf" / CORNER).mkdir(parents=True)
         shutil.copy(ROUTED / "uart.nl.v", final / "nl/uart.nl.v")
         shutil.copy(ROUTED / f"uart__{CORNER}.sdf", final / "sdf" / CORNER)
+        recorded(root)
     return root
+
+
+def recorded(root: Path) -> None:
+    """Record the routed run as place and route does: gate-level simulation reads only a
+    run ChipLeap recorded (chipleap.rtl.provenance)."""
+    seal_routed(root / "build/pnr")
 
 
 @needs_gls
@@ -103,8 +111,24 @@ def test_a_changed_gate_in_the_routed_netlist_fails_the_tests(tmp_path):
     block = text[first : text.index(");", first)]
     swapped = block.replace(".A0(", ".TMP(").replace(".A1(", ".A0(").replace(".TMP(", ".A1(")
     nl.write_text(text.replace(block, swapped, 1))
+    # Recorded again, as if place and route had made the changed netlist: what changes is
+    # the logic, which the tests must catch.
+    recorded(root)
     r = gls.gls(load_project(root))
     assert r.status == "fail" and r.data["failed"] > 0, r.summary
+
+
+def test_a_routed_netlist_changed_after_it_was_recorded_is_not_simulated(tmp_path, monkeypatch):
+    monkeypatch.setattr(gls, "iverilog", lambda: Tool("iverilog", "/x/iverilog", "13.0", ""))
+    monkeypatch.setattr(gls, "cell_models", lambda p: [])
+    root = uart(tmp_path)
+    nl = root / "build/pnr/runs/chipleap/final/nl/uart.nl.v"
+    nl.write_text(nl.read_text() + "module planted; initial $finish; endmodule\n")
+    r = gls.gls(load_project(root))
+    assert r.status == "fail" and "changed after ChipLeap recorded it" in r.summary, r.summary
+    (root / "build/pnr/chipleap-pnr.manifest.json").unlink()
+    r = gls.gls(load_project(root))
+    assert r.status == "fail" and "manifest.json is missing" in r.summary, r.summary
 
 
 @needs_gls
@@ -144,6 +168,7 @@ def test_the_delays_reach_the_simulation(tmp_path):
         sdf.read_text(),
     )
     sdf.write_text(slow)
+    recorded(root)
     r = gls.gls(load_project(root))
     assert r.status == "fail" and r.data["failed"] > 0, r.summary
     assert r.data["sdf_messages"]["unreadable"] == []
@@ -167,6 +192,7 @@ def test_every_file_of_the_gate_level_run_is_written_through_builddir(
     sdf.write_text("(DELAYFILE)\n")
     monkeypatch.setattr(gls, "cell_models", lambda p: sorted(pdk.glob("*.v")))
     monkeypatch.setattr(gls, "_netlist", lambda p: (netlist, sdf, "nom_typ_1p20V_25C"))
+    monkeypatch.setattr(gls, "read_recorded", lambda p, path: path.read_bytes())
     written: list[Path] = []
     real = builddir.write_bytes
 

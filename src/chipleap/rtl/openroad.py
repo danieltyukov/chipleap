@@ -322,10 +322,34 @@ def routed_run(project: Project) -> Path | None:
     current routed run, else the routed run itself; None when there is none. A routed run
     without a manifest from this machine fails the step."""
     final = builddir.existing_dir(project.root, "build", "pnr", "runs", RUN_TAG, "final")
-    if final is None or not (final / "metrics.json").is_file():
+    if final is None or not (
+        (final / "metrics.json").is_file() or (final / "nl" / f"{project.top}.nl.v").is_file()
+    ):
         return None
     base = pnr_sealed(project)
     return run_dir(project, ECO_TAG) if eco_sealed(project, base) else run_dir(project)
+
+
+def read_recorded(project: Project, path: Path, limit: int = TEXT_LIMIT) -> bytes:
+    """A file of the routed run (or of the ECO made from it), read once and refused unless
+    its bytes have the hash ChipLeap recorded: what gate-level simulation and equivalence
+    copy for their tools."""
+    sealed = sealed_run(project, run_dir(project, ECO_TAG)) if _in_eco(project, path) else None
+    try:
+        return (sealed or pnr_sealed(project)).read_bytes(path, limit)
+    except SealError as exc:
+        raise OpenroadError(f"the routed design cannot be used: {exc}") from None
+
+
+def recorded_files(project: Project, run: Path) -> list[Path]:
+    """Every file ChipLeap recorded in ``run`` (the routed run or the current ECO's)."""
+    sealed = sealed_run(project, run)
+    prefix = run.relative_to(sealed.root).as_posix() + "/"
+    return [sealed.root / f for f in sorted(sealed.files) if f.startswith(prefix)]
+
+
+def _in_eco(project: Project, path: Path) -> bool:
+    return Path(os.path.normpath(path)).is_relative_to(run_dir(project, ECO_TAG))
 
 
 @dataclass(frozen=True)
