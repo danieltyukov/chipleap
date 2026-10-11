@@ -85,6 +85,36 @@ def librelane() -> Tool:
     )
 
 
+def iverilog() -> Tool:
+    return find(
+        "iverilog",
+        ["-V"],
+        r"Icarus Verilog version (\S+)",
+        "four-state simulation of RTL projects (with cocotb)",
+        "CHIPLEAP_IVERILOG",
+    )
+
+
+def slang() -> Tool:
+    return find(
+        "slang",
+        ["--version"],
+        r"slang version (\S+)",
+        "second SystemVerilog front end for linting RTL projects",
+        "CHIPLEAP_SLANG",
+    )
+
+
+def sv2v() -> Tool:
+    return find(
+        "sv2v",
+        ["--version"],
+        r"sv2v v?(\S+)",
+        "SystemVerilog front end for older Yosys",
+        "CHIPLEAP_SV2V",
+    )
+
+
 def riscv_gcc() -> Tool:
     for name in (
         "riscv32-unknown-elf-gcc",
@@ -105,7 +135,17 @@ def cxx() -> Tool:
 
 
 def all_tools() -> list[Tool]:
-    return [verilator(), cxx(), yosys(), openroad(), sta(), librelane(), riscv_gcc()]
+    return [
+        verilator(),
+        cxx(),
+        yosys(),
+        openroad(),
+        sta(),
+        librelane(),
+        riscv_gcc(),
+        iverilog(),
+        slang(),
+    ]
 
 
 # Commercial tools the backends drive (chipleap.verify.backends). They are only looked up
