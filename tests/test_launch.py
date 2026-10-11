@@ -1,6 +1,9 @@
-"""A time limit or Ctrl-C stops everything a LibreLane run started, its containers
-included, and nothing else. Docker is replaced by tests/fake_docker.py."""
+"""A time limit, a signal or a stop request ends everything a LibreLane run started, its
+containers included, and nothing else. Docker is replaced by tests/fake_docker.py."""
 
+from __future__ import annotations
+
+import fcntl
 import json
 import os
 import signal
@@ -17,6 +20,7 @@ from chipleap.verify import launch, pnr
 from chipleap.verify.run import place_route
 
 FAKE_DOCKER = Path(__file__).with_name("fake_docker.py")
+GEMV = Design(accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2))
 
 # Runs LibreLane in a container as /usr/local/bin/librelane-style wrappers and
 # `librelane --dockerized` do: the docker client replaces the launcher.
@@ -29,8 +33,16 @@ exec docker run --rm -i -w "$PWD" ghcr.io/librelane/librelane librelane "$@"
 MIXED = """#!/bin/sh
 trap '' TERM
 echo $$ > leader.pid
+echo "$CHIPLEAP_RUN_ID" > run.id
 sleep 600 &
 echo $! > stray.pid
+docker run --rm -i -w "$PWD" ghcr.io/librelane/librelane librelane "$@"
+"""
+
+# A launcher that starts a second container once the first one is stopped.
+TWICE = """#!/bin/sh
+trap '' TERM
+docker run --rm -i -w "$PWD" ghcr.io/librelane/librelane librelane "$@"
 docker run --rm -i -w "$PWD" ghcr.io/librelane/librelane librelane "$@"
 """
 
@@ -44,7 +56,7 @@ sleep 600
 """
 
 
-def _alive(pid: int) -> bool:
+def _alive(pid: int | None) -> bool:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
@@ -52,7 +64,7 @@ def _alive(pid: int) -> bool:
     return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
 
-def _survivors(pids: list[int], within: float = 5.0) -> list[int]:
+def _survivors(pids: list[int | None], within: float = 10.0) -> list[int | None]:
     """The processes still running after ``within`` seconds; a killed orphan is reaped
     by init a moment later."""
     end = time.monotonic() + within
@@ -70,11 +82,34 @@ def _created(state: Path) -> list[dict]:
     return [json.loads(line) for line in log.read_text().splitlines()]
 
 
-def _wait_for(cond, within: float = 10.0) -> None:
+def _own(state: Path) -> list[dict]:
+    """The containers that carry a run's label."""
+    return [
+        r for r in _created(state) if any(lab.startswith("chipleap.run=") for lab in r["labels"])
+    ]
+
+
+def _until(cond, within: float = 30.0) -> bool:
     end = time.monotonic() + within
     while not cond():
-        assert time.monotonic() < end, "timed out waiting"
+        if time.monotonic() > end:
+            return False
         time.sleep(0.02)
+    return True
+
+
+def _wait_for(cond, within: float = 30.0) -> None:
+    assert _until(cond, within), "timed out waiting"
+
+
+def _kill_leftover(pid: int | None, marker: str) -> None:
+    """SIGKILL a process a failed test left behind, if ``pid`` still runs ``marker``."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return
+    if marker.encode() in cmdline and _alive(pid):
+        os.kill(pid, signal.SIGKILL)
 
 
 def _pid(path: Path) -> int | None:
@@ -88,23 +123,31 @@ def _script(path: Path, text: str) -> Path:
     return path
 
 
+def _dir(path: Path) -> Path:
+    path.mkdir()
+    return path
+
+
 @pytest.fixture
 def docker(tmp_path, monkeypatch):
     """A fake docker first on the path. Yields its executable, its state directory and a
     list for clients the test starts itself."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir = _dir(tmp_path / "bin")
     exe = _script(bin_dir / "docker", f"#!{sys.executable}\n" + FAKE_DOCKER.read_text())
     state = tmp_path / "docker-state"
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_DOCKER_STATE", str(state))
     monkeypatch.setattr(launch, "STOP_GRACE_S", 1.0)
+    monkeypatch.setattr(launch, "POLL_S", 0.1)
     clients: list[subprocess.Popen] = []
     yield exe, state, clients
-    # Whatever a test left running belongs to the fake: its containers and clients.
+    # What a test leaves running: the fake's containers and clients, and the launchers'
+    # strays, which ignore SIGTERM.
     for rec in _created(state):
-        if _alive(rec["pid"]):
-            os.kill(rec["pid"], signal.SIGKILL)
+        _kill_leftover(rec["pid"], "time.sleep(600)")
+        _kill_leftover(rec["client"], "docker")
+    for pid_file in tmp_path.rglob("*.pid"):
+        _kill_leftover(_pid(pid_file), "librelane" if pid_file.name == "leader.pid" else "sleep")
     for c in clients:
         c.kill()
         c.wait()
@@ -115,29 +158,25 @@ def _container(exe: Path, state: Path, workdir: Path, clients: list) -> dict:
     n = len(_created(state))
     clients.append(
         subprocess.Popen(
-            [str(exe), "run", "--rm", "-w", str(workdir), "unrelated"],
-            start_new_session=True,
+            [str(exe), "run", "--rm", "-w", str(workdir), "unrelated"], start_new_session=True
         )
     )
     _wait_for(lambda: len(_created(state)) > n)
     return _created(state)[-1]
 
 
-def _hold_cleanup(monkeypatch, ready) -> None:
-    """Stop the run only once ``ready(workdir)``. The tests use limits of a second or two,
-    and on a loaded machine the run may not have started its container by then."""
-    stop = launch._stop
+def _hold(monkeypatch, name: str, ready) -> None:
+    """Let ``launch.<name>`` go ahead only once ``ready()``. The tests use limits of a
+    second, and on a loaded machine the run may not have started its container by then."""
+    real = getattr(launch, name)
 
-    def held(proc, workdir, before):
-        _wait_for(lambda: ready(workdir))
-        return stop(proc, workdir, before)
+    def held(*args):
+        in_time = _until(ready)
+        result = real(*args)
+        assert in_time, f"launch.{name} went ahead before the run was ready"
+        return result
 
-    monkeypatch.setattr(launch, "_stop", held)
-
-
-def _own(state: Path, workdir: Path) -> list[dict]:
-    """The containers started with ``workdir`` as their working directory."""
-    return [r for r in _created(state) if Path(r["workdir"]) == workdir.resolve()]
+    monkeypatch.setattr(launch, name, held)
 
 
 @pytest.mark.parametrize("launcher", [WRAPPER, MIXED], ids=["exec-client", "child-client"])
@@ -145,47 +184,68 @@ def test_timeout_stops_the_run_its_processes_and_containers(
     tmp_path, docker, monkeypatch, launcher
 ):
     exe, state, clients = docker
-    work = tmp_path / "run"
-    work.mkdir()
-    other = tmp_path / "elsewhere"
-    other.mkdir()
+    work = _dir(tmp_path / "run")
     tool = _script(tmp_path / "librelane", launcher)
     bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
     try:
-        # Already running in the run's directory before the run: not the run's.
-        (earlier,) = [_container(exe, state, work, clients)]
-        # Started elsewhere while the run is going: not the run's either.
+        # Containers in the run's own directory, one already there and one started while
+        # the run goes on, with the same `docker run -w` the launcher uses: not the run's.
+        earlier = _container(exe, state, work, clients)
         during: list[dict] = []
 
         def start_during() -> None:
-            _wait_for(lambda: len(_own(state, work)) == 2)
-            during.append(_container(exe, state, other, clients))
+            _wait_for(lambda: bool(_own(state)))
+            during.append(_container(exe, state, work, clients))
 
         t = threading.Thread(target=start_during)
         t.start()
-        _hold_cleanup(monkeypatch, lambda wd: bool(during))
+        _hold(monkeypatch, "_stop", lambda: bool(during))
         with pytest.raises(launch.TimedOut) as exc:
             launch.run([str(tool), "config.json"], work, work / "librelane.log", timeout=1.0)
         t.join()
 
-        (own,) = [r for r in _own(state, work) if r["id"] != earlier["id"]]
+        (own,) = _own(state)
         assert exc.value.containers == [own["id"]] and exc.value.seconds == 1.0
-        mine = [own["pid"], own["client"]]
-        mine += [p for p in (_pid(work / "leader.pid"), _pid(work / "stray.pid")) if p]
+        assert exc.value.left == [] and not exc.value.unchecked
+        if (work / "run.id").exists():
+            assert own["labels"] == [f"chipleap.run={(work / 'run.id').read_text().strip()}"]
+        mine = [own["pid"], own["client"], _pid(work / "leader.pid"), _pid(work / "stray.pid")]
         assert _survivors(mine) == []
         assert _alive(earlier["pid"]) and _alive(during[0]["pid"]) and _alive(bystander.pid)
+        assert not (work / ".chipleap-bin").exists()
     finally:
         bystander.kill()
         bystander.wait()
 
 
+def test_a_container_created_after_the_first_look_is_stopped(tmp_path, docker, monkeypatch):
+    _, state, _ = docker
+    work = _dir(tmp_path / "run")
+    tool = _script(tmp_path / "librelane", TWICE)
+    _hold(monkeypatch, "_stop", lambda: len(_own(state)) == 1)
+    # The launcher's second container appears after the first pass stopped the first one;
+    # SIGKILL waits for it, so that only the second pass can find it.
+    real = launch._signal_group
+
+    def kill_late(proc, sig):
+        if sig == signal.SIGKILL:
+            _wait_for(lambda: len(_own(state)) == 2)
+        real(proc, sig)
+
+    monkeypatch.setattr(launch, "_signal_group", kill_late)
+    with pytest.raises(launch.TimedOut) as exc:
+        launch.run([str(tool)], work, work / "librelane.log", timeout=1.0)
+    first, second = _own(state)
+    assert exc.value.containers == [first["id"], second["id"]] and exc.value.left == []
+    assert _survivors([r[k] for r in (first, second) for k in ("pid", "client")]) == []
+
+
 def test_ctrl_c_stops_the_run_and_its_container(tmp_path, docker, monkeypatch):
     _, state, _ = docker
-    work = tmp_path / "run"
-    work.mkdir()
+    work = _dir(tmp_path / "run")
     tool = _script(tmp_path / "librelane", MIXED)
     # The fake client presses Ctrl-C on this process once the container is up.
-    monkeypatch.setenv("FAKE_DOCKER_INTERRUPT", str(os.getpid()))
+    monkeypatch.setenv("FAKE_DOCKER_SIGNAL", f"{os.getpid()}:INT")
     with pytest.raises(KeyboardInterrupt):
         launch.run([str(tool)], work, work / "librelane.log", timeout=600)
     (rec,) = _created(state)
@@ -193,16 +253,44 @@ def test_ctrl_c_stops_the_run_and_its_container(tmp_path, docker, monkeypatch):
     assert _survivors(pids) == []
 
 
-def test_a_second_ctrl_c_does_not_cut_the_cleanup_short(tmp_path, docker, monkeypatch):
+SIGNALLED = """
+import os, signal, sys
+from pathlib import Path
+from chipleap.verify import launch
+
+# As in a terminal: both signals at their default, whatever the test runner had.
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+launch.STOP_GRACE_S = 1.0
+os.environ["FAKE_DOCKER_SIGNAL"] = f"{os.getpid()}:{sys.argv[2]}"
+work = Path(sys.argv[1])
+launch.run([str(work.parent / "librelane")], work, work / "librelane.log", timeout=600)
+"""
+
+
+@pytest.mark.parametrize("name", ["TERM", "HUP"])
+def test_sigterm_and_sighup_stop_the_run_before_chipleap_exits(tmp_path, docker, name):
     _, state, _ = docker
-    work = tmp_path / "run"
-    work.mkdir()
+    work = _dir(tmp_path / "run")
+    _script(tmp_path / "librelane", MIXED)
+    out = subprocess.run(
+        [sys.executable, "-c", SIGNALLED, str(work), name], capture_output=True, timeout=120
+    )
+    assert out.returncode == 128 + getattr(signal, f"SIG{name}"), out.stderr
+    (rec,) = _created(state)
+    pids = [rec["pid"], rec["client"], _pid(work / "leader.pid"), _pid(work / "stray.pid")]
+    assert _survivors(pids) == []
+
+
+def test_a_second_signal_waits_for_the_cleanup(tmp_path, docker, monkeypatch):
+    _, state, _ = docker
+    work = _dir(tmp_path / "run")
     tool = _script(tmp_path / "librelane", WRAPPER)
-    monkeypatch.setenv("FAKE_DOCKER_INTERRUPT", str(os.getpid()))
+    monkeypatch.setenv("FAKE_DOCKER_SIGNAL", f"{os.getpid()}:INT")
     real = launch._stop_containers
 
     def impatient(*args):
-        os.kill(os.getpid(), signal.SIGINT)
+        signal.raise_signal(signal.SIGINT)
         return real(*args)
 
     monkeypatch.setattr(launch, "_stop_containers", impatient)
@@ -214,34 +302,137 @@ def test_a_second_ctrl_c_does_not_cut_the_cleanup_short(tmp_path, docker, monkey
     assert signal.getsignal(signal.SIGINT) is handler
 
 
+def test_a_third_signal_cuts_the_cleanup_short(tmp_path, docker, monkeypatch):
+    work = _dir(tmp_path / "run")
+    tool = _script(tmp_path / "librelane", WRAPPER)
+    monkeypatch.setenv("FAKE_DOCKER_SIGNAL", f"{os.getpid()}:INT")
+    calls = []
+
+    def hanging(*args):
+        calls.append(args)
+        for _ in range(3):
+            signal.raise_signal(signal.SIGINT)
+        raise AssertionError("the third Ctrl-C should have ended the cleanup")
+
+    monkeypatch.setattr(launch, "_stop_containers", hanging)
+    handler = signal.getsignal(signal.SIGINT)
+    with pytest.raises(KeyboardInterrupt):
+        launch.run([str(tool)], work, work / "librelane.log", timeout=600)
+    assert len(calls) == 1 and signal.getsignal(signal.SIGINT) is handler
+
+
 def test_timeout_without_docker_stops_the_process_tree(tmp_path, monkeypatch):
     monkeypatch.setattr(launch, "_docker", lambda: None)
     monkeypatch.setattr(launch, "STOP_GRACE_S", 1.0)
-    work = tmp_path / "run"
-    work.mkdir()
+    work = _dir(tmp_path / "run")
     tool = _script(tmp_path / "librelane", NATIVE)
-    _hold_cleanup(monkeypatch, lambda wd: _pid(wd / "stray.pid") is not None)
+    _hold(monkeypatch, "_stop", lambda: _pid(work / "stray.pid") is not None)
     with pytest.raises(launch.TimedOut) as exc:
         launch.run([str(tool)], work, work / "librelane.log", timeout=1.0)
-    assert exc.value.containers == []
+    assert exc.value.containers == [] and not exc.value.unchecked
     assert _survivors([_pid(work / "leader.pid"), _pid(work / "stray.pid")]) == []
 
 
 def test_a_run_that_finishes_returns_its_exit_code(tmp_path, docker):
-    work = tmp_path / "run"
-    work.mkdir()
-    tool = _script(tmp_path / "librelane", "#!/bin/sh\necho routed\nexit 3\n")
+    work = _dir(tmp_path / "run")
+    tool = _script(
+        tmp_path / "librelane", '#!/bin/sh\necho "$CHIPLEAP_RUN_ID"\ncommand -v docker\nexit 3\n'
+    )
     assert launch.run([str(tool)], work, work / "librelane.log", timeout=600) == 3
-    assert (work / "librelane.log").read_text() == "routed\n"
+    run_id, docker_path = (work / "librelane.log").read_text().split()
+    # The run sees its id and a labelling docker first on its PATH, gone afterwards.
+    assert len(run_id) == 32 and docker_path == str(work / ".chipleap-bin" / "docker")
+    assert not (work / ".chipleap-bin").exists()
+
+
+def test_two_runs_cannot_share_a_work_directory(tmp_path, docker):
+    work = _dir(tmp_path / "run")
+    tool = _script(tmp_path / "librelane", "#!/bin/sh\nexit 0\n")
+    with (work / ".chipleap-run.lock").open("w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        with pytest.raises(launch.Busy, match="another run is using"):
+            launch.run([str(tool)], work, work / "librelane.log", timeout=600)
+    assert not (work / "librelane.log").exists()
+    assert launch.run([str(tool)], work, work / "librelane.log", timeout=600) == 0
+
+
+def test_stop_all_stops_runs_in_other_threads(tmp_path, docker):
+    _, state, _ = docker
+    work = _dir(tmp_path / "run")
+    tool = _script(tmp_path / "librelane", WRAPPER)
+    raised: list[BaseException] = []
+
+    def go() -> None:
+        try:
+            launch.run([str(tool)], work, work / "librelane.log", timeout=600)
+        except BaseException as exc:
+            raised.append(exc)
+
+    t = threading.Thread(target=go)
+    t.start()
+    _wait_for(lambda: bool(_own(state)))
+    launch.stop_all(wait=60)
+    t.join(5)
+    (rec,) = _own(state)
+    assert isinstance(raised[0], launch.Cancelled) and raised[0].containers == [rec["id"]]
+    assert _survivors([rec["pid"], rec["client"]]) == []
+
+
+SERVER = """
+import os, signal, sys, threading
+from pathlib import Path
+from chipleap.verify import launch
+
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+launch.STOP_GRACE_S = 1.0
+os.environ["FAKE_DOCKER_SIGNAL"] = f"{os.getpid()}:TERM"
+work = Path(sys.argv[1])
+
+done = threading.Event()
+
+def worker():
+    try:
+        launch.run([str(work.parent / "librelane")], work, work / "librelane.log", timeout=600)
+    finally:
+        done.set()
+
+# Waits as the server's event loop does, so that the signal handler gets to run. Not in
+# Thread.join: a signal there makes Python 3.12 think the thread has ended.
+with launch.stop_on_exit(wait=60):
+    threading.Thread(target=worker).start()
+    while not done.wait(0.1):
+        pass
+"""
+
+
+def test_a_server_stops_its_runs_when_terminated(tmp_path, docker):
+    """The MCP server runs tools in worker threads, which signals do not reach."""
+    _, state, _ = docker
+    work = _dir(tmp_path / "run")
+    _script(tmp_path / "librelane", MIXED)
+    out = subprocess.run(
+        [sys.executable, "-c", SERVER, str(work)], capture_output=True, text=True, timeout=120
+    )
+    assert not (work / ".chipleap-bin").exists()
+    # It stops the run, then ends as SIGTERM would have ended it.
+    assert out.returncode == -signal.SIGTERM, out.stderr
+    (rec,) = _created(state)
+    pids = [rec["pid"], rec["client"], _pid(work / "leader.pid"), _pid(work / "stray.pid")]
+    assert _survivors(pids) == []
+
+
+def _pnr_with(tmp_path, monkeypatch, state, **env):
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(_script(tmp_path / "librelane", WRAPPER)))
+    monkeypatch.setenv("CHIPLEAP_PNR_TIMEOUT", "1")
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    _hold(monkeypatch, "_stop", lambda: bool(_own(state)))
+    return place_route(GEMV, tmp_path / "pnr")
 
 
 def test_pnr_step_reports_the_time_limit(tmp_path, docker, monkeypatch):
     _, state, _ = docker
-    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(_script(tmp_path / "librelane", WRAPPER)))
-    monkeypatch.setenv("CHIPLEAP_PNR_TIMEOUT", "1")
-    _hold_cleanup(monkeypatch, lambda wd: bool(_own(state, wd)))
-    design = Design(accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2))
-    step = place_route(design, tmp_path / "pnr")
+    step = _pnr_with(tmp_path, monkeypatch, state)
     assert step.status == "fail"
     assert step.summary == (
         "LibreLane timed out after 1 s (CHIPLEAP_PNR_TIMEOUT); "
@@ -250,17 +441,12 @@ def test_pnr_step_reports_the_time_limit(tmp_path, docker, monkeypatch):
     (rec,) = _created(state)
     assert _survivors([rec["pid"], rec["client"]]) == []
     with pytest.raises(pnr.PnrError, match="timed out after 1 s"):
-        pnr.place_and_route(design.accel, 100.0, tmp_path / "again")
+        pnr.place_and_route(GEMV.accel, 100.0, tmp_path / "again")
 
 
 def test_a_container_docker_cannot_stop_is_reported(tmp_path, docker, monkeypatch):
     _, state, _ = docker
-    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(_script(tmp_path / "librelane", WRAPPER)))
-    monkeypatch.setenv("CHIPLEAP_PNR_TIMEOUT", "1")
-    monkeypatch.setenv("FAKE_DOCKER_STOP_FAILS", "1")
-    _hold_cleanup(monkeypatch, lambda wd: bool(_own(state, wd)))
-    design = Design(accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2))
-    step = place_route(design, tmp_path / "pnr")
+    step = _pnr_with(tmp_path, monkeypatch, state, FAKE_DOCKER_STOP_FAILS="1")
     (rec,) = _created(state)
     assert step.status == "fail"
     assert step.summary == (
