@@ -9,8 +9,23 @@ from pathlib import Path
 
 import pytest
 
-from chipleap.rtl import builddir
+from chipleap.cli import main
+from chipleap.rtl import builddir, commercial
+from chipleap.rtl import pnr as pnr_mod
+from chipleap.rtl import sim as sim_mod
+from chipleap.rtl import synth as synth_mod
+from chipleap.rtl import verify as verify_mod
 from chipleap.rtl.builddir import BuildDirError
+from chipleap.rtl.project import init_project, load_project
+from chipleap.rtl.verify import run_step, verify_project
+from chipleap.verify import launch
+from chipleap.verify.pnr import PnrError
+from chipleap.verify.remote import Remote, RemoteError
+from chipleap.verify.result import StepResult
+from chipleap.verify.tools import Tool
+
+SERVER = Remote("server")
+FOUND = Tool("stand-in", "/bin/true", "1", "tests")
 
 
 @pytest.fixture
@@ -175,3 +190,130 @@ def test_only_a_directory_chipleap_made_is_emptied(tmp_path, home, mode):
     builddir.output_dir(out, empty=True)
     assert tree(home) == before
     assert [p.name for p in out.iterdir()] == [builddir.MARKER]
+
+
+# Every step of an RTL project.
+
+
+@pytest.fixture
+def tools(monkeypatch):
+    """Every step gets as far as its work directory: the tools are there, and where one
+    would run, the step stops with "stopped here"."""
+
+    def stop(*a, **k):
+        raise RemoteError("stopped here")
+
+    def stop_pnr(*a, **k):
+        raise PnrError("stopped here")
+
+    monkeypatch.setattr(synth_mod, "yosys", lambda: FOUND)
+    monkeypatch.setattr(synth_mod, "sv2v", lambda: Tool("sv2v", None, "", "tests"))
+    monkeypatch.setattr(synth_mod, "liberty_for", lambda tech: Path("/nonexistent/cells.lib"))
+    monkeypatch.setattr(pnr_mod, "librelane", lambda: FOUND)
+    monkeypatch.setattr(pnr_mod, "run_librelane", stop_pnr)
+    monkeypatch.setattr(commercial, "synth_liberty", lambda tech: ("cells.lib", ""))
+    monkeypatch.setattr(commercial, "_lefs", lambda tech, lib: ("cells.lef",))
+    monkeypatch.setattr(commercial, "run_steps", stop)
+    monkeypatch.setattr(sim_mod, "run_steps", stop)
+
+
+# Each step, how run_step is asked for it, and its work directory under build/.
+STEPS = {
+    "yosys": ({"step": "synth"}, "synth"),
+    "librelane": ({"step": "pnr"}, "pnr"),
+    "xcelium": ({"step": "sim", "sim_tool": "xcelium", "remote": SERVER}, "sim-xcelium"),
+    "genus": ({"step": "synth", "synth_tool": "genus", "remote": SERVER}, "genus"),
+    "dc": ({"step": "synth", "synth_tool": "dc", "remote": SERVER}, "dc"),
+    "innovus": ({"step": "pnr", "pnr_tool": "innovus", "remote": SERVER}, "innovus"),
+}
+
+
+@pytest.mark.parametrize("name", STEPS)
+@pytest.mark.parametrize("whole", [True, False], ids=["build", "build-step"])
+def test_every_step_refuses_a_symlinked_build_directory(counter_project, home, tools, name, whole):
+    kwargs, step_dir = STEPS[name]
+    at = "build" if whole else f"build/{step_dir}"
+    link(counter_project / at, home)
+    before = tree(home)
+    r = run_step(load_project(counter_project), **kwargs)
+    assert r.status == "fail" and f"{at} is a symlink" in r.summary, r.summary
+    assert tree(home) == before
+
+
+def test_coverage_refuses_a_symlinked_work_directory(counter_project, home, tools):
+    link(counter_project / "build/coverage", home)
+    before = tree(home)
+    with pytest.raises(BuildDirError, match="coverage is a symlink"):
+        sim_mod.run_tests(load_project(counter_project), "xcelium", coverage=True, remote=SERVER)
+    assert tree(home) == before
+
+
+@pytest.mark.parametrize(
+    "name, inside, to",
+    [
+        ("librelane", "build/pnr/src", ""),
+        ("librelane", "build/pnr/chipleap.sdc", "keep.txt"),
+        ("genus", "build/genus/src", "genus"),
+        ("innovus", "build/innovus/src", ""),
+        ("xcelium", "build/sim-xcelium/src", "sim-xcelium"),
+    ],
+)
+def test_a_symlink_inside_a_work_directory_is_removed_not_followed(
+    counter_project, home, tools, name, inside, to
+):
+    kwargs, _ = STEPS[name]
+    link(counter_project / inside, home / to)
+    before = tree(home)
+    r = run_step(load_project(counter_project), **kwargs)
+    assert "stopped here" in r.summary, r.summary
+    assert tree(home) == before
+    assert not (counter_project / inside).is_symlink()
+
+
+@pytest.mark.parametrize("at", ["build", "build/verify"])
+def test_reports_are_not_written_through_a_symlink(counter_project, home, monkeypatch, at):
+    monkeypatch.setattr(verify_mod, "lint", lambda p: StepResult("lint", "pass", "fine"))
+    link(counter_project / at, home)
+    before = tree(home)
+    with pytest.raises(BuildDirError, match=f"{at} is a symlink"):
+        verify_project(counter_project, steps="lint")
+    assert tree(home) == before
+
+
+def test_a_report_that_is_a_symlink_is_replaced(counter_project, home, monkeypatch):
+    monkeypatch.setattr(verify_mod, "lint", lambda p: StepResult("lint", "pass", "fine"))
+    link(counter_project / "build/verify/report.html", home / "keep.txt")
+    before = tree(home)
+    verify_project(counter_project, steps="lint")
+    assert tree(home) == before
+    report = counter_project / "build/verify/report.html"
+    assert not report.is_symlink() and "<html" in report.read_text()
+
+
+def test_the_cli_says_why(counter_project, home, monkeypatch, capsys):
+    monkeypatch.setattr(verify_mod, "lint", lambda p: StepResult("lint", "pass", "fine"))
+    link(counter_project / "build", home)
+    before = tree(home)
+    assert main(["verify", str(counter_project), "--steps", "lint"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("chipleap: ") and "build is a symlink" in err
+    assert tree(home) == before
+
+
+@pytest.mark.parametrize("to", ["keep.txt", "new.yaml"])
+def test_init_does_not_write_through_a_symlinked_project_file(counter_project, home, to):
+    (counter_project / "project.yaml").unlink()
+    link(counter_project / "project.yaml", home / to)
+    before = tree(home)
+    with pytest.raises(BuildDirError, match=r"project\.yaml is a symlink"):
+        init_project(counter_project, top="counter", force=True)
+    assert tree(home) == before
+
+
+def test_the_run_lock_is_not_created_through_a_symlink(tmp_path, home):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".chipleap-run.lock").symlink_to(home / "made.lock")
+    with pytest.raises(OSError):
+        launch.run(["true"], work, work / "run.log", 10)
+    assert not (home / "made.lock").exists()

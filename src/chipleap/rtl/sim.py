@@ -358,10 +358,7 @@ def run_tests(
             "--remote HOST"
         )
     tool_version = _open_tool(key).version if key in OPEN else ""
-    work = (workdir or project.build_dir / ("coverage" if coverage else f"sim-{key}")).resolve()
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
+    work = project.work_dir(workdir or ("coverage" if coverage else f"sim-{key}"), empty=True)
     staged = remote is not None
     m = manifest(project, key, work, coverage=coverage, test_filter=test_filter, stage=staged)
     (work / "manifest.json").write_text(json.dumps(m, indent=1))

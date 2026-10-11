@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from chipleap.rtl import commercial
+from chipleap.rtl import builddir, commercial
 from chipleap.rtl.coverage import coverage
 from chipleap.rtl.lint import lint
 from chipleap.rtl.pnr import pnr
@@ -108,9 +108,10 @@ def _run_step(
 
 
 def write_reports(project: Project, results: Sequence[StepResult]) -> Path:
-    out = project.build_dir / "verify"
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "verify.json").write_text(
+    out = project.work_dir("verify")
+    builddir.write_text(
+        out,
+        "verify.json",
         json.dumps(
             {
                 "project": project.to_dict(),
@@ -120,10 +121,10 @@ def write_reports(project: Project, results: Sequence[StepResult]) -> Path:
                 ],
             },
             indent=2,
-        )
+        ),
     )
-    (out / "VERIFY.md").write_text(project_markdown(project, results))
-    (out / "report.html").write_text(project_html(project, results))
+    builddir.write_text(out, "VERIFY.md", project_markdown(project, results))
+    builddir.write_text(out, "report.html", project_html(project, results))
     return out
 
 

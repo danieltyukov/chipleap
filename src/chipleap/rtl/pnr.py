@@ -19,10 +19,10 @@ installed, else the sources and include directories as they are.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
+from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.project import Project
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
@@ -125,10 +125,7 @@ def margins(project: Project) -> tuple[float, float]:
 def config(project: Project, workdir: Path) -> dict[str, Any]:
     """The LibreLane configuration for ``project``; copies its RTL and constraints into
     ``workdir``."""
-    src = workdir / "src"
-    if src.exists():
-        shutil.rmtree(src)
-    src.mkdir(parents=True)
+    src = builddir.work_dir(workdir, "src", empty=True)
     try:
         files, raw = prepare_verilog(project, src)
     except SynthError as exc:
@@ -181,8 +178,7 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
         raise PnrError(f"LibreLane runs on IHP SG13G2, not {project.tech}; use --pnr-tool innovus")
     if not librelane().found:
         raise PnrError("LibreLane is not installed")
-    work = (workdir or project.build_dir / "pnr").resolve()
-    work.mkdir(parents=True, exist_ok=True)
+    work = project.work_dir(workdir or "pnr")
     cfg = config(project, work)
     metrics, gds = run_librelane(work, cfg)
     clk = project.fastest_clock

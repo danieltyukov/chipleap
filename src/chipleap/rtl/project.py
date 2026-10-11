@@ -42,6 +42,7 @@ import yaml
 
 from chipleap.hw.design import SPEC_NAME_MAX, is_safe_name, safe_name
 from chipleap.hw.tech import TECHNOLOGIES
+from chipleap.rtl import builddir
 
 PROJECT_FILE = "project.yaml"
 SCHEMA = "project/v1"
@@ -152,6 +153,17 @@ class Project:
     @property
     def build_dir(self) -> Path:
         return self.root / "build"
+
+    def work_dir(self, step: str | Path, *, empty: bool = False) -> Path:
+        """A step's work directory in ``build/``: ``step`` is a path relative to it, or an
+        absolute path inside it. ``build`` and every directory down to the step's must
+        not be symlinks (``builddir.work_dir``); missing ones are created, symlinks inside
+        are removed, and with ``empty`` everything inside is."""
+        path = Path(os.path.normpath(self.build_dir / step))
+        if path == self.build_dir or not path.is_relative_to(self.build_dir):
+            raise builddir.BuildDirError(f"{step} is not a directory in {self.build_dir}")
+        parts = path.relative_to(self.build_dir).parts
+        return builddir.work_dir(self.root, "build", *parts, empty=empty)
 
     @property
     def fastest_clock(self) -> Clock | None:
@@ -1202,5 +1214,6 @@ def init_project(
     if tests_dir is not None:
         data["tests"] = {"dir": tests_dir}
     project = parse_project(data, root, dest)
-    dest.write_text(project_yaml(project, notes))
+    # Not through a symlink: --force must not overwrite whatever project.yaml points at.
+    builddir.write_text(root, PROJECT_FILE, project_yaml(project, notes))
     return dest, notes

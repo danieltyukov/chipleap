@@ -39,6 +39,8 @@ from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
+from chipleap.rtl import builddir
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -220,7 +222,8 @@ def _signal_group(proc: subprocess.Popen[bytes], sig: signal.Signals) -> None:
 @contextmanager
 def _one_run_in(workdir: Path) -> Iterator[None]:
     """One run at a time per work directory: two would overwrite each other's results."""
-    fd = os.open(workdir / ".chipleap-run.lock", os.O_RDWR | os.O_CREAT, 0o644)
+    # Not through a symlink, which O_CREAT would follow to make a file wherever it points.
+    fd = os.open(workdir / ".chipleap-run.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -255,9 +258,7 @@ def _labelling_docker(workdir: Path, run_id: str) -> Iterator[dict[str, str]]:
     if real is None:
         yield env
         return
-    bin_dir = workdir / ".chipleap-bin"
-    shutil.rmtree(bin_dir, ignore_errors=True)
-    bin_dir.mkdir()
+    bin_dir = builddir.work_dir(workdir, ".chipleap-bin", empty=True)
     shim = bin_dir / "docker"
     shim.write_text(_SHIM.format(docker=shlex.quote(real), label=shlex.quote(f"{LABEL}={run_id}")))
     shim.chmod(0o755)
