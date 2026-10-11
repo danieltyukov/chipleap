@@ -179,6 +179,12 @@ def _transform(b: Box, r: _Ref, dx: float, dy: float) -> Box:
     )
 
 
+def _need(body: bytes, n: int, what: str) -> bytes:
+    if len(body) < n:
+        raise GdsError(f"{what} record is too short")
+    return body[:n]
+
+
 def _real8(b: bytes) -> float:
     sign = -1.0 if b[0] & 0x80 else 1.0
     exp = (b[0] & 0x7F) - 64
@@ -210,6 +216,18 @@ def _path_box(
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+# Element records: BOUNDARY, PATH, SREF, AREF, TEXT, NODE, BOX.
+_ELEMENTS = {
+    0x08: "shape",
+    0x09: "path",
+    0x0A: "sref",
+    0x0B: "aref",
+    0x0C: "text",
+    0x15: "node",
+    0x2D: "shape",
+}
+
+
 def parse_gds(data: bytes) -> GdsLibrary:
     """Parse GDSII bytes. Raises :class:`GdsError` on a malformed stream."""
     cells: dict[str, _Cell] = {}
@@ -237,9 +255,7 @@ def parse_gds(data: bytes) -> GdsLibrary:
         body = data[pos + 4 : pos + length]
         pos += length
         if rtype == 0x03:  # UNITS
-            if len(body) < 16:
-                raise GdsError("UNITS record is too short")
-            um_per_dbu = _real8(body[8:16]) * 1e6
+            um_per_dbu = _real8(_need(body, 16, "UNITS")[8:16]) * 1e6
         elif rtype == 0x05:  # BGNSTR
             cell = None
         elif rtype == 0x06:  # STRNAME
@@ -249,13 +265,10 @@ def parse_gds(data: bytes) -> GdsLibrary:
             cell = cells[name] = _Cell(name)
         elif rtype == 0x07:  # ENDSTR
             cell = None
-        elif rtype in (0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x2D):
-            # BOUNDARY, PATH, SREF, AREF, TEXT, BOX
+        elif rtype in _ELEMENTS:
             if cell is None:
                 raise GdsError(f"element outside a cell at byte {pos - length}")
-            element = {0x08: "shape", 0x09: "path", 0x0A: "sref", 0x0B: "aref", 0x0C: "text"}.get(
-                rtype, "shape"
-            )
+            element = _ELEMENTS[rtype]
             xy, width, pathtype, ext = [], 0.0, 0, [0.0, 0.0]
             sname, strans, mag, angle, colrow, text = "", 0, 1.0, 0.0, (1, 1), ""
         elif rtype == 0x10:  # XY
@@ -264,23 +277,23 @@ def parse_gds(data: bytes) -> GdsLibrary:
             vals = struct.unpack(f">{len(body) // 4}i", body)
             xy = [(float(vals[i]), float(vals[i + 1])) for i in range(0, len(vals), 2)]
         elif rtype == 0x0F:  # WIDTH
-            width = float(struct.unpack(">i", body[:4])[0])
+            width = float(struct.unpack(">i", _need(body, 4, "WIDTH"))[0])
         elif rtype == 0x21:  # PATHTYPE
-            pathtype = struct.unpack(">h", body[:2])[0]
+            pathtype = struct.unpack(">h", _need(body, 2, "PATHTYPE"))[0]
         elif rtype == 0x30:  # BGNEXTN
-            ext[0] = float(struct.unpack(">i", body[:4])[0])
+            ext[0] = float(struct.unpack(">i", _need(body, 4, "BGNEXTN"))[0])
         elif rtype == 0x31:  # ENDEXTN
-            ext[1] = float(struct.unpack(">i", body[:4])[0])
+            ext[1] = float(struct.unpack(">i", _need(body, 4, "ENDEXTN"))[0])
         elif rtype == 0x12:  # SNAME
             sname = body.rstrip(b"\0").decode("latin-1")
         elif rtype == 0x1A:  # STRANS
-            strans = struct.unpack(">H", body[:2])[0]
+            strans = struct.unpack(">H", _need(body, 2, "STRANS"))[0]
         elif rtype == 0x1B:  # MAG
-            mag = _real8(body[:8])
+            mag = _real8(_need(body, 8, "MAG"))
         elif rtype == 0x1C:  # ANGLE
-            angle = _real8(body[:8])
+            angle = _real8(_need(body, 8, "ANGLE"))
         elif rtype == 0x13:  # COLROW
-            cols, rows = struct.unpack(">hh", body[:4])
+            cols, rows = struct.unpack(">hh", _need(body, 4, "COLROW"))
             colrow = (cols, rows)
         elif rtype == 0x19:  # STRING
             text = body.rstrip(b"\0").decode("latin-1")
@@ -328,6 +341,8 @@ def _finish(
 ) -> None:
     if element == "text":
         cell.labels.append(text)
+        return
+    if element == "node":
         return
     if not xy:
         raise GdsError(f"element without coordinates in cell {cell.name}")

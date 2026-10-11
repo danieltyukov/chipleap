@@ -8,12 +8,43 @@ Rust; a reader change goes into both.
 
 from __future__ import annotations
 
-import contextlib
+import re
 from dataclasses import dataclass, field
 
 
 class ViewError(ValueError):
     pass
+
+
+# The views are ASCII formats. Whitespace, letters, digits, case and numbers are ASCII
+# only, so a stray Unicode character means the same thing to aispice's Rust readers.
+WHITESPACE = " \t\n\r\x0b\x0c"
+_UPPER_CASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_LOWER = str.maketrans(_UPPER_CASE, _UPPER_CASE.lower())
+_UPPER = str.maketrans(_UPPER_CASE.lower(), _UPPER_CASE)
+_INT = re.compile(r"[+-]?[0-9]+")
+_FLOAT = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+
+def ascii_lower(s: str) -> str:
+    return s.translate(_LOWER)
+
+
+def ascii_upper(s: str) -> str:
+    return s.translate(_UPPER)
+
+
+def words(s: str) -> list[str]:
+    """Split at runs of ASCII whitespace."""
+    return [w for w in re.split("[" + WHITESPACE + "]+", s) if w]
+
+
+def _lines(text: str) -> list[str]:
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def _int(s: str) -> int | None:
+    return int(s) if _INT.fullmatch(s) else None
 
 
 # LEF
@@ -42,7 +73,7 @@ def _lef_tokens(text: str) -> list[str]:
     i, n = 0, len(text)
     while i < n:
         c = text[i]
-        if c.isspace():
+        if c in WHITESPACE:
             i += 1
         elif c == "#":
             while i < n and text[i] != "\n":
@@ -57,7 +88,7 @@ def _lef_tokens(text: str) -> list[str]:
             i += 1
         else:
             j = i
-            while j < n and not text[j].isspace() and text[j] != ";":
+            while j < n and text[j] not in WHITESPACE and text[j] != ";":
                 j += 1
             toks.append(text[i:j])
             i = j
@@ -86,10 +117,9 @@ class _Tokens:
 
 
 def _lef_number(s: str) -> float:
-    try:
-        return float(s)
-    except ValueError:
-        raise ViewError(f"expected a number, found {s!r}") from None
+    if not _FLOAT.fullmatch(s):
+        raise ViewError(f"expected a number, found {s!r}")
+    return float(s)
 
 
 def parse_lef(text: str) -> dict[str, LefMacro]:
@@ -202,7 +232,7 @@ def _lib_tokens(text: str) -> list[tuple[str, bool, bool]]:
         if c == "\n":
             line_start = True
             i += 1
-        elif c.isspace():
+        elif c in WHITESPACE:
             i += 1
         elif c == "\\" and i + 1 < n and text[i + 1] in "\r\n":
             i += 1  # a line continuation: the newline does not end the line
@@ -232,7 +262,7 @@ def _lib_tokens(text: str) -> list[tuple[str, bool, bool]]:
             i += 1
         else:
             j = i
-            while j < n and not text[j].isspace() and text[j] not in '(){}:;,"':
+            while j < n and text[j] not in WHITESPACE and text[j] not in '(){}:;,"':
                 if text.startswith("/*", j) or text.startswith("//", j):
                     break
                 j += 1
@@ -329,9 +359,10 @@ def parse_liberty(text: str) -> dict[str, dict[str, LibPin]]:
     types: dict[str, tuple[int, int]] = {}
     for g in lib.groups:
         if g.kind == "type" and g.args:
+            lo, hi = _int(g.attrs.get("bit_from", "")), _int(g.attrs.get("bit_to", ""))
             # A type without integer bit_from and bit_to declares no bits.
-            with contextlib.suppress(KeyError, ValueError):
-                types[g.args[0]] = (int(g.attrs["bit_from"]), int(g.attrs["bit_to"]))
+            if lo is not None and hi is not None:
+                types[g.args[0]] = (lo, hi)
     cells: dict[str, dict[str, LibPin]] = {}
     for cell in lib.groups:
         if cell.kind != "cell" or not cell.args:
@@ -433,7 +464,7 @@ def _verilog_clean(text: str) -> str:
             out.append(text[i])
             i += 1
     lines = "".join(out).split("\n")
-    return "\n".join(" " if ln.lstrip().startswith("`") else ln for ln in lines)
+    return "\n".join(" " if ln.lstrip(WHITESPACE).startswith("`") else ln for ln in lines)
 
 
 def _verilog_tokens(text: str) -> list[str]:
@@ -441,17 +472,17 @@ def _verilog_tokens(text: str) -> list[str]:
     i, n = 0, len(text)
     while i < n:
         c = text[i]
-        if c.isspace():
+        if c in WHITESPACE:
             i += 1
-        elif c.isalnum() or c in "_$`'":
+        elif (c.isascii() and c.isalnum()) or c in "_$`'":
             j = i
-            while j < n and (text[j].isalnum() or text[j] in "_$`'"):
+            while j < n and ((text[j].isascii() and text[j].isalnum()) or text[j] in "_$`'"):
                 j += 1
             toks.append(text[i:j])
             i = j
         elif c == "\\":
             j = i
-            while j < n and not text[j].isspace():
+            while j < n and text[j] not in WHITESPACE:
                 j += 1
             toks.append(text[i + 1 : j])
             i = j
@@ -463,8 +494,15 @@ def _verilog_tokens(text: str) -> list[str]:
 
 def _range_width(toks: list[str]) -> int:
     """Width of ``[ msb : lsb ]`` given the tokens between the brackets; 0 if unknown."""
-    if len(toks) == 3 and toks[1] == ":" and toks[0].isdigit() and toks[2].isdigit():
-        return abs(int(toks[0]) - int(toks[2])) + 1
+    if len(toks) == 3 and toks[1] == ":":
+        msb, lsb = _int(toks[0]), _int(toks[2])
+        if (
+            msb is not None
+            and lsb is not None
+            and toks[0][0] not in "+-"
+            and toks[2][0] not in "+-"
+        ):
+            return abs(msb - lsb) + 1
     return 0
 
 
@@ -590,31 +628,35 @@ class SpiceSubckt:
 def spice_subckt(text: str, name: str) -> SpiceSubckt | None:
     """``.subckt name`` with its ports and ``*.PININFO`` directions, or None if absent."""
     lines: list[str] = []
-    for raw in text.splitlines():
-        s = raw.strip()
+    for raw in _lines(text):
+        s = raw.strip(WHITESPACE)
         if s.startswith("+") and lines:
             lines[-1] += " " + s[1:]
         else:
             lines.append(s)
     for k, line in enumerate(lines):
-        words = _spice_code(line).split()
-        if len(words) < 2 or words[0].lower() != ".subckt" or words[1].lower() != name.lower():
+        ws = words(_spice_code(line))
+        if (
+            len(ws) < 2
+            or ascii_lower(ws[0]) != ".subckt"
+            or ascii_lower(ws[1]) != ascii_lower(name)
+        ):
             continue
         ports: list[str] = []
-        for w in words[2:]:
-            if w.lower() == "params:" or "=" in w:
+        for w in ws[2:]:
+            if ascii_lower(w) == "params:" or "=" in w:
                 break
             ports.append(w)
         info: dict[str, str] = {}
         for later in lines[k + 1 :]:
-            if later.lower().startswith(".ends"):
+            if ascii_lower(later).startswith(".ends"):
                 break
-            if later.upper().startswith("*.PININFO"):
-                for item in later.split()[1:]:
+            if ascii_lower(later).startswith("*.pininfo"):
+                for item in words(later)[1:]:
                     pin, _, d = item.rpartition(":")
                     if pin:
-                        info[pin.lower()] = d.upper()
-        return SpiceSubckt(words[1], ports, info)
+                        info[ascii_lower(pin)] = ascii_upper(d)
+        return SpiceSubckt(ws[1], ports, info)
     return None
 
 

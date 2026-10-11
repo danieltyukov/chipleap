@@ -26,6 +26,7 @@ from chipleap.macro.text import fmt_g, plural, quote
 from chipleap.macro.views import (
     LefMacro,
     ViewError,
+    ascii_lower,
     parse_lef,
     parse_liberty,
     spice_subckt,
@@ -41,8 +42,8 @@ REPORT_SCHEMA = "macro.check/v1"
 REQUIRED_EVIDENCE = ("drc", "lvs")
 # Half a database unit of 1 nm: sizes printed to three decimals still compare equal.
 TOLERANCE_UM = 0.0005
-_PDK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_PDK_COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
+_PDK_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_PDK_COMMIT = re.compile(r"[0-9a-f]{7,40}")
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,7 @@ class Report:
 def parse_pdk_option(text: str) -> tuple[str, str | None]:
     """``ihp-sg13g2`` or ``ihp-sg13g2@22f2a25`` as (name, commit)."""
     name, _, commit = text.partition("@")
-    if not _PDK_NAME.match(name) or name != name.strip():
+    if not _PDK_NAME.fullmatch(name):
         raise ValueError(f"--pdk {text!r}: give NAME or NAME@COMMIT, e.g. ihp-sg13g2@22f2a25")
     if commit and not _PDK_COMMIT.fullmatch(commit):
         raise ValueError(f"--pdk {text!r}: the commit must be 7 to 40 lowercase hex digits")
@@ -125,6 +126,11 @@ def commits_match(a: str, b: str) -> bool:
 
 def _read_text(path: Path) -> str:
     return path.read_bytes().decode("utf-8", errors="replace")
+
+
+def _no_constant(name: str) -> None:
+    # NaN and Infinity are not JSON; Python accepts them, aispice's serde_json does not.
+    raise ValueError(f"{name} is not a JSON value")
 
 
 def _sum_text(err: Exception) -> str:
@@ -330,7 +336,7 @@ class _Checker:
             others = ", ".join(quote(n) for n in names) or "none"
             self.add("lef.macro", f, f"no MACRO {quote(m.name)}; macros in the file: {others}")
             return
-        cls = lef.cls.split()[0] if lef.cls else ""
+        cls = lef.cls.split(" ")[0]
         if cls != "BLOCK":
             what = f"CLASS is {quote(lef.cls)}" if lef.cls else "the macro has no CLASS"
             self.add("lef.class", f, f"{what}, expected BLOCK", "warning")
@@ -518,18 +524,18 @@ class _Checker:
         if sub is None:
             self.add("spice.subckt", f, f"no .subckt {quote(m.name)}")
             return
-        ports = {p.lower() for p in sub.ports}
+        ports = {ascii_lower(p) for p in sub.ports}
         letters = {"input": "I", "output": "O", "inout": "B"}
         bits: set[str] = set()
         for p in m.pins:
             for bit in p.bits():
-                bits.add(bit.lower())
-                if bit.lower() not in ports:
+                bits.add(ascii_lower(bit))
+                if ascii_lower(bit) not in ports:
                     self.add(
                         "spice.missing_pin", f, f"port {quote(bit)} from macro.toml is missing"
                     )
                     continue
-                got = sub.pininfo.get(bit.lower())
+                got = sub.pininfo.get(ascii_lower(bit))
                 if not p.is_supply and got is not None and got != letters[p.direction]:
                     self.add(
                         "spice.direction",
@@ -537,7 +543,7 @@ class _Checker:
                         f"*.PININFO gives {quote(bit)} direction {got}, "
                         f"macro.toml says {p.direction}",
                     )
-        for name in sorted({p for p in sub.ports if p.lower() not in bits}):
+        for name in sorted({p for p in sub.ports if ascii_lower(p) not in bits}):
             self.add("spice.extra_pin", f, f"port {quote(name)} is not in macro.toml")
 
     # Spec table
@@ -609,7 +615,7 @@ class _Checker:
         for path in files:
             f = f"evidence/{path.name}"
             try:
-                doc = json.loads(path.read_bytes().decode("utf-8"))
+                doc = json.loads(path.read_bytes().decode("utf-8"), parse_constant=_no_constant)
             except (UnicodeDecodeError, ValueError) as exc:
                 self.add("evidence.parse", f, f"not valid JSON: {_sum_text(exc)}")
                 continue
