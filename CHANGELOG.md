@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Place and route: at `CHIPLEAP_PNR_TIMEOUT` (3 h by default) or on Ctrl-C, `verify --steps pnr` now stops LibreLane's container as well. It used to stop only the `docker` client, and the container went on routing to the end. A run that times out fails the step with the limit in its summary instead of ending `chipleap verify` with a traceback. Containers the run did not create are left alone. LibreLane no longer inherits ChipLeap's standard input: a containerised run switched the terminal to raw mode through it, so Ctrl-C never reached ChipLeap, and under the MCP server it could read the client's requests.
+
 ## [0.3.0] - 2026-10-11
 
 ### Changed
