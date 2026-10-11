@@ -453,6 +453,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             str(co) if co else "checkout for config checks (chipleap verify --fetch-xheep)",
         ]
     )
+    from chipleap.rtl import confine
+
+    off = f" (off: {confine.ENV}=0)" if confine.abi() and not confine.enabled() else ""
+    rows.append(
+        [
+            "Landlock",
+            "yes" if confine.enabled() else "no",
+            f"ABI {confine.abi()}" if confine.abi() else "",
+            f"keeps a project's lint and synthesis to its own files{off}",
+        ]
+    )
     from chipleap.verify.remote import Remote, RemoteError
     from chipleap.verify.tools import commercial
 

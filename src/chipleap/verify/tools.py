@@ -31,11 +31,12 @@ def _version(cmd: list[str], pattern: str) -> str:
     return m.group(1) if m else ""
 
 
-def _is_wrapper(path: str) -> bool:
+def is_wrapper(path: str) -> bool:
     """Shell scripts that start a container are tools too, but checking their version
     would pull an image, so they are reported without one."""
     try:
-        head = Path(path).read_bytes()[:400]
+        with open(path, "rb") as fh:
+            head = fh.read(400)
     except OSError:
         return False
     return head.startswith(b"#!") and b"docker" in head
@@ -48,7 +49,7 @@ def find(
     path = path or shutil.which(name) or ""
     if not path:
         return Tool(name, None, "", purpose)
-    if _is_wrapper(path):
+    if is_wrapper(path):
         return Tool(name, path, "container wrapper", purpose)
     return Tool(name, path, _version([path, *version_args], pattern), purpose)
 

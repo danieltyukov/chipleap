@@ -13,7 +13,10 @@ scripts (Yosys, Tcl), on tool command lines and in results an assistant reads. S
 * Every path must resolve, symlinks followed, to a place inside the project directory,
   or inside a directory the user allowed (``--allow-path``, ``CHIPLEAP_ALLOW_PATHS``);
   nothing in the project file can widen that. Environment variables and ``~`` are not
-  expanded.
+  expanded. The project file itself, and every `include and $readmem file the RTL names
+  in a string, are held to the same rule. Files are read through ``read_inside``, which
+  checks the open file again. What a check of the text cannot see (an `include a macro
+  builds), ``chipleap.rtl.confine`` stops at the tools.
 * Names (top, ports, parameters, defines) are identifiers, parameter values are integers,
   define values a short literal; paths may not hold characters a script language reads
   as syntax. Such values are refused here, not escaped later.
@@ -30,7 +33,6 @@ import hashlib
 import os
 import re
 import shlex
-import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -188,20 +190,21 @@ class Project:
         outside is even listed), outside build directories, with safe names."""
         return [real for _, real in self._files(directory, suffixes)]
 
+    def read(self, path: Path) -> bytes:
+        """The content of a project file, read only if the file opened is inside the
+        project (``read_inside``)."""
+        return read_inside(path, self.roots)
+
     def stage(self, path: Path, dest: Path) -> None:
         """Copy a file, or a directory's ``files_in``, to ``dest``. Each file is resolved
-        and checked when it is copied, and the checked path is what gets read."""
+        and checked when it is copied, and checked again once open (``read_inside``)."""
         if path.is_dir():
             for logical, real in self._files(path):
-                target = dest / logical.relative_to(path)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(real, target)
+                self.stage(real, dest / logical.relative_to(path))
             return
-        real = path.resolve()
-        if not _within(real, self.roots):
-            raise ProjectError(f"{path} is outside the project directory")
+        data = self.read(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(real, dest)
+        dest.write_bytes(data)
 
     def input_files(self) -> list[Path]:
         """Every file whose content can change a result: the project file, the sources,
@@ -221,11 +224,15 @@ class Project:
 
     def inputs_digest(self) -> str:
         """SHA-256 over every input file's project-relative name and content, so a run log
-        can tell a changed design from a changed tool."""
+        can tell a changed design from a changed tool. A file that is gone, or that now
+        leads outside the project, counts as missing and is not read."""
         h = hashlib.sha256()
         for f in sorted(self.input_files(), key=lambda p: self.rel(p)):
             h.update(self.rel(f).encode() + b"\0")
-            h.update(hashlib.sha256(f.read_bytes()).digest() if f.is_file() else b"missing")
+            try:
+                h.update(hashlib.sha256(self.read(f)).digest())
+            except (ProjectError, OSError):
+                h.update(b"missing")
         return h.hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
@@ -327,6 +334,34 @@ def _within(path: Path, roots: Iterable[Path]) -> bool:
     return any(path.is_relative_to(r) for r in roots)
 
 
+def read_inside(path: Path, roots: Iterable[Path]) -> bytes:
+    """The content of ``path`` if the file it opens is inside ``roots`` (resolved). The
+    path is resolved and checked first, so nothing outside is opened; it is then opened
+    without following a symlink in its last part, and the open file's own path is checked
+    again, so a directory swapped for a symlink after the first check is caught, not read."""
+    roots = tuple(roots)
+    real = path.resolve()
+    if not _within(real, roots):
+        raise ProjectError(f"{path} is outside the project directory")
+    try:
+        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise ProjectError(f"{_shown(real, roots)}: {exc.strerror}") from None
+    with os.fdopen(fd, "rb") as fh:
+        opened = _opened(fd)
+        if opened is not None and not _within(opened, roots):
+            raise ProjectError(f"{path} is outside the project directory")
+        return fh.read()
+
+
+def _opened(fd: int) -> Path | None:
+    """Where an open file is, as the kernel sees it (Linux); None where it cannot say."""
+    try:
+        return Path(os.readlink(f"/proc/self/fd/{fd}"))
+    except OSError:
+        return None
+
+
 def _walk(directory: Path, roots: tuple[Path, ...]) -> list[tuple[Path, Path]]:
     """(path under ``directory``, resolved path) of every file reachable from it without
     leaving ``roots``, sorted. A symlinked directory is entered only if it resolves inside
@@ -379,7 +414,10 @@ def _glob_regex(parts: tuple[str, ...]) -> re.Pattern[str]:
             elif c == "[" and part.find("]", i + 1) > i + 1:
                 j = part.find("]", i + 1)
                 body = part[i + 1 : j]
-                rx += "[" + ("^" + body[1:] if body.startswith("!") else body) + "]"
+                neg = body.startswith("!")
+                # Only "-" keeps a meaning (a range); anything else is the character itself.
+                chars = "".join(c if c == "-" else re.escape(c) for c in body[int(neg) :])
+                rx += "[" + ("^" if neg else "") + chars + "]"
                 i = j
             else:
                 rx += re.escape(c)
@@ -388,7 +426,71 @@ def _glob_regex(parts: tuple[str, ...]) -> re.Pattern[str]:
     return re.compile("".join(out))
 
 
-_INCLUDE_RE = re.compile(r'`include\s*(?:"([^"\n]*)"|<([^>\n]*)>|(\S*))')
+def _lexer(triple: bool, escaped: bool) -> re.Pattern[str]:
+    """Verilog as a preprocessor reads it: string literals and comments whole, so a "/*"
+    in a string cannot hide the `include after it; optionally SystemVerilog 2023's
+    triple-quoted strings and escaped identifiers (``\\name``, which may hold a quote)."""
+    return re.compile(
+        "|".join(
+            [
+                *([r'"""(?:[^\\]|\\.)*?(?:"""|\Z)'] if triple else []),
+                r'"(?:[^"\\\n]|\\.)*"?',  # to the end of the line when not closed
+                r"//[^\n]*",
+                r"/\*.*?(?:\*/|\Z)",
+                *([r"\\[^\s`]*"] if escaped else []),
+                r"`include\b",
+                r"\$readmem[hb]\b",
+            ]
+        ),
+        re.S,
+    )
+
+
+# Tools differ on those two constructs, and what is a comment in one reading can be code
+# in another. So the text is read all four ways, and an `include counts unless every
+# reading puts it in a comment; one inside a string counts too.
+_LEXERS = [_lexer(t, e) for t in (False, True) for e in (False, True)]
+_GAP_RE = re.compile(r"(?:\s|//[^\n]*|/\*.*?\*/)*", re.S)
+_INCLUDE_ARG_RE = re.compile(r'"([^"\n]*)"|<([^>\n]*)>')
+_STRING_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+
+
+def _skip(text: str, pos: int) -> int:
+    """The position after the white space and comments at ``pos``."""
+    gap = _GAP_RE.match(text, pos)
+    return gap.end() if gap else pos
+
+
+def references(text: str) -> list[tuple[str, str | None, int]]:
+    """The files a Verilog text makes a tool read, as (kind, name, line): ``include`` for
+    every `include, its name None unless it is a plain quoted name, and ``readmem`` for a
+    $readmemh or $readmemb whose file is a string literal."""
+    found: dict[int, str] = {}
+    for lexer in _LEXERS:
+        for m in lexer.finditer(text):
+            tok = m.group()
+            if tok.startswith('"'):
+                for inc in re.finditer(r"`include\b", tok):
+                    found.setdefault(m.start() + inc.start(), "include")
+            elif tok == "`include":
+                found.setdefault(m.start(), "include")
+            elif tok.startswith("$readmem"):
+                found.setdefault(m.start(), "readmem")
+    out: list[tuple[str, str | None, int]] = []
+    for pos, kind in sorted(found.items()):
+        line = text.count("\n", 0, pos) + 1
+        after = _skip(text, pos + len("`include" if kind == "include" else "$readmemh"))
+        if kind == "include":
+            arg = _INCLUDE_ARG_RE.match(text, after)
+            name = None
+            if arg is not None:
+                name = arg.group(1) if arg.group(1) is not None else arg.group(2)
+            out.append(("include", name, line))
+        elif text.startswith("(", after):
+            lit = _STRING_RE.match(text, _skip(text, after + 1))
+            if lit is not None:
+                out.append(("readmem", lit.group(1), line))
+    return out
 
 
 def allowed_roots(extra: Iterable[str | Path] = ()) -> tuple[Path, ...]:
@@ -482,11 +584,15 @@ class _Paths:
                 out.append(self.path(base, item, where))
         return out
 
-    def check_includes(self, files: Iterable[Path], include_dirs: list[Path]) -> None:
-        """Follow every `include from ``files``, through the include directories, and
-        refuse one that names an absolute path, holds "..", uses a macro for its name, or
-        resolves (through a symlink) outside the project. The tools would read whatever it
-        named, and their messages could quote it."""
+    def check_references(self, files: Iterable[Path], include_dirs: list[Path]) -> None:
+        """Follow every `include from ``files`` (sources, testbench sources and Verilator
+        waiver files, which Verilator preprocesses too) through every place a tool could
+        find it, and refuse one that names an absolute path, holds "..", is built by a
+        macro, or resolves (through a symlink) outside the project; and a $readmemh or
+        $readmemb file, named by a string, that resolves outside. The tools would read
+        whatever these name, and their messages could quote it. A file name a macro or a
+        parameter computes is beyond a check of the text: ``chipleap.rtl.confine`` is
+        what stops the tools reading it."""
         todo = list(files)
         seen: set[Path] = set()
         while todo:
@@ -494,32 +600,46 @@ class _Paths:
             if f in seen:
                 continue
             seen.add(f)
-            text = _strip_comments(f.read_text(errors="replace"))
-            here = f"{_shown(f, self.roots)}"
-            for m in _INCLUDE_RE.finditer(text):
-                name = m.group(1) if m.group(1) is not None else m.group(2)
+            text = read_inside(f, self.roots).decode(errors="replace")
+            for kind, name, line in references(text):
+                here = f"{_shown(f, self.roots)}:{line}"
+                if kind == "readmem":
+                    self._check_readmem(f, name or "", here)
+                    continue
                 if name is None:
                     raise ProjectError(
-                        f"{here}: `include {m.group(3)!r} cannot be checked; name the file "
-                        "in quotes"
+                        f"{here}: an `include whose file is not a name in quotes (a macro) "
+                        "cannot be checked; name the file in quotes"
                     )
                 ref = PurePosixPath(name)
-                if CONTROL_RE.search(name) or "$" in name or name.startswith("~"):
+                if UNSAFE_PATH_RE.search(name) or name.startswith("~"):
                     raise ProjectError(f"{here}: `include {name!r} is not a plain file name")
                 if ref.is_absolute() or ".." in ref.parts:
                     raise ProjectError(
                         f'{here}: `include "{name}": absolute paths and .. are not allowed in '
                         "an include; add its directory to include_dirs"
                     )
-                candidates = [d / name for d in (f.parent, *include_dirs, self.root)]
-                for c in candidates:
-                    if not _within(c.resolve(), self.roots):
+                # Tools search the including file's directory, the include directories and
+                # their working directory (the project) in different orders, so every
+                # place counts, and every file found is followed in turn.
+                for d in (f.parent, *include_dirs, self.root):
+                    c = (d / name).resolve()
+                    if not _within(c, self.roots):
                         raise ProjectError(
                             f'{here}: `include "{name}" leads outside the project directory'
                         )
-                found = next((c.resolve() for c in candidates if c.is_file()), None)
-                if found is not None:
-                    todo.append(found)
+                    if c.is_file():
+                        todo.append(c)
+
+    def _check_readmem(self, f: Path, name: str, here: str) -> None:
+        """A memory file a source names: Yosys looks for it from its working directory
+        (the project) and then beside the source."""
+        if UNSAFE_PATH_RE.search(name) or name.startswith("~"):
+            raise ProjectError(f"{here}: $readmem file {name!r} is not a plain file name")
+        p = PurePosixPath(name)
+        places = [Path(name)] if p.is_absolute() else [self.root / name, f.parent / name]
+        if not all(_within(c.resolve(), self.roots) for c in places):
+            raise ProjectError(f'{here}: $readmem file "{name}" is outside the project directory')
 
 
 def _shown(path: Path, roots: tuple[Path, ...]) -> str:
@@ -557,7 +677,7 @@ def parse_filelist(
     out = _Filelist(files=[path])
     base = path.parent
     words: list[str] = []
-    for raw in path.read_text(errors="replace").splitlines():
+    for raw in read_inside(path, paths.roots).decode(errors="replace").splitlines():
         line = re.split(r"//|#", raw, maxsplit=1)[0]
         try:
             words += shlex.split(line)
@@ -709,10 +829,12 @@ def _parse_tests(value: Any, paths: _Paths, top: str) -> Tests:
         for m in modules:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", m):
                 raise ProjectError(f"tests.modules: {m!r} is not a Python module name")
-            if not (d / f"{m.replace('.', '/')}.py").is_file():
+            module = paths.check(d / f"{m.replace('.', '/')}.py", m, "tests.modules")
+            if not module.is_file():
                 raise ProjectError(f"tests.modules: {m}.py not found in {t['dir']}")
     else:
-        modules = sorted(p.stem for p in d.glob("test_*.py"))
+        found = (p for p in d.glob("test_*.py") if _within(p.resolve(), paths.roots))
+        modules = sorted(p.stem for p in found)
         if not modules:
             raise ProjectError(f"tests.dir: no test_*.py files in {t['dir']}")
     sim = t.get("simulator", "auto")
@@ -850,8 +972,9 @@ def parse_project(
         if r.port in {c.port for c in clocks}:
             raise ProjectError(f"resets: {r.port} is also a clock")
     tests = _parse_tests(data.get("tests"), paths, top)
+    lint = _parse_lint(data.get("lint"), paths)
     include_dirs = list(dict.fromkeys(d.resolve() for d in includes))
-    paths.check_includes([*sources, *tests.sources], include_dirs)
+    paths.check_references([*sources, *tests.sources, *lint.waivers], include_dirs)
     return Project(
         root=root,
         file=(file or root / PROJECT_FILE).resolve(),
@@ -867,7 +990,7 @@ def parse_project(
         tech=tech,
         tests=tests,
         golden=golden,
-        lint=_parse_lint(data.get("lint"), paths),
+        lint=lint,
         sdc=sdc,
         pnr=_parse_pnr(data.get("pnr")),
         description=str(data.get("description", "")),
@@ -897,17 +1020,39 @@ def find_project(path: str | Path) -> Path | None:
 
 def load_project(path: str | Path, allow: Iterable[str | Path] = ()) -> Project:
     """Read and check a project: a project file, or a directory that holds one. Its files
-    may also come from ``allow`` and the directories in ``CHIPLEAP_ALLOW_PATHS``."""
+    may also come from ``allow`` and the directories in ``CHIPLEAP_ALLOW_PATHS``.
+
+    The project file is held to the same rule: it must be YAML and resolve inside its own
+    directory, so a project.yaml that is a symlink to a file elsewhere is refused before
+    it is read. A YAML error gives the line and column but not the text there, so naming
+    some other YAML file cannot show its contents either."""
     p = Path(path)
     f = p / PROJECT_FILE if p.is_dir() else p
+    if f.suffix not in (".yaml", ".yml"):
+        why = "not a directory or a .yaml file" if p.exists() else "No such file or directory"
+        raise ProjectError(f"{p}: {why}; a project is a directory with project.yaml")
+    roots = allowed_roots(allow)
+    home = (f.parent.resolve(), *roots)
+    if not _within(f.resolve(), home):
+        raise ProjectError(f"{f} leads outside its directory")
     try:
-        data = yaml.safe_load(f.read_text())
+        text = read_inside(f, home).decode(errors="replace")
+    except ProjectError as exc:
+        # Missing or unreadable ("project.yaml: No such file or directory"), or swapped for
+        # a symlink since the check above.
+        why = str(exc).split(": ", 1)[-1] if ": " in str(exc) else "leads outside its directory"
+        raise ProjectError(f"{f}: {why}") from None
+    try:
+        data = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ProjectError(f"{f}: not valid YAML: {exc}") from exc
-    except OSError as exc:
-        raise ProjectError(f"{f}: {exc.strerror}") from exc
+        mark = getattr(exc, "problem_mark", None)
+        at = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        problem = getattr(exc, "problem", None)
+        raise ProjectError(
+            f"{f}: not valid YAML{at}" + (f": {problem}" if problem else "")
+        ) from None
     try:
-        return parse_project(data, f.parent, f, allowed_roots(allow))
+        return parse_project(data, f.parent, f, roots)
     except ProjectError as exc:
         raise ProjectError(f"{f}: {exc}") from exc
 
@@ -1048,7 +1193,9 @@ def init_project(
     data["tech"] = tech
     if tests_dir is None:
         for cand in ("test", "tests", "tb"):
-            if (root / cand).is_dir() and list((root / cand).glob("test_*.py")):
+            # Only a directory inside the project is looked into.
+            d = (root / cand).resolve()
+            if _within(d, (root,)) and d.is_dir() and list(d.glob("test_*.py")):
                 tests_dir = cand
                 notes.append(f"tests: cocotb tests in {cand}/")
                 break

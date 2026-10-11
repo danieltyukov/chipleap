@@ -10,7 +10,9 @@ critical path plus a flip-flop's clock-to-Q and setup gives an Fmax estimate at 
 typical corner; the routed number at the slow corner comes from ``pnr``.
 
 The mapped netlist stays in the work directory (``<top>.synth.v``) for later checks
-(equivalence, gate-level simulation).
+(equivalence, gate-level simulation). sv2v and Yosys read only the project, the work
+directory and the liberty (``chipleap.rtl.confine``): a memory file the RTL names cannot
+bring another file into the netlist.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from chipleap.hw.tech import FLOP_OVERHEAD_NS, get_tech
+from chipleap.rtl import confine
 from chipleap.rtl import quote as q
 from chipleap.rtl.diag import Diagnostic, parse_sv2v, parse_yosys, relative
 from chipleap.rtl.project import Project
@@ -88,9 +91,16 @@ def prepare_verilog(project: Project, workdir: Path) -> tuple[list[Path], bool]:
         *(f"-D{d}" for d in project.define_args()),
         *(project.rel(s) for s in project.sources),
     ]
-    res = subprocess.run(
-        cmd, cwd=project.root, capture_output=True, text=True, timeout=600, check=False
-    )
+    with confine.confined(cmd, project.roots) as (argv, env):
+        res = subprocess.run(
+            argv,
+            cwd=project.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
     if res.returncode != 0:
         diags = relative(parse_sv2v(res.stderr), project.root)
         raise SynthError(f"sv2v failed: {diags[0] if diags else res.stderr.strip()}", diags)
@@ -174,22 +184,26 @@ def synthesize(project: Project, workdir: Path | None = None) -> RtlSynthResult:
             script.write_text(_script(project, files, raw, liberty, work, target) + "\n")
         except q.QuoteError as exc:
             raise SynthError(f"cannot write the Yosys script: {exc}") from exc
-        proc = subprocess.Popen(
-            [str(tool.path), "-s", str(script)],
-            cwd=project.root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-        )
-        try:
-            out, _ = proc.communicate(
-                timeout=float(os.environ.get("CHIPLEAP_SYNTH_TIMEOUT", "1800"))
+        cmd = [str(tool.path), "-s", str(script)]
+        reads = [*project.roots, work, lib.resolve(), Path(tmp)]
+        with confine.confined(cmd, reads) as (argv, env):
+            proc = subprocess.Popen(
+                argv,
+                cwd=project.root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
             )
-        except BaseException:
-            os.killpg(proc.pid, signal.SIGKILL)  # ABC is a child of Yosys
-            proc.wait()
-            raise
+            try:
+                out, _ = proc.communicate(
+                    timeout=float(os.environ.get("CHIPLEAP_SYNTH_TIMEOUT", "1800"))
+                )
+            except BaseException:
+                os.killpg(proc.pid, signal.SIGKILL)  # ABC is a child of Yosys
+                proc.wait()
+                raise
     log = out or ""
     (work / "yosys.log").write_text(log)
     diags = relative(parse_yosys(log), project.root)

@@ -6,7 +6,7 @@ the step, so warnings a project accepts belong in a waiver file in its repositor
 is a second, stricter SystemVerilog front end (``-Wextra``); it elaborates the same top
 with the same parameters and reports through its JSON diagnostics. Both run from the
 project directory with project-relative paths, so their messages name files the way the
-project does.
+project does, and both are confined to the project's files (``chipleap.rtl.confine``).
 """
 
 from __future__ import annotations
@@ -17,17 +17,25 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from chipleap.rtl import confine
 from chipleap.rtl.diag import Diagnostic, counts, parse_slang, parse_verilator, relative
 from chipleap.rtl.project import Project
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import Tool, slang, verilator
 
 
-def _run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run(cmd: list[str], project: Project) -> subprocess.CompletedProcess[str]:
     timeout = float(os.environ.get("CHIPLEAP_LINT_TIMEOUT", "600"))
-    return subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
-    )
+    with confine.confined(cmd, project.roots) as (argv, env):
+        return subprocess.run(
+            argv,
+            cwd=project.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
 
 
 def verilator_lint(project: Project, tool: Tool) -> list[Diagnostic]:
@@ -44,7 +52,7 @@ def verilator_lint(project: Project, tool: Tool) -> list[Diagnostic]:
         *(rel(w) for w in project.lint.waivers),
         *(rel(s) for s in project.sources),
     ]
-    out = _run(cmd, project.root)
+    out = _run(cmd, project)
     diags = parse_verilator(out.stdout + out.stderr)
     if out.returncode != 0 and not diags:
         tail = (out.stdout + out.stderr).strip().splitlines()[-1:] or ["no message"]
@@ -96,7 +104,7 @@ def slang_lint(project: Project, tool: Tool) -> list[Diagnostic]:
             *(a for k, v in project.parameters.items() for a in ("-G", f"{k}={v}")),
             *(rel(s) for s in project.sources),
         ]
-        out = _run(cmd, project.root)
+        out = _run(cmd, project)
         text = report.read_text() if report.is_file() else ""
     try:
         diags = parse_slang_json(text)

@@ -152,7 +152,7 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
         cfg["CLOCK_PORT"] = ports[0] if len(ports) == 1 else ports
     cfg["CLOCK_PERIOD"] = clk.period_ns if clk else DEFAULT_PERIOD_NS
     if project.sdc is not None:
-        shutil.copy2(project.sdc, workdir / SDC_NAME)
+        project.stage(project.sdc, workdir / SDC_NAME)
     else:
         (workdir / SDC_NAME).write_text(sdc(project))
     cfg["PNR_SDC_FILE"] = f"dir::{SDC_NAME}"

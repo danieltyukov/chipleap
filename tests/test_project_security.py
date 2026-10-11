@@ -5,14 +5,18 @@ reaches a tool script is refused at load time if a script could read it as synta
 quoted when the script is written."""
 
 import dataclasses
+import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
-from chipleap.rtl import commercial, quote
+from chipleap.rtl import commercial, confine, quote
 from chipleap.rtl import synth as synth_mod
+from chipleap.rtl.lint import lint
 from chipleap.rtl.pnr import sdc
 from chipleap.rtl.project import (
     ALLOW_ENV,
@@ -21,6 +25,9 @@ from chipleap.rtl.project import (
     load_project,
     parse_filelist,
 )
+from chipleap.verify.tools import verilator, yosys
+
+needs_landlock = pytest.mark.skipif(not confine.enabled(), reason="Landlock is not available")
 
 BASE = "top: counter\nsources: [rtl/counter.sv]\n"
 
@@ -308,3 +315,216 @@ def test_librelane_configuration_is_checked_again(counter_project, tmp_path):
     )
     with pytest.raises(PnrError, match="LibreLane configuration"):
         config(evil, tmp_path)
+
+
+def test_an_include_after_a_comment_in_a_string_is_still_found(counter_project, outside):
+    # The tools read "/*" in a string as text, so the `include after it is real.
+    src = counter_project / "rtl/counter.sv"
+    body = src.read_text()
+    for trick in (
+        f'initial $display("/*");\n`include "{outside}/id_rsa.sv"\n// */\n',
+        f'wire \\a" ;\n`include "{outside}/id_rsa.sv" // "\n',
+        f'string s = """\n/*\n""";\n`include "{outside}/id_rsa.sv" // */\n',
+        f'initial $display("`include \\"{outside}/id_rsa.sv\\"");\n',
+    ):
+        src.write_text(trick + body)
+        msg = refused(counter_project, BASE, "rtl/counter.sv")
+        assert "BEGIN KEY" not in msg
+
+
+def test_every_place_an_include_could_come_from_is_followed(counter_project, outside):
+    # Beside the source "defs.svh" is harmless; the one in the include directory, which
+    # some tools find first, includes a file outside.
+    rtl = counter_project / "rtl"
+    (rtl / "defs.svh").write_text("`define ONE 1\n")
+    (rtl / "inc").mkdir()
+    (rtl / "inc/defs.svh").write_text(f'`include "{outside}/id_rsa.sv"\n')
+    src = rtl / "counter.sv"
+    src.write_text('`include "defs.svh"\n' + src.read_text())
+    refused(counter_project, f"{BASE}include_dirs: [rtl/inc]\n", "rtl/inc/defs.svh:1")
+
+
+def test_waiver_files_are_checked_too(counter_project, outside):
+    # Verilator preprocesses its configuration files, so a waiver can `include.
+    (counter_project / "rtl/waive.vlt").write_text(
+        f'`verilator_config\n`include "{outside}/id_rsa.sv"\n'
+    )
+    refused(counter_project, f"{BASE}lint: {{waivers: [rtl/waive.vlt]}}\n", "rtl/waive.vlt:2")
+
+
+@pytest.mark.parametrize("name", ["\\x2e\\x2e/secrets/id_rsa.sv", "inc\\056.svh", "a#b.svh"])
+def test_include_names_with_escapes_are_refused(counter_project, name):
+    src = counter_project / "rtl/counter.sv"
+    src.write_text(f'`include "{name}"\n' + src.read_text())
+    refused(counter_project, BASE, "is not a plain file name")
+
+
+def test_memory_files_named_in_the_rtl_stay_inside(counter_project, outside):
+    src = counter_project / "rtl/counter.sv"
+    body = src.read_text()
+    (counter_project / "rtl/rom.hex").write_text("00\n")
+    mem = "logic [7:0] m [0:1];\n"
+    for call in (
+        f'initial $readmemh("{outside}/id_rsa.sv", m);',
+        'initial $readmemb ( /* x */ "../secrets/id_rsa.sv", m);',
+        'initial $readmemh("\\056\\056/secrets/id_rsa.sv", m);',
+    ):
+        src.write_text(body.replace("endmodule", mem + call + "\nendmodule"))
+        refused(counter_project, BASE, "$readmem file")
+    for call in ('initial $readmemh("rtl/rom.hex", m);', "initial $readmemh(FILE, m);"):
+        src.write_text(body.replace("endmodule", mem + call + "\nendmodule"))
+        assert load_project(project(counter_project, BASE)).top == "counter"
+
+
+def test_the_project_file_stays_in_its_directory(counter_project, outside):
+    secret = outside / "settings.yaml"
+    secret.write_text("token: [not closed\nkey: SECRET-VALUE\n")
+    (counter_project / "project.yaml").unlink()
+    (counter_project / "project.yaml").symlink_to(secret)
+    with pytest.raises(ProjectError, match="leads outside its directory") as exc:
+        load_project(counter_project)
+    assert "SECRET" not in str(exc.value)
+    # A YAML error names the place, not the text there.
+    with pytest.raises(ProjectError, match="not valid YAML at line") as exc:
+        load_project(secret)
+    assert "SECRET" not in str(exc.value) and "not closed" not in str(exc.value)
+    (outside / "credentials").write_text("[default]\nkey = SECRET-VALUE\n")
+    with pytest.raises(ProjectError, match="a project is a directory") as exc:
+        load_project(outside / "credentials")
+    assert "SECRET" not in str(exc.value)
+
+
+def test_a_symlink_swapped_in_after_the_check_is_not_read(counter_project, outside, monkeypatch):
+    p = load_project(counter_project)
+    digest = p.inputs_digest()
+    (outside / "counter.sv").write_text("-----BEGIN KEY-----\n")
+    rtl = counter_project / "rtl"
+
+    def swap() -> None:
+        # The checked path stays the same, but a directory on it now leads outside.
+        rtl.rename(counter_project / "rtl.orig")
+        rtl.symlink_to(outside, target_is_directory=True)
+
+    def unswap() -> None:
+        rtl.unlink()
+        (counter_project / "rtl.orig").rename(rtl)
+
+    swap()  # before the read: resolving the path finds it
+    with pytest.raises(ProjectError, match="outside the project directory"):
+        p.read(p.sources[0])
+    with pytest.raises(ProjectError, match="outside the project directory"):
+        p.stage(p.sources[0], counter_project / "staged.sv")
+    assert not (counter_project / "staged.sv").exists()
+    changed = p.inputs_digest()
+    (outside / "counter.sv").write_text("other\n")
+    assert p.inputs_digest() == changed != digest  # counted missing, never read
+    unswap()
+    if not Path("/proc/self/fd").is_dir():
+        return  # only Linux says where an open file is
+    # Between the check and the open: the open file itself is checked.
+    real_open = os.open
+
+    def open_after_swap(path, *args, **kwargs):
+        if Path(path) == p.sources[0]:
+            swap()
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_after_swap)
+    with pytest.raises(ProjectError, match="outside the project directory"):
+        p.read(p.sources[0])
+
+
+def test_glob_brackets_are_characters(counter_project):
+    (counter_project / "rtl/a(b.sv").write_text("module ab; endmodule\n")
+    p = load_project(project(counter_project, "top: counter\nsources: ['rtl/[(c]*.sv']\n"))
+    assert [x.name for x in p.sources] == ["counter.sv"]
+    refused(counter_project, "top: counter\nsources: ['rtl/[\\\\]*.sv']\n", "matches no files")
+
+
+def test_init_does_not_look_into_a_directory_outside(counter_project, outside):
+    from chipleap.rtl.project import init_project
+
+    (outside / "test_leak.py").write_text("")
+    (counter_project / "project.yaml").unlink()
+    (counter_project / "test").rename(counter_project / "spec")
+    (counter_project / "tests").symlink_to(outside, target_is_directory=True)
+    _, notes = init_project(counter_project, top="counter")
+    assert not any("tests" in n for n in notes)
+
+
+@needs_landlock
+def test_a_confined_tool_reads_only_what_it_is_allowed(counter_project, outside):
+    cat = shutil.which("cat")
+    assert cat
+    for path, readable in (
+        (counter_project / "rtl/counter.sv", True),
+        (outside / "id_rsa.sv", False),
+    ):
+        with confine.confined([cat, str(path)], [counter_project]) as (argv, env):
+            out = subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
+        assert (out.returncode == 0) is readable, out.stderr
+        assert "BEGIN KEY" not in out.stdout
+    # It has a private temporary directory, removed afterwards.
+    script = 'echo x > "$TMPDIR/f" && cat "$TMPDIR/f"'
+    with confine.confined(["sh", "-c", script], []) as (argv, env):
+        out = subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
+        tmp = Path(env["TMPDIR"])
+    assert out.stdout == "x\n" and not tmp.exists()
+
+
+def test_confinement_can_be_turned_off_and_leaves_containers_alone(tmp_path, monkeypatch):
+    wrapper = tmp_path / "yosys-ll"
+    wrapper.write_text('#!/bin/sh\nexec docker run --rm yosys "$@"\n')
+    with confine.confined([str(wrapper), "-V"], []) as (argv, _):
+        assert argv == [str(wrapper), "-V"]
+    monkeypatch.setenv(confine.ENV, "0")
+    with confine.confined(["cat", "x"], []) as (argv, _):
+        assert argv == ["cat", "x"]
+
+
+def test_a_tool_reads_its_installation_but_not_a_shared_prefix(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    tools = {
+        ".local/bin/sv2v": [
+            ".local/bin",
+            *(f".local/{d}/sv2v" for d in ("share", "lib", "libexec")),
+        ],
+        ".local/opt/slang-9/bin/slang": [".local/opt/slang-9/bin", ".local/opt/slang-9"],
+        "yosys": ["yosys"],
+    }
+    for rel, allowed in tools.items():
+        exe = home / rel
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("")
+        assert confine.installation(exe) == [(home / a).resolve() for a in allowed], rel
+
+
+@needs_landlock
+@pytest.mark.skipif(not verilator().found, reason="Verilator not installed")
+def test_lint_cannot_show_a_file_that_a_macro_includes(counter_project, outside):
+    # No reading of the text finds this `include: Verilator builds it from the macro.
+    # Read, the file's text would come back in a message about an unknown macro.
+    (outside / "id_rsa.sv").write_text("`AKIA_SECRET_TOKEN\n")
+    src = counter_project / "rtl/counter.sv"
+    src.write_text(f'`define INC(x) `x\n`INC(include) "{outside}/id_rsa.sv"\n' + src.read_text())
+    r = lint(load_project(counter_project))
+    assert r.status == "fail"
+    assert "AKIA" not in json.dumps(r.data) + r.summary
+
+
+@needs_landlock
+@pytest.mark.synth
+@pytest.mark.skipif(
+    not yosys().found or synth_mod.liberty_for("ihp-sg13g2") is None,
+    reason="needs Yosys and the IHP SG13G2 liberty",
+)
+def test_synthesis_cannot_read_a_memory_file_a_parameter_names(counter_project, outside):
+    (outside / "rom.hex").write_text("a5\n")
+    src = counter_project / "rtl/counter.sv"
+    mem = f'  localparam F = "{outside}/rom.hex";\n  logic [7:0] m [0:0];\n'
+    src.write_text(
+        src.read_text().replace("endmodule", mem + "  initial $readmemh(F, m);\nendmodule")
+    )
+    r = synth_mod.synth(load_project(counter_project))
+    assert r.status == "fail" and "Can not open file" in r.summary, r.summary
