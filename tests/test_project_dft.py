@@ -197,7 +197,7 @@ needs_tools = pytest.mark.skipif(
 
 
 @needs_tools
-@pytest.mark.skipif(not os.environ.get("CHIPLEAP_RUN_DFT"), reason="set CHIPLEAP_RUN_DFT=1")
+@pytest.mark.skipif(not os.environ.get("CHIPLEAP_RUN_IMPL"), reason="set CHIPLEAP_RUN_IMPL=1")
 def test_counter_gets_a_scan_chain(counter_project):
     proj = counter_project / "project.yaml"
     proj.write_text(proj.read_text() + "dft: {max_chain_length: 4, patterns: 4}\n")
