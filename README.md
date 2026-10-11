@@ -62,7 +62,7 @@ chipleap verify path/to/rtl             # lint, simulation, coverage, synthesis
 chipleap verify path/to/rtl --steps all # and place and route to a GDS
 ```
 
-Lint runs Verilator and slang, simulation runs the cocotb tests on Icarus or Verilator, coverage reports line, branch and toggle coverage, synthesis maps to the IHP SG13G2 cells, and LibreLane routes it with the same slow-corner signoff as the accelerators. Failing tests come back by name, and every problem with its file and line, which is also what an assistant gets through MCP to fix the RTL in a loop. [examples/uart](examples/uart) is a UART that routes to a clean GDS; [docs/projects.md](docs/projects.md) describes the project file.
+Lint runs Verilator and slang, simulation runs the cocotb tests on Icarus or Verilator, coverage reports line, branch and toggle coverage, synthesis maps to the IHP SG13G2 cells, and LibreLane routes it with the same slow-corner signoff as the accelerators. With `--steps all` it also inserts scan chains with OpenROAD and generates stuck-at patterns with Fault, which it simulates through the chains; measures power from the activity of your own tests on the gate-level netlist and IR drop on the routed power grid; places UPF power domains with OpenROAD; and applies ECO changes to the routed design and signs it off again without placing it again. Failing tests come back by name, and every problem with its file and line, which is also what an assistant gets through MCP to fix the RTL in a loop. [examples/uart](examples/uart) is a UART that routes to a clean GDS; [docs/projects.md](docs/projects.md) describes the project file.
 
 ## Ask your AI assistant
 
@@ -78,8 +78,9 @@ Then ask things like *"Design the smallest chip on the IHP open PDK that runs Sm
 
 - **Any workload:** twelve LLM presets (SmolLM2, Qwen, Gemma, Llama, Phi, TinyLlama), or your own network of convolutions and matrix multiplies.
 - **Any RTL:** your own Verilog or SystemVerilog with cocotb tests, through the same checks down to the layout ([projects](docs/projects.md)).
+- **After the layout:** DFT with scan chains and ATPG, gate-level power from your tests, IR drop, UPF power domains and ECOs on the routed design ([after place and route](docs/projects.md#after-place-and-route)).
 - **Any host:** a complete X-HEEP RISC-V SoC, or the accelerator alone as AXI4 IP for an Arm, RISC-V or FPGA SoC ([platforms](docs/platforms.md)).
-- **Open tools:** Verilator, Icarus, slang, cocotb, Yosys and LibreLane (OpenROAD, KLayout, Netgen) on the IHP SG13G2 open PDK.
+- **Open tools:** Verilator, Icarus, slang, cocotb, Yosys, LibreLane (OpenROAD, KLayout, Netgen) and Fault on the IHP SG13G2 open PDK.
 - **Commercial tools:** Cadence Xcelium and Genus, Synopsys VCS and Design Compiler, Siemens Questa, on your machine or on a design server over ssh ([guide](docs/commercial-tools.md)).
 - **Your own PDK:** `chipleap tech add` measures it from its liberty files and keeps the numbers on your machine.
 
@@ -114,9 +115,9 @@ chipleap macro check tiny_ota.macro --pdk ihp-sg13g2
 | Guide | What it covers |
 |---|---|
 | [Spec format](docs/spec.md) | Workloads, targets, constraints and what the explorer may change |
-| [Your own RTL](docs/projects.md) | The project file, and lint, simulation, coverage, synthesis and place and route on your design |
+| [Your own RTL](docs/projects.md) | The project file, and lint, simulation, coverage, synthesis, place and route, DFT, power, IR drop, UPF and ECO on your design |
 | [The model](docs/model.md) | Timing, energy and area, with sources |
-| [Verification](docs/verification.md) | Simulation, synthesis, place and route, X-HEEP checks |
+| [Verification](docs/verification.md) | Simulation, synthesis, place and route, the steps after it, X-HEEP checks |
 | [Platforms](docs/platforms.md) | X-HEEP or AXI4 IP, and how to integrate each |
 | [Commercial tools](docs/commercial-tools.md) | Cadence, Synopsys and Siemens tools, remote servers, your own PDK |
 | [X-HEEP integration](docs/xheep.md) | How the accelerator plugs into the SoC |

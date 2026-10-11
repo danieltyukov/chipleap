@@ -38,6 +38,7 @@ from chipleap.verify.result import StepResult
 
 BINS = 48  # most map cells along the longer side
 ROW_UM = 3.78  # IHP SG13G2's standard-cell row
+MAP_PX = 360  # the map's longer side
 WORST_SHOWN = 5
 # The physical-only cells LibreLane names: fill, decap, well tap and row ends.
 PHYSICAL_RE = re.compile(r"^(FILLER|DECAP|TAP|PHY|WELLTAP|ENDCAP)_")
@@ -192,8 +193,8 @@ def voltage_map_svg(net: NetDrop, die: tuple[float, float, float, float] | None 
         j = min(ny - 1, max(0, int((y - y0) / h * ny)))
         grid[i, j] = max(d, grid.get((i, j), 0.0))
     worst = max(grid.values()) or 1e-12
-    cell = 8
-    pad, legend = 4, 36
+    cell = max(4, MAP_PX // max(nx, ny))
+    pad, legend = 4, 40
     width, height = nx * cell + 2 * pad, ny * cell + 2 * pad + legend
     title = f"{net.name}: drop up to {worst * 1000:.3g} mV"
     parts = [
@@ -211,15 +212,15 @@ def voltage_map_svg(net: NetDrop, die: tuple[float, float, float, float] | None 
         )
     bar_y = pad + ny * cell + 10
     steps = 20
-    bar_w = max(nx * cell - 80, 40)
+    bar_w = max(nx * cell - 110, 40)
     for k in range(steps):
         parts.append(
             f'<rect x="{pad + 40 + k * bar_w / steps:.1f}" y="{bar_y}" width="{bar_w / steps + 0.5:.1f}" '
             f'height="8" fill="{_colour(k / (steps - 1))}"/>'
         )
     parts += [
-        f'<text x="{pad}" y="{bar_y + 8}" font-size="9" fill="#888888">0 mV</text>',
-        f'<text x="{pad + 44 + bar_w}" y="{bar_y + 8}" font-size="9" fill="#888888">'
+        f'<text x="{pad}" y="{bar_y + 9}" font-size="12" fill="#888888">0 mV</text>',
+        f'<text x="{pad + 46 + bar_w}" y="{bar_y + 9}" font-size="12" fill="#888888">'
         f"{worst * 1000:.3g} mV</text>",
         "</svg>",
     ]

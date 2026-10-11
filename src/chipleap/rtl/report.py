@@ -134,7 +134,12 @@ def _kv(r: StepResult) -> list[tuple[str, str]]:
             sim = d.get(key)
             if sim:
                 ok = sim["flush"] == "pass" and not sim["errors"]
-                kv.append((label, f"{'pass' if ok else 'fail'}, {sim['patterns']} patterns"))
+                kv.append(
+                    (
+                        f"patterns simulated, {label}",
+                        f"{sim['patterns']} {'pass' if ok else 'fail'}",
+                    )
+                )
         return kv
     if r.name == "power" and "corners" in d:
         kv = []

@@ -11,3 +11,12 @@ resets: [{port: rst_ni, active: low, sync: false}]
 tech: ihp-sg13g2
 tests: {dir: test, seed: 1}
 golden: model/uart_model.py
+# Scan chains of at most 20 flip-flops, with Fault's ATPG; place and route routes the scan
+# netlist.
+dft: {max_chain_length: 20}
+power: {corners: [typ, slow, fast]}
+# The receiver in a power domain of its own: OpenROAD places it in its own region.
+upf:
+  domains:
+    - {name: PD_TOP}
+    - {name: PD_RX, elements: [u_rx]}

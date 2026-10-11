@@ -19,6 +19,9 @@ def test_example_project_reads():
     assert p.top == "uart" and p.parameters == {"CLKS_PER_BIT": 16}
     assert [p.rel(s) for s in p.sources] == ["rtl/uart_tx.sv", "rtl/uart_rx.sv", "rtl/uart.sv"]
     assert p.tests.modules == ("test_uart",) and p.golden is not None
+    assert p.dft is not None and p.dft.max_chain_length == 20
+    assert p.upf is not None and p.upf.domains[1].elements == ("u_rx",)
+    assert p.power.corners == ("typ", "slow", "fast")
 
 
 @pytest.mark.skipif(
