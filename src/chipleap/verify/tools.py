@@ -297,20 +297,35 @@ def commercial() -> list[Tool]:
     return [Tool(n, shutil.which(n), "", purpose) for n, purpose in COMMERCIAL]
 
 
+PDK_ROOTS = (
+    "~/.volare",
+    "~/.ciel",
+    "~/.local/share/pdk",
+    "/usr/local/share/pdk",
+    "/opt/pdk",
+)
+
+
+def pdk_roots() -> tuple[Path, ...]:
+    """Where PDKs live on this machine: ``PDK_ROOT`` and the usual install directories,
+    resolved. Files the implementation steps take from a PDK must be under one of them,
+    or beside the liberty ``CHIPLEAP_LIBERTY`` names."""
+    roots = [os.environ.get("PDK_ROOT", ""), *PDK_ROOTS]
+    out = [Path(r).expanduser().resolve() for r in roots if r and Path(r).expanduser().is_dir()]
+    env = os.environ.get("CHIPLEAP_LIBERTY")
+    if env and Path(env).is_file():
+        # libs.ref/<library>/lib/<file>.lib: the library's own directory holds its views.
+        out.append(Path(env).resolve().parent.parent)
+    return tuple(dict.fromkeys(out))
+
+
 def ihp_liberty() -> Path | None:
     """The IHP SG13G2 typical-corner standard-cell library, if a PDK is installed."""
     candidates = []
     env = os.environ.get("CHIPLEAP_LIBERTY")
     if env:
         return Path(env) if Path(env).is_file() else None
-    roots = [
-        os.environ.get("PDK_ROOT", ""),
-        str(Path.home() / ".volare"),
-        str(Path.home() / ".ciel"),
-        str(Path.home() / ".local/share/pdk"),
-        "/usr/local/share/pdk",
-        "/opt/pdk",
-    ]
+    roots = [os.environ.get("PDK_ROOT", ""), *(str(Path(r).expanduser()) for r in PDK_ROOTS)]
     name = "sg13g2_stdcell_typ_1p20V_25C.lib"
     for root in roots:
         if not root or not Path(root).is_dir():
