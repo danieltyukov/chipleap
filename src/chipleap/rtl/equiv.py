@@ -68,6 +68,9 @@ _EQY_FAIL_RE = re.compile(r"Failed to prove equivalence of partition (\S+)")
 _EQY_OK_RE = re.compile(r"Successfully proved equivalence of partition (\S+)")
 
 
+NO_ROUTED_RUN = "no routed run in build/pnr: run chipleap verify --steps pnr first"
+
+
 class EquivUnavailable(RuntimeError):
     """The pair cannot be checked here: no tool, no liberty or no routed run."""
 
@@ -143,9 +146,7 @@ def sides(
         run = routed_run(project)
         synth = _librelane_synth(run, project.top) if run else None
         if run is None or synth is None:
-            raise EquivUnavailable(
-                "no routed run in build/pnr: run chipleap verify --steps pnr first"
-            )
+            raise EquivUnavailable(NO_ROUTED_RUN)
         final = gate_netlist or run / "final" / "nl" / f"{project.top}.nl.v"
         gold = Side(
             "LibreLane's synthesized netlist",
@@ -324,6 +325,9 @@ def check_pair(project: Project, pair: str, *, gate_netlist: Path | None = None)
     """Prove one pair equal, and check what the proof leaves from reset."""
     engine = project.equivalence.engine
     head: dict[str, Any] = {"pair": pair, "engine": engine}
+    # What the pair needs from the project comes first: it says what to run next.
+    if pair == "synth-pnr" and routed_run(project) is None:
+        return {**head, "status": "skipped", "reason": NO_ROUTED_RUN}
     liberty = liberty_for(project.tech)
     if liberty is None:
         return {**head, "status": "skipped", "reason": f"no liberty file for {project.tech}"}

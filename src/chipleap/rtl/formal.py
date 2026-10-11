@@ -528,9 +528,9 @@ def check_assertions(
         raise ValueError("reset must be a Verilog identifier")
     known = {r.port: r for r in project.resets}
     low = known[rst].active_low if rst in known else active_low_by_name(rst)
+    original, text = _defining_file(project, module)
     if sby().path is None:
         raise RuntimeError(f"SymbiYosys (sby) is not installed: {INSTALL_HINT}")
-    original, text = _defining_file(project, module)
     workdir = project.work_dir(Path("formal") / "proposed", empty=True)
     # Only the proposals are checked: the design's own assertions and covers go.
     keep = ["chformal -assert -cover -remove t:$assert t:$cover %u n:chipleap_* %d"]
