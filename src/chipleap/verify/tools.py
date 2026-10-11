@@ -69,7 +69,13 @@ def yosys() -> Tool:
 
 
 def openroad() -> Tool:
-    return find("openroad", ["-version"], r"(\S+)", "static timing (OpenSTA)", "CHIPLEAP_OPENROAD")
+    return find(
+        "openroad",
+        ["-version"],
+        r"(\S+)",
+        "timing, scan insertion, power, IR drop, UPF and ECO (OpenROAD)",
+        "CHIPLEAP_OPENROAD",
+    )
 
 
 def sta() -> Tool:
@@ -116,6 +122,128 @@ def sv2v() -> Tool:
     )
 
 
+GL_ICARUS_MIN = (13,)
+GL_PURPOSE = "gate-level simulation of IHP cells: scan patterns and power activity (13 or newer)"
+
+
+def gl_iverilog() -> Tool:
+    """An Icarus Verilog that simulates IHP SG13G2's cell models. Icarus 12 elaborates
+    them but leaves every flip-flop at X, so it needs 13 or newer: ``CHIPLEAP_GL_IVERILOG``,
+    else ``iverilog`` on the path when it is new enough. Its ``vvp`` is the one beside it."""
+    name = "iverilog-gl"
+    env = os.environ.get("CHIPLEAP_GL_IVERILOG", "")
+    path = env or shutil.which("iverilog") or ""
+    if not path:
+        return Tool(name, None, "", GL_PURPOSE)
+    version = _version([path, "-V"], r"Icarus Verilog version (\S+)")
+    numbers = tuple(int(x) for x in re.findall(r"\d+", version)[:1])
+    if numbers < GL_ICARUS_MIN:
+        return Tool(name, None, version, GL_PURPOSE)
+    return Tool(name, path, version, GL_PURPOSE)
+
+
+def gl_vvp(tool: Tool) -> str | None:
+    """The ``vvp`` that goes with a gate-level Icarus: the two must be the same version."""
+    if tool.path is None:
+        return None
+    vvp = Path(tool.path).parent / "vvp"
+    return str(vvp) if vvp.is_file() else None
+
+
+def quaigh() -> Tool:
+    return find(
+        "quaigh",
+        ["--version"],
+        r"quaigh (\S+)",
+        "test pattern generation for Fault (ATPG)",
+        "CHIPLEAP_QUAIGH",
+    )
+
+
+def nl2bench() -> Tool:
+    return find("nl2bench", ["--help"], r"(nl2bench)", "netlist to bench for Fault's ATPG")
+
+
+def fault() -> Tool:
+    path = os.environ.get("CHIPLEAP_FAULT", "") or shutil.which("fault") or ""
+    purpose = "ATPG and stuck-at fault coverage (Fault, with Quaigh)"
+    if not path:
+        return Tool("fault", None, "", purpose)
+    try:
+        out = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env=fault_env(path),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return Tool("fault", path, "", purpose)
+    m = re.search(r"^(\d+\.\d+\.\d+)\s*$", out.stdout, re.M)
+    return Tool("fault", path, m.group(1) if m else "", purpose)
+
+
+def _interpreter(script: str) -> str | None:
+    """The Python a console script runs under, from its first line."""
+    try:
+        with open(script, "rb") as fh:
+            head = fh.readline(400).decode(errors="replace").strip()
+    except OSError:
+        return None
+    if not head.startswith("#!"):
+        return None
+    words = head[2:].split()
+    if not words:
+        return None
+    exe = words[-1] if Path(words[0]).name == "env" else words[0]
+    return exe if "python" in Path(exe).name else None
+
+
+def fault_env(fault_path: str, base: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment Fault needs. Fault from PyPI embeds Python and does not see the
+    virtual environment it was installed in, so its packages go on ``PYTHONPATH`` (and
+    the base installation in ``PYTHONHOME``). It also runs ``vvp`` from the path, which
+    must match the ``iverilog`` that compiled the testbench, so both are named; and
+    Quaigh goes first on the path."""
+    env = dict(os.environ if base is None else base)
+    py = _interpreter(fault_path)
+    if py is not None:
+        try:
+            out = subprocess.run(
+                [
+                    py,
+                    "-c",
+                    "import sys, sysconfig; print(sysconfig.get_paths()['purelib']); "
+                    "print(sys.base_prefix)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            lines = out.stdout.splitlines()
+            if out.returncode == 0 and len(lines) >= 2:
+                env["PYTHONPATH"] = os.pathsep.join(
+                    [lines[0], *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+                )
+                env["PYTHONHOME"] = lines[1]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    path = [env.get("PATH", "")]
+    q = quaigh()
+    if q.path:
+        path.insert(0, str(Path(q.path).parent))
+    gl = gl_iverilog()
+    vvp = gl_vvp(gl)
+    if gl.path and vvp:
+        env["FAULT_IVERILOG"] = gl.path
+        env["FAULT_VVP"] = vvp
+        path.insert(0, str(Path(gl.path).parent))
+    env["PATH"] = os.pathsep.join(path)
+    return env
+
+
 def riscv_gcc() -> Tool:
     for name in (
         "riscv32-unknown-elf-gcc",
@@ -146,6 +274,9 @@ def all_tools() -> list[Tool]:
         riscv_gcc(),
         iverilog(),
         slang(),
+        gl_iverilog(),
+        fault(),
+        quaigh(),
     ]
 
 
