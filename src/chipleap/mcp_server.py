@@ -444,45 +444,45 @@ def describe_project(project: str) -> dict[str, Any]:
 
 
 def lint_rtl(project: str) -> dict[str, Any]:
-    from chipleap.rtl.lint import lint
+    from chipleap.rtl.verify import run_step
 
-    return _step(lint(_project(project)))
+    return _step(run_step(_project(project), "lint"))
 
 
 def simulate_rtl(project: str, tests: str = "", simulator: str = "") -> dict[str, Any]:
     """The project's cocotb tests; ``tests`` is a regular expression on test names."""
-    from chipleap.rtl.sim import COMMERCIAL, NAMES, simulate
+    from chipleap.rtl.sim import NAMES
+    from chipleap.rtl.verify import run_step
     from chipleap.verify.remote import Remote
 
     if simulator and simulator not in (*NAMES, "auto"):
         raise ToolError(f"simulator must be one of auto, {', '.join(NAMES)}")
-    tool = "" if simulator == "auto" else simulator
-    remote = Remote.from_env() if tool in COMMERCIAL else None
-    return _step(simulate(_project(project), tool, remote, tests))
+    p = _project(project)
+    # run_step sends only a commercial simulator to the user's server.
+    return _step(
+        run_step(p, "sim", sim_tool=simulator, test_filter=tests, remote=Remote.from_env())
+    )
 
 
 def coverage_rtl(project: str, limit: int = 50) -> dict[str, Any]:
     """Line, branch and toggle coverage, and up to ``limit`` points never reached."""
-    from chipleap.rtl.coverage import coverage
+    from chipleap.rtl.verify import run_step
 
-    out = _step(coverage(_project(project)))
+    out = _step(run_step(_project(project), "coverage"))
     if "uncovered" in out:
         out["uncovered"] = out["uncovered"][: max(0, limit)]
     return out
 
 
 def synthesize_rtl(project: str, tool: str = "yosys") -> dict[str, Any]:
-    from chipleap.rtl import commercial
-    from chipleap.rtl.synth import synth
-    from chipleap.rtl.verify import SYNTH_TOOLS
+    from chipleap.rtl.verify import SYNTH_TOOLS, run_step
     from chipleap.verify.remote import Remote
 
     if tool not in SYNTH_TOOLS:
         raise ToolError(f"tool must be one of {', '.join(SYNTH_TOOLS)}")
     p = _project(project)
-    if tool == "yosys":
-        return _step(synth(p))
-    return _step(commercial.synth_step(p, tool, Remote.from_env()))
+    remote = Remote.from_env() if tool != "yosys" else None
+    return _step(run_step(p, "synth", synth_tool=tool, remote=remote))
 
 
 def verify_rtl(
