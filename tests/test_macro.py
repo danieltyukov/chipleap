@@ -37,9 +37,9 @@ EXPECTED = json.loads((FIXTURES / "expected.json").read_text())
 # The contract both repositories share. aispice pins the same hashes in
 # crates/aispice-core/tests/macro_contract.rs; change both together (CONTRIBUTING.md).
 CONTRACT = {
-    "docs/macro-package.md": "d76762d1f1435bf7582440e4bdf94079a2579e297a27379c0bcd75d1abf20b69",
+    "docs/macro-package.md": "d578097f64823e93045f8575e3d12f25b79e55ee98323f9885f61fbd1b59d705",
     "src/chipleap/macro/macro-v1.schema.json": "01fadd5205677b27ef3dcc5a00c086aaf00f2dba63d398d17fc046dd67254327",
-    "tests/fixtures/macro/SHA256SUMS": "9e62a9d5f133f8f8f3591611244ea3d968dd3e8f797ef76b28782713e44a324c",
+    "tests/fixtures/macro/SHA256SUMS": "5d3514d5526a26ac23f0cd56710b5fc6bcd8b323361dcf2047b71fa797eaae4a",
 }
 
 
@@ -224,44 +224,25 @@ def test_fmt_g_matches_printf():
         assert fmt_g(x) == want, x
 
 
-def _gds(cells: list[bytes]) -> bytes:
-    gen = runpy.run_path(str(FIXTURES / "generate.py"))
-    return gen["gds"]("t", cells)
+# Values from KLayout's dbbox() of tests/fixtures/macro/gds/hierarchy.gds.
+HIERARCHY_BOXES = {
+    "pair": (0, -0.2, 2, 1.2),
+    "rot90": (3.8, 2, 5.2, 4),
+    "mirror": (7, 4.8, 9, 6.2),
+    "mirror_rot270": (-1.1, -1.9, 0.3, 0.1),
+    "rot45": (-0.7071, 0, 1.4142, 2.1213),
+    "arr": (1, 0.3, 8, 3.2),
+    "path0": (0, 4.9, 4.1, 8),
+    "path2": (-0.1, 4.9, 4.1, 8.1),
+    "nested": (-5.19, -3.98, 0.2, 8),
+}
 
 
 def test_gds_bbox_through_the_hierarchy_matches_klayout():
-    gen = runpy.run_path(str(FIXTURES / "generate.py"))
-    Cell, layer = gen["Cell"], gen["METAL1"]
-    pair = Cell("pair").rect(layer, 0, 0, 2000, 1000).rect(layer, 400, -200, 600, 1200)
-    cells = [
-        pair,
-        Cell("rot90").sref("pair", 5000, 2000, angle=90),
-        Cell("mirror").sref("pair", 7000, 6000, mirror=True),
-        Cell("mirror_rot270").sref("pair", 100, 100, angle=270, mirror=True),
-        Cell("rot45").sref("pair", 0, 0, angle=45),
-        Cell("arr").aref("pair", 3, 2, 1000, 500, 2500, 1500),
-        Cell("path0").path(layer, 200, 0, 0, 5000, 4000, 5000, 4000, 8000),
-        Cell("path2").path(layer, 200, 2, 0, 5000, 4000, 5000, 4000, 8000),
-        Cell("nested")
-        .sref("rot90", 10, 20, angle=180)
-        .sref("arr", -3000, 0, mirror=True, angle=90),
-    ]
-    lib = parse_gds(gen["gds"]("t", cells))
-    # Values from KLayout's dbbox() of the same file.
-    expected = {
-        "pair": (0, -0.2, 2, 1.2),
-        "rot90": (3.8, 2, 5.2, 4),
-        "mirror": (7, 4.8, 9, 6.2),
-        "mirror_rot270": (-1.1, -1.9, 0.3, 0.1),
-        "rot45": (-0.7071, 0, 1.4142, 2.1213),
-        "arr": (1, 0.3, 8, 3.2),
-        "path0": (0, 4.9, 4.1, 8),
-        "path2": (-0.1, 4.9, 4.1, 8.1),
-        "nested": (-5.19, -3.98, 0.2, 8),
-    }
-    for name, box in expected.items():
+    lib = parse_gds((FIXTURES / "gds" / "hierarchy.gds").read_bytes())
+    for name, box in HIERARCHY_BOXES.items():
         assert lib.bbox(name) == pytest.approx(box, abs=1e-4), name
-    assert set(lib.top_cells()) == {"mirror", "mirror_rot270", "rot45", "path0", "path2", "nested"}
+    assert lib.top_cells() == ["mirror", "mirror_rot270", "rot45", "path0", "path2", "nested"]
 
 
 def test_gds_rejects_broken_streams():
@@ -270,10 +251,10 @@ def test_gds_rejects_broken_streams():
         parse_gds(good[:-4])
     with pytest.raises(ValueError, match="record length"):
         parse_gds(struct.pack(">HBB", 2, 0, 2))
-    gen = runpy.run_path(str(FIXTURES / "generate.py"))
-    loop = gen["gds"]("t", [gen["Cell"]("a").sref("b", 0, 0), gen["Cell"]("b").sref("a", 0, 0)])
+    with pytest.raises(ValueError, match="too short"):
+        parse_gds(good[:6] + struct.pack(">HBB", 6, 0x0F, 3) + b"\0\0" + good[6:])
     with pytest.raises(ValueError, match="contains itself"):
-        parse_gds(loop).bbox("a")
+        parse_gds((FIXTURES / "gds" / "loop.gds").read_bytes()).bbox("a")
 
 
 def test_lef_reader():

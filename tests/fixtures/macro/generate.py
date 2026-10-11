@@ -953,6 +953,27 @@ VARIANTS: list[tuple[str, Callable[[], Files], str, Callable[[Files], Files]]] =
 ]
 
 
+def reader_tests() -> Files:
+    """Layouts for the GDS reader's own tests: references rotated, mirrored, arrayed
+    and nested, flush and extended paths, and a cell that contains itself."""
+    pair = Cell("pair").rect(METAL1, 0, 0, 2000, 1000).rect(METAL1, 400, -200, 600, 1200)
+    cells = [
+        pair,
+        Cell("rot90").sref("pair", 5000, 2000, angle=90),
+        Cell("mirror").sref("pair", 7000, 6000, mirror=True),
+        Cell("mirror_rot270").sref("pair", 100, 100, angle=270, mirror=True),
+        Cell("rot45").sref("pair", 0, 0, angle=45),
+        Cell("arr").aref("pair", 3, 2, 1000, 500, 2500, 1500),
+        Cell("path0").path(METAL1, 200, 0, 0, 5000, 4000, 5000, 4000, 8000),
+        Cell("path2").path(METAL1, 200, 2, 0, 5000, 4000, 5000, 4000, 8000),
+        Cell("nested")
+        .sref("rot90", 10, 20, angle=180)
+        .sref("arr", -3000, 0, mirror=True, angle=90),
+    ]
+    loop = [Cell("a").sref("b", 0, 0), Cell("b").sref("a", 0, 0)]
+    return {"hierarchy.gds": gds("hierarchy", cells), "loop.gds": gds("loop", loop)}
+
+
 def write(dest: Path, files: Files) -> None:
     for rel, data in sorted(files.items()):
         p = dest / rel
@@ -961,8 +982,9 @@ def write(dest: Path, files: Files) -> None:
 
 
 def main() -> None:
-    for d in ("tiny_ota.macro", "tiny_counter.macro", "broken"):
+    for d in ("tiny_ota.macro", "tiny_counter.macro", "broken", "gds"):
         shutil.rmtree(HERE / d, ignore_errors=True)
+    write(HERE / "gds", reader_tests())
     write(HERE / "tiny_ota.macro", ota())
     write(HERE / "tiny_counter.macro", counter())
     for case, base, dirname, change in VARIANTS:

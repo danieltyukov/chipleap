@@ -7,6 +7,7 @@ Shared by ChipLeap (`tests/fixtures/macro/`) and aispice (`crates/aispice-core/t
 | `tiny_ota.macro/` | An analog macro: a five-transistor OTA, 12 x 8 um |
 | `tiny_counter.macro/` | A digital macro: a 2-bit counter with enable and active-low reset, 20 x 10 um, with a second liberty corner |
 | `broken/<case>/` | Variants with one thing wrong (or one edge case), named after it |
+| `gds/` | Layouts for the GDS readers' own tests: rotated, mirrored, arrayed and nested references, paths, and a cell that contains itself |
 | `expected.json` | What every validator must report for each case, finding by finding |
 | `generate.py` | Writes both macros, the variants and `SHA256SUMS` (standard library only) |
 | `SHA256SUMS` | The SHA-256 of every file here, checked by both repositories' tests |

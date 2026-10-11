@@ -122,6 +122,7 @@ Fields:
   - `width` (an integer of at least 1) makes a pin a bus with bits `name[0]` to `name[width-1]`. LEF, liberty and SPICE name the bits that way; Verilog declares the bus with a range of the same width. Without `width` the pin is a scalar. Supply pins cannot be buses.
   - `kind` `clock` marks a clock input or output, `analog` a pin that carries an analog value, `signal` any other digital pin.
 - `corners` lists the conditions the block was characterized at. Analog macros need at least one, since the measured specs refer to them. `<name>.lib` is characterized at the first corner. A corner with a `liberty` file has a liberty of its own, checked like `<name>.lib`.
+- `macro.toml` and the spec table are TOML 1.0, which every TOML reader understands (Python's `tomllib` reads nothing newer). Text files are UTF-8; the view formats are read as ASCII, so names, keywords and numbers in them must be ASCII.
 - File names in `macro.toml` are bare names inside the package; paths are not allowed.
 - Unknown fields are errors, so a typo does not pass silently. Put tool-specific data under `[extra]`.
 
@@ -131,7 +132,7 @@ The JSON schema `macro-v1.schema.json` (in ChipLeap at `src/chipleap/macro/`, in
 
 All names are case-sensitive except in SPICE, which is case-insensitive. Each view must declare exactly the pins of `macro.toml`: a missing pin and an extra pin are both errors.
 
-**GDS.** A cell named `<name>` must be a top cell. Other top cells are a warning, since they would be merged into the chip. The bounding box of the top cell, through its whole hierarchy and ignoring text, must lie inside the boundary from `macro.toml`, placed by the LEF `ORIGIN`. Each pin bit should have a text label of the same name in the top cell, as LVS finds pins by their labels; a missing label is a warning.
+**GDS.** A cell named `<name>` must be a top cell. Other top cells are a warning, since they would be merged into the chip. Subcells should carry the macro name as a prefix (`tiny_ota_pair`), so two macros merged into one chip never share a cell name; the validator does not check this. The bounding box of the top cell, through its whole hierarchy and ignoring text, must lie inside the boundary from `macro.toml`, placed by the LEF `ORIGIN`. Each pin bit should have a text label of the same name in the top cell, as LVS finds pins by their labels; a missing label is a warning.
 
 **LEF.** The file must contain `MACRO <name>` with `CLASS BLOCK` (another class is a warning) and a `SIZE` equal to `macro.toml` within 0.0005 um. Every pin bit has a `PIN` with at least one `PORT` shape. Signal, clock and analog pins have a `DIRECTION` equal to `macro.toml`'s (`OUTPUT TRISTATE` counts as output). Power pins have `USE POWER`, ground pins `USE GROUND`, and no other pin may use either; a `USE` that does not match a signal, clock or analog pin is a warning. If `macro.toml` gives a pin `layer`, the LEF pin has a shape on that layer. Bus bits use square brackets (`BUSBITCHARS "[]"`).
 
