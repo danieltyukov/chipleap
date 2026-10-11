@@ -40,7 +40,7 @@ For each case, `simulate_job` in `chipleap.model.accel` predicts the cycle count
 
 - every case on all three dataflows is bit-exact;
 - without memory stalls the prediction equals the simulated count exactly;
-- with random stalls it is within a few percent (the model uses the average grant rate).
+- with random stalls it is within a few percent (the model uses the average grant rate, and waits for the slowest read port, since each port reads its own share of a transfer).
 
 The closed form the explorer uses (`job_timing`) is within 0.1 % on average of `simulate_job` over random jobs; jobs of up to 256 tiles use `simulate_job` directly. Together this ties the explorer's numbers to the RTL.
 
