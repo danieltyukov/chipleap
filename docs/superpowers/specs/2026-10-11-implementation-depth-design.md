@@ -145,13 +145,17 @@ Optional and private: Cadence Modus for ATPG, Voltus for IR drop and power, Temp
 ## Public API for D4 and part a
 
 - `chipleap.rtl.project`: `DftConfig`, `PowerConfig`, `IrDropConfig`, `UpfConfig`, `PowerDomain`, `EcoChange`; fields `Project.dft`, `.power`, `.ir_drop`, `.upf`, `.eco`.
-- `chipleap.rtl.openroad`: `run_openroad(script, workdir, ...)`, `PdkViews` and `pdk_views(project, run=None)`, `routed_run(project)`.
-- `chipleap.rtl.netlist`: `parse_netlist(text)` (modules, ports, instances, connections, assigns) and `trace_chains`.
-- `chipleap.rtl.dft`: `insert_scan(project) -> ScanResult`, `run_atpg`, `simulate_patterns`, `dft(project)`.
-- `chipleap.rtl.power`: `gate_level_vcd(project, netlist)`, `report_power(...)`, `power(project)`.
+- `chipleap.rtl.openroad`: `Job(workdir, name)` (a private run directory: `stage(src, sealed=...)`, `run(script)`, `output(name)`), `PdkViews` and `pdk_views(project, run=None)`, `routed_run(project)`, `routed_views(project, run=None) -> RoutedViews`, `pnr_sealed`, `failure`, `read_limited`.
+- `chipleap.rtl.provenance`: `seal(root, name, what, parts, extra)`, `open_sealed(root, name, what) -> Sealed` (`locate`, `check`, `read_text`, `read_json`, `copy`), `unseal`, `copy_file`, `file_digest`.
+- `chipleap.rtl.pnr`: `seal_routed(work)`, `PNR_MANIFEST` and `ECO_MANIFEST` in `chipleap.rtl.openroad`.
+- `chipleap.rtl.netlist`: `parse_netlist(text, limits)`, `read_netlist(paths, limits)` (modules, ports, instances, connections, assigns), `Limits`, `hierarchy(netlist, top)`, `Nets` and `trace_chain`.
+- `chipleap.rtl.dft`: `insert_scan(project) -> ScanResult`, `run_atpg`, `map_patterns`, `simulate_patterns`, `dft(project)`.
+- `chipleap.rtl.power`: `gate_level_run(project, netlist, views, workdir, routed, sealed) -> GateRun`, `activity(project, netlist, views, routed, sealed)`, `analyze(project) -> PowerResult`, `power(project)`.
 - `chipleap.rtl.irdrop`: `analyze(project)`, `ir_drop(project)`, `voltage_map_svg`.
-- `chipleap.rtl.upf`: `write_upf(project)`, `upf(project)`, `crossings`.
+- `chipleap.rtl.upf`: `write_upf(upf, areas)`, `analyze(project)`, `upf(project)`, `crossings`.
 - `chipleap.rtl.eco`: `EcoResult`, `apply_eco(project, changes)`, `timing_paths(project, corner, kind, count)`, `eco(project)`.
+- `chipleap.verify.tools`: `excluding(*dirs)`, `which(name)`, `tool_env(base, prepend)`, `gl_iverilog`, `gl_vvp`, `fault`, `fault_env`, `quaigh`, `nl2bench`.
+- `chipleap.rtl.builddir`: `existing_dir(root, *parts)` beside `work_dir` and `write_text`.
 
 ## Acceptance
 
