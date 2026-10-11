@@ -48,8 +48,8 @@ def test_accel_area_grows_with_the_array():
         small = accel_logic_kge(df, 2, 8, 1)
         assert accel_logic_kge(df, 4, 8, 1) > small
         assert accel_logic_kge(df, 2, 8, 2) > small
-    # Synthesized on SG13G2 for the 5 ns target: a 1 x 8 GEMV engine with one port is 39.4 kGE.
-    assert abs(accel_logic_kge("gemv", 1, 8, 1) - 39.4) / 39.4 < 0.03
+    # Synthesized on SG13G2 for the 5 ns target: a 1 x 8 GEMV engine with one port is 37.1 kGE.
+    assert abs(accel_logic_kge("gemv", 1, 8, 1) - 37.1) / 37.1 < 0.03
 
 
 def test_memory_availability():

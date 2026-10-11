@@ -29,18 +29,18 @@ from typing import Any
 # Logic of the generated accelerator in kGE (thousands of NAND2 equivalents), fitted to
 # Yosys and ABC on SG13G2 across 12 configurations: all three dataflows, one to four ports,
 # 8 to 64 MACs, mapped and sized for the 5 ns target of verify/synth.py, with the buffers
-# extrapolated away. The leave-one-out error is 2.9% on average and 8.4% at worst.
+# extrapolated away. The leave-one-out error is 2.9% on average and 8.6% at worst.
 # Gate counts are roughly node independent, so the generic nodes reuse them.
-# `scripts/calibrate_sg13g2.py --accel` measures them again.
-ACCEL_BASE_KGE = 26.65  # register file, job and tile control, store engine, cycle counter
-ACCEL_PORT_KGE = 2.33  # one OBI read port of the DMA
+# `scripts/calibrate_sg13g2.py` measures them again.
+ACCEL_BASE_KGE = 24.30  # register file, job and tile control, store engine, cycle counter
+ACCEL_PORT_KGE = 2.62  # one OBI read port of the DMA, with its own address generator
 # Per dataflow: kGE per MAC (8 x 8 multiplier, adder or pipeline registers) and per edge
 # unit: a GEMV lane's accumulators, a weight-stationary column's accumulators, or the
 # operand skew registers on each row and column of an output-stationary array.
 ACCEL_KGE: dict[str, tuple[float, float]] = {
-    "gemv": (0.955, 2.907),
-    "ws": (1.912, 1.649),
-    "os": (1.670, 0.808),
+    "gemv": (0.946, 2.876),
+    "ws": (1.885, 1.832),
+    "os": (1.879, 0.345),
 }
 
 
@@ -52,12 +52,14 @@ AXI_ADAPTER_KGE = 0.54
 
 # Critical path of the generated accelerator on SG13G2 at the typical corner, sized for the
 # 5 ns target of verify/synth.py (scripts/calibrate_sg13g2.py): a delay per dataflow, more
-# for a GEMV adder tree wider than eight columns, and the DMA's port logic, which grows with
-# the number of ports. Set to bound every one of the 12 synthesized configurations from
-# above (3.3 to 5.0 ns), so the clock limit below errs on the safe side.
-ACCEL_DELAY_NS: dict[str, float] = {"gemv": 4.17, "ws": 3.68, "os": 3.40}
-ACCEL_DELAY_WIDE_NS = 0.63  # per doubling of GEMV columns beyond eight
-ACCEL_DELAY_PORTS_NS = (2.27, 0.68)  # the port logic: a + b x ports
+# for a GEMV adder tree wider than eight columns, and the DMA's setup of its ports' start
+# addresses, which grows slowly with the number of ports. Set to bound every one of the 12
+# synthesized configurations from above (3.2 to 4.7 ns), and for the ports the DMA paths of
+# configurations with 4 to 16 ports (3.3 to 4.1 ns), so the clock limit below errs on the
+# safe side.
+ACCEL_DELAY_NS: dict[str, float] = {"gemv": 4.23, "ws": 3.68, "os": 3.40}
+ACCEL_DELAY_WIDE_NS = 0.51  # per doubling of GEMV columns beyond eight
+ACCEL_DELAY_PORTS_NS = (3.09, 0.06)  # the port logic: a + b x ports
 FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical corner
 # After placement and routing with LibreLane at the slow corner (1.08 V, 125 C):
 # - The routed single-port GEMV 1 x 8, weight-stationary 4 x 4 and output-stationary 4 x 4
