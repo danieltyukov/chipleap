@@ -144,3 +144,10 @@ Each check has a passing and a failing fixture, run in CI:
 - Gate-level simulation runs the UART's cocotb tests on its post-route netlist with SDF (a real LibreLane run here; CI runs the same tests on the synthesized netlist, since it cannot route).
 
 Existing tests pass unchanged.
+
+## Changed while building
+
+- **Equivalence runs on Yosys's own passes by default.** EQY 0.33 proved a netlist with one gate changed equal to another netlist of liberty cells, and could not partition the routed UART, so `synth-pnr` and the default `rtl-synth` use `equiv_make`, `equiv_simple` and `equiv_induct`, with what induction leaves checked from reset on a SAT miter (`equivalence.depth` cycles). EQY stays as `equivalence.engine: eqy` for `rtl-synth` against the plain RTL, where it catches the changed gate. The `rtl-pnr` pair is not implemented: LibreLane synthesizes again and names its registers differently, so name matching finds only the outputs, and the RTL is not compared with LibreLane's own netlists directly.
+- **z3 beside SymbiYosys, a memory cap and `abc pdr`.** Ubuntu's z3 4.8.12 took 14 GB on the UART's proof; the install script puts z3 4.15 beside `sby`, which ChipLeap puts first on the solver's path, and solvers are capped (`CHIPLEAP_SOLVER_MEMORY_MB`). The UART example proves with `abc pdr`, which needs no depth.
+- **Tools only from absolute directories outside the project.** A security review found that an empty or relative `PATH` entry let a project's own `z3` or `yosys` run; tools are now resolved from absolute `PATH` entries outside the project, and every program ChipLeap starts gets such a `PATH`.
+- **Commercial parity is left for a later change.** The JasperGold, Conformal LEC, Xcelium-with-SDF and SpyGlass backends of the section above are not built yet.
