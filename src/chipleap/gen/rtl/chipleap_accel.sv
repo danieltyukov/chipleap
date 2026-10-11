@@ -195,23 +195,75 @@ module chipleap_accel #(
   // ---------------------------------------------------------------------------
   // DMA: 2-D copy from memory into a buffer over all read ports
   // ---------------------------------------------------------------------------
-  logic        dma_start, dma_to_w, dma_done;
-  logic [31:0] dma_rows, dma_wpr, dma_src, dma_src_off, dma_src_stride;
-  logic [31:0] dma_dst, dma_dst_stride;
+  // Number the words of a transfer row by row. Port p reads words p, p + PORTS, p + 2 PORTS
+  // and so on, each port with its own address generator that steps PORTS words at a time.
+  // No port's choice of word depends on another's, so the ports are served in parallel and
+  // the logic per port does not grow with their number. Without stalls every port issues a
+  // word per cycle, so a transfer of n words takes ceil(n / PORTS) cycles to issue.
+  localparam int unsigned RW = $clog2((TM_MAX > TN ? TM_MAX : TN) + 1);  // rows in a transfer
+  localparam int unsigned PQ = $clog2(PORTS + 2);  // a word or row step of up to PORTS + 1
+  // Words in a row: at most a buffer's, and wide enough to compare with PORTS.
+  localparam int unsigned CW = AW + 1 > PQ ? AW + 1 : PQ;
+
+  logic          dma_start, dma_to_w, dma_done;
+  logic [RW-1:0] dma_rows;
+  logic [CW-1:0] dma_wpr;
+  logic [  31:0] dma_src, dma_src_off, dma_src_stride;
+  logic [AW-1:0] dma_dst, dma_dst_stride;
 
   logic        dma_active;
-  // A transfer spends its first cycle in setup: the source address is a base plus an offset,
-  // and the last word and row indices are the counts less one, all formed here from
-  // registers so that none of that arithmetic is in series with the loader's.
+  // A transfer spends its first cycle in setup: the start of each port and the steps they
+  // take are formed here from registers, so none of that arithmetic is in series with the
+  // loader's or with the issue of a word.
   logic        dma_setup;
-  logic [31:0] iss_off, iss_wpr, iss_rows;
   logic        dma_tow_q;
-  logic [31:0] iss_row, iss_word, iss_rowaddr, iss_rowdst;
-  logic [31:0] iss_sstride, iss_dstride;
-  // Index of the last word in a row and of the last row, set when a transfer starts, so the
-  // per-word check is an equality on registers rather than an increment and a compare.
-  logic [31:0] iss_wlast, iss_rlast;
-  logic        iss_all;
+  logic [31:0] iss_src, iss_off, iss_sstride;
+  logic [AW-1:0] iss_dst, iss_dstride;
+  logic [CW-1:0] iss_wpr;
+  logic [RW-1:0] iss_rows;
+
+  // Stepping PORTS words on moves a port q = PORTS / wpr rows down and r = PORTS % wpr words
+  // along, and one row more when the words along run past the end of the row. q and r are
+  // only other than 0 and PORTS for rows of at most PORTS words, so they come from a table,
+  // looked up as the transfer starts and registered for the setup cycle.
+  logic [PQ-1:0] dv_q, dv_r, st_q, st_r;  // PORTS / wpr and PORTS % wpr
+  // Port p starts in row p / wpr at word p % wpr.
+  logic [PORTS-1:0][PQ-1:0] dv_q0, dv_w0, st_q0, st_w0;
+  wire [PQ-1:0] st_q1 = st_q + PQ'(1);
+  always_comb begin
+    dv_q = '0;
+    dv_r = PQ'(PORTS);
+    for (int v = 1; v <= int'(PORTS); v++) begin
+      if (dma_wpr == CW'(v)) begin
+        dv_q = PQ'(int'(PORTS) / v);
+        dv_r = PQ'(int'(PORTS) % v);
+      end
+    end
+    for (int p = 0; p < int'(PORTS); p++) begin
+      dv_q0[p] = '0;
+      dv_w0[p] = PQ'(p);
+      for (int v = 1; v <= p; v++) begin
+        if (dma_wpr == CW'(v)) begin
+          dv_q0[p] = PQ'(p / v);
+          dv_w0[p] = PQ'(p % v);
+        end
+      end
+    end
+  end
+
+  // The step every port takes, set up once per transfer: without and with a row change.
+  logic [CW-1:0] stp_thr;  // wpr - r: a port at or past this word changes row
+  logic [PQ-1:0] stp_r, stp_q, stp_q1;  // words along, rows down without and with a change
+  logic [31:0] stp_a0, stp_a1;  // source address step
+  logic [AW-1:0] stp_d0, stp_d1;  // buffer address step
+
+  // Each port's next word: its address, buffer address, place in its row, rows left from
+  // its row to the end of the transfer, and whether it has a word left at all.
+  logic [PORTS-1:0][31:0] po_addr;
+  logic [PORTS-1:0][AW-1:0] po_dst;
+  logic [PORTS-1:0][CW-1:0] po_w;
+  logic [PORTS-1:0][RW-1:0] po_rows;
+  logic [PORTS-1:0] po_act;
 
   logic [PORTS-1:0] pend_v;
   logic [PORTS-1:0][31:0] pend_addr;
@@ -220,49 +272,17 @@ module chipleap_accel #(
   logic [PORTS-1:0][$clog2(MAX_OUTSTANDING)-1:0] fifo_wp, fifo_rp;
   logic [PORTS-1:0][OSTW-1:0] outst;
 
-  // Per-cycle allocation of new requests to ports, in port order.
+  // A port issues its next word when it has one, its request slot frees up this cycle and
+  // it stays within MAX_OUTSTANDING reads in flight. Each port decides on its own.
   logic [PORTS-1:0] alloc;
-  logic [PORTS-1:0][31:0] alloc_addr;
-  logic [PORTS-1:0][AW-1:0] alloc_dst;
-  logic [31:0] nx_row, nx_word, nx_rowaddr, nx_rowdst;
-  logic nx_all;
-
   always_comb begin
-    logic [31:0] r, w, ra, rd;
-    logic all_done;
-    r = iss_row;
-    w = iss_word;
-    ra = iss_rowaddr;
-    rd = iss_rowdst;
-    all_done = iss_all;
     for (int p = 0; p < PORTS; p++) begin
       logic [OSTW:0] after;
       after = (OSTW + 1)'(outst[p]) + (OSTW + 1)'(pend_v[p] && rd_gnt_i[p])
               - (OSTW + 1)'(rd_rvalid_i[p]);
-      alloc[p] = 1'b0;
-      alloc_addr[p] = '0;
-      alloc_dst[p] = '0;
-      if (dma_active && !dma_setup && !all_done && (!pend_v[p] || rd_gnt_i[p]) &&
-          after < (OSTW + 1)'(MAX_OUTSTANDING)) begin
-        alloc[p] = 1'b1;
-        alloc_addr[p] = ra + (w << 2);
-        alloc_dst[p] = AW'(rd + w);
-        if (w == iss_wlast) begin
-          w = '0;
-          if (r == iss_rlast) all_done = 1'b1;
-          r = r + 32'd1;
-          ra = ra + iss_sstride;
-          rd = rd + iss_dstride;
-        end else begin
-          w = w + 32'd1;
-        end
-      end
+      alloc[p] = dma_active && !dma_setup && po_act[p] && (!pend_v[p] || rd_gnt_i[p]) &&
+                 after < (OSTW + 1)'(MAX_OUTSTANDING);
     end
-    nx_row = r;
-    nx_word = w;
-    nx_rowaddr = ra;
-    nx_rowdst = rd;
-    nx_all = all_done;
   end
 
   assign rd_req_o = pend_v;
@@ -275,25 +295,37 @@ module chipleap_accel #(
       if (pend_v[p] || outst[p] != '0) any_outstanding = 1'b1;
     end
   end
-  assign dma_done = dma_active && !dma_setup && iss_all && !any_outstanding;
+  assign dma_done = dma_active && !dma_setup && po_act == '0 && !any_outstanding;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       dma_active <= 1'b0;
       dma_setup <= 1'b0;
+      dma_tow_q <= 1'b0;
+      iss_src <= '0;
       iss_off <= '0;
+      iss_sstride <= '0;
+      iss_dst <= '0;
+      iss_dstride <= '0;
       iss_wpr <= '0;
       iss_rows <= '0;
-      dma_tow_q <= 1'b0;
-      iss_row <= '0;
-      iss_word <= '0;
-      iss_rowaddr <= '0;
-      iss_rowdst <= '0;
-      iss_sstride <= '0;
-      iss_dstride <= '0;
-      iss_wlast <= '0;
-      iss_rlast <= '0;
-      iss_all <= 1'b0;
+      st_q <= '0;
+      st_r <= '0;
+      st_q0 <= '0;
+      st_w0 <= '0;
+      stp_thr <= '0;
+      stp_r <= '0;
+      stp_q <= '0;
+      stp_q1 <= '0;
+      stp_a0 <= '0;
+      stp_a1 <= '0;
+      stp_d0 <= '0;
+      stp_d1 <= '0;
+      po_addr <= '0;
+      po_dst <= '0;
+      po_w <= '0;
+      po_rows <= '0;
+      po_act <= '0;
       pend_v <= '0;
       pend_addr <= '0;
       pend_dst <= '0;
@@ -304,32 +336,38 @@ module chipleap_accel #(
       if (dma_start) begin
         dma_active <= 1'b1;
         dma_tow_q <= dma_to_w;
-        iss_row <= '0;
-        iss_word <= '0;
         dma_setup <= 1'b1;
-        iss_rowaddr <= dma_src;
+        iss_src <= dma_src;
         iss_off <= dma_src_off;
+        iss_sstride <= dma_src_stride;
+        iss_dst <= dma_dst;
+        iss_dstride <= dma_dst_stride;
         iss_wpr <= dma_wpr;
         iss_rows <= dma_rows;
-        iss_rowdst <= dma_dst;
-        iss_sstride <= dma_src_stride;
-        iss_dstride <= dma_dst_stride;
-        iss_all <= 1'b1;
+        st_q <= dv_q;
+        st_r <= dv_r;
+        st_q0 <= dv_q0;
+        st_w0 <= dv_w0;
       end else if (dma_active) begin
         if (dma_setup) begin
           dma_setup <= 1'b0;
-          iss_rowaddr <= iss_rowaddr + iss_off;
-          iss_wlast <= iss_wpr - 32'd1;
-          iss_rlast <= iss_rows - 32'd1;
-          iss_all <= (iss_rows == 0) || (iss_wpr == 0);
+          stp_thr <= iss_wpr - CW'(st_r);
+          stp_r <= st_r;
+          stp_q <= st_q;
+          stp_q1 <= st_q1;
+          stp_a0 <= 32'(st_q) * iss_sstride + (32'(st_r) << 2);
+          stp_a1 <= 32'(st_q1) * iss_sstride + (32'(st_r) << 2) - (32'(iss_wpr) << 2);
+          stp_d0 <= AW'(st_q) * iss_dstride + AW'(st_r);
+          stp_d1 <= AW'(st_q1) * iss_dstride + AW'(st_r) - AW'(iss_wpr);
+          for (int p = 0; p < PORTS; p++) begin
+            po_addr[p] <= iss_src + iss_off + 32'(st_q0[p]) * iss_sstride + (32'(st_w0[p]) << 2);
+            po_dst[p] <= iss_dst + AW'(st_q0[p]) * iss_dstride + AW'(st_w0[p]);
+            po_w[p] <= CW'(st_w0[p]);
+            po_rows[p] <= iss_rows - RW'(st_q0[p]);
+            po_act[p] <= iss_wpr != '0 && 32'(iss_rows) > 32'(st_q0[p]);
+          end
         end else if (dma_done) begin
           dma_active <= 1'b0;
-        end else begin
-          iss_row <= nx_row;
-          iss_word <= nx_word;
-          iss_rowaddr <= nx_rowaddr;
-          iss_rowdst <= nx_rowdst;
-          iss_all <= nx_all;
         end
       end
       for (int p = 0; p < PORTS; p++) begin
@@ -346,8 +384,22 @@ module chipleap_accel #(
         outst[p] <= outst[p] + OSTW'(g) - OSTW'(v);
         if (alloc[p]) begin
           pend_v[p] <= 1'b1;
-          pend_addr[p] <= alloc_addr[p];
-          pend_dst[p] <= alloc_dst[p];
+          pend_addr[p] <= po_addr[p];
+          pend_dst[p] <= po_dst[p];
+          // Step PORTS words on. The port has a word left while its row is in the transfer.
+          if (po_w[p] >= stp_thr) begin
+            po_w[p] <= po_w[p] - stp_thr;
+            po_addr[p] <= po_addr[p] + stp_a1;
+            po_dst[p] <= po_dst[p] + stp_d1;
+            po_rows[p] <= po_rows[p] - RW'(stp_q1);
+            po_act[p] <= 32'(po_rows[p]) > 32'(stp_q1);
+          end else begin
+            po_w[p] <= po_w[p] + CW'(stp_r);
+            po_addr[p] <= po_addr[p] + stp_a0;
+            po_dst[p] <= po_dst[p] + stp_d0;
+            po_rows[p] <= po_rows[p] - RW'(stp_q);
+            po_act[p] <= 32'(po_rows[p]) > 32'(stp_q);
+          end
         end else if (g) begin
           pend_v[p] <= 1'b0;
         end
@@ -429,33 +481,35 @@ module chipleap_accel #(
     dma_dst_stride = '0;
     desc_set = '0;
     desc_new = '0;
+    // The counts and buffer addresses of a transfer fit a buffer, so they are cut to the
+    // widths the DMA keeps.
     if (ls == L_X) begin
       dma_start = 1'b1;
       dma_to_w = 1'b0;
-      dma_rows = l_tm;
+      dma_rows = RW'(l_tm);
       dma_src_stride = cfg_k;
       if (cfg_xres) begin
-        dma_wpr = cfg_k >> 2;
+        dma_wpr = CW'(cfg_k >> 2);
         dma_src = l_xrow;
         dma_dst = '0;
-        dma_dst_stride = cfg_k >> 2;
+        dma_dst_stride = AW'(cfg_k >> 2);
       end else begin
-        dma_wpr = l_tk >> 2;
+        dma_wpr = CW'(l_tk >> 2);
         dma_src = l_xrow;
         dma_src_off = l_k0;
-        dma_dst = 32'(l_slot) * A_SLOT;
-        dma_dst_stride = cfg_tk >> 2;
+        dma_dst = AW'(32'(l_slot) * A_SLOT);
+        dma_dst_stride = AW'(cfg_tk >> 2);
       end
     end else if (ls == L_W) begin
       dma_start = 1'b1;
       dma_to_w = 1'b1;
-      dma_rows = l_tn;
-      dma_wpr = w_words(l_tk);
+      dma_rows = RW'(l_tn);
+      dma_wpr = CW'(w_words(l_tk));
       dma_src = l_wrow;
       dma_src_off = w_bytes(l_k0);
       dma_src_stride = w_row_bytes;
-      dma_dst = 32'(l_slot) * W_SLOT;
-      dma_dst_stride = w_words(cfg_tk);
+      dma_dst = AW'(32'(l_slot) * W_SLOT);
+      dma_dst_stride = AW'(w_words(cfg_tk));
     end else if (ls == L_PUSH) begin
       desc_set[l_slot] = 1'b1;
       desc_new.tm = l_tm;
