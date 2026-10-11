@@ -294,22 +294,53 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_steps(results: list[Any]) -> int:
+def _print_steps(results: list[Any], width: int = 6) -> int:
     failed = 0
     for r in results:
-        print(f"{r.name:6s} {r.status.upper():8s} {r.summary}")
+        print(f"{r.name:{width}s} {r.status.upper():8s} {r.summary}")
         failed += r.status == "fail"
     return 1 if failed else 0
 
 
+BUNDLE_STEPS = "consistency,lint,sim,synth,xheep"
+
+
+def _verify_project(args: argparse.Namespace, path: Path) -> int:
+    from chipleap.rtl.verify import verify_project
+    from chipleap.verify.remote import Remote
+
+    remote = Remote.from_env(getattr(args, "remote", None), getattr(args, "remote_setup", None))
+    results = verify_project(
+        path,
+        steps=args.steps or "",
+        sim_tool=getattr(args, "sim_tool", None) or "",
+        synth_tool=getattr(args, "synth_tool", None) or "yosys",
+        pnr_tool=getattr(args, "pnr_tool", None) or "librelane",
+        remote=remote,
+    )
+    code = _print_steps(results, width=8)
+    out = path.parent / "build" / "verify"
+    print(f"\nWrote {out}/VERIFY.md, verify.json and report.html")
+    return code
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
+    from chipleap.rtl.project import find_project
     from chipleap.verify.remote import Remote
     from chipleap.verify.run import verify_bundle
 
-    steps = tuple(s.strip() for s in args.steps.split(",") if s.strip())
+    project = find_project(args.bundle)
+    if project is not None:
+        return _verify_project(args, project)
+    steps = tuple(s.strip() for s in (args.steps or BUNDLE_STEPS).split(",") if s.strip())
     if "all" in steps:
         # Place and route takes many minutes, so it runs only when asked for.
         steps = ("consistency", "lint", "sim", "synth", "xheep", "pnr")
+    sim_tool = getattr(args, "sim_tool", None) or "verilator"
+    if sim_tool in ("icarus", "auto"):
+        raise ValueError(
+            "the accelerator's testbench runs on verilator, xcelium, vcs, questa or verilator-sv"
+        )
     remote = Remote.from_env(getattr(args, "remote", None), getattr(args, "remote_setup", None))
     results = verify_bundle(
         Path(args.bundle),
@@ -318,15 +349,64 @@ def cmd_verify(args: argparse.Namespace) -> int:
         fetch_xheep=args.fetch_xheep,
         cases=args.cases,
         seed=args.seed,
-        sim_tool=getattr(args, "sim_tool", "verilator"),
-        synth_tool=getattr(args, "synth_tool", "yosys"),
-        synth_tech=getattr(args, "synth_tech", "ihp-sg13g2"),
+        sim_tool=sim_tool,
+        synth_tool=getattr(args, "synth_tool", None) or "yosys",
+        synth_tech=getattr(args, "synth_tech", None) or "ihp-sg13g2",
         remote=remote,
-        pnr_tool=getattr(args, "pnr_tool", "librelane"),
+        pnr_tool=getattr(args, "pnr_tool", None) or "librelane",
     )
     code = _print_steps(results)
     print(f"\nWrote {args.bundle}/verify/VERIFY.md and verify.json")
     return code
+
+
+def _clock_arg(text: str) -> tuple[str, float]:
+    port, _, period = text.partition(":")
+    try:
+        return port, float(period or 10)
+    except ValueError:
+        raise ValueError(f"--clock {text!r}: give PORT or PORT:PERIOD_NS") from None
+
+
+def _reset_arg(text: str) -> tuple[str, bool]:
+    port, _, active = text.partition(":")
+    if active not in ("", "low", "high"):
+        raise ValueError(f"--reset {text!r}: give PORT, PORT:low or PORT:high")
+    from chipleap.rtl.project import active_low_by_name
+
+    return port, active == "low" if active else active_low_by_name(port)
+
+
+def cmd_project(args: argparse.Namespace) -> int:
+    from chipleap.rtl.project import init_project, load_project
+
+    if args.project_cmd == "init":
+        path, notes = init_project(
+            args.dir,
+            top=args.top,
+            sources=args.source,
+            filelist=args.filelist,
+            clocks=[_clock_arg(c) for c in args.clock],
+            resets=[_reset_arg(r) for r in args.reset],
+            tech=args.tech,
+            tests_dir=args.tests,
+            name=args.name,
+            force=args.force,
+        )
+        print(f"Wrote {path}")
+        for n in notes:
+            print(f"  {n}")
+        print(f"Next: chipleap verify {args.dir}")
+        return 0
+    p = load_project(args.path)
+    if args.json:
+        _print_json(p.to_dict())
+        return 0
+    import yaml
+
+    print(f"{p.file}: a valid project")
+    print(yaml.safe_dump(p.to_dict(), sort_keys=False, default_flow_style=None).rstrip())
+    return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -543,13 +623,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.set_defaults(func=cmd_generate)
 
-    s = sub.add_parser("verify", help="lint, simulate, synthesize and X-HEEP-check a bundle")
-    s.add_argument("bundle")
+    s = sub.add_parser(
+        "verify", help="check a generated bundle or an RTL project (lint, simulate, synthesize)"
+    )
+    s.add_argument("bundle", help="a bundle directory, or an RTL project (project.yaml)")
     s.add_argument(
         "--steps",
-        default="consistency,lint,sim,synth,xheep",
-        help="comma-separated steps; pnr (LibreLane place and route) is opt-in, and all "
-        "runs every step",
+        default=None,
+        help="comma-separated steps; for a bundle consistency,lint,sim,synth,xheep, for a "
+        "project lint,sim,coverage,synth; pnr (place and route) is opt-in, and all runs every "
+        "step",
     )
     s.add_argument("--xheep", help="X-HEEP checkout (default: CHIPLEAP_XHEEP_DIR or the cache)")
     s.add_argument("--fetch-xheep", action="store_true", help="clone the tested X-HEEP commit")
@@ -557,26 +640,28 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", type=int, default=0)
     s.add_argument(
         "--sim-tool",
-        default="verilator",
-        choices=["verilator", "xcelium", "vcs", "questa", "verilator-sv"],
-        help="simulator: Verilator (default), Cadence Xcelium, Synopsys VCS, Siemens Questa",
+        default=None,
+        choices=["verilator", "icarus", "auto", "xcelium", "vcs", "questa", "verilator-sv"],
+        help="simulator: Verilator (a bundle's default), Icarus (RTL projects), Cadence "
+        "Xcelium, Synopsys VCS, Siemens Questa; a project's default is its own",
     )
     s.add_argument(
         "--synth-tool",
-        default="yosys",
+        default=None,
         choices=["yosys", "genus", "dc"],
         help="synthesis: Yosys (default), Cadence Genus or Synopsys Design Compiler",
     )
     s.add_argument(
         "--synth-tech",
-        default="ihp-sg13g2",
-        help="technology whose liberty Genus or Design Compiler maps to (chipleap tech add)",
+        default=None,
+        help="technology whose liberty Genus or Design Compiler maps a bundle to (chipleap "
+        "tech add); a project uses its own",
     )
     s.add_argument(
         "--pnr-tool",
-        default="librelane",
+        default=None,
         choices=["librelane", "innovus"],
-        help="place and route: LibreLane (default) or Cadence Genus and Innovus on --synth-tech",
+        help="place and route: LibreLane (default) or Cadence Genus and Innovus",
     )
     s.add_argument("--remote", help="run the simulator and synthesis on this ssh host")
     s.add_argument(
@@ -584,6 +669,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="shell snippet that puts the tools on the path there (CHIPLEAP_REMOTE_SETUP)",
     )
     s.set_defaults(func=cmd_verify)
+
+    s = sub.add_parser("project", help="describe your own RTL as a project (project.yaml)")
+    psub = s.add_subparsers(dest="project_cmd", required=True)
+    t = psub.add_parser("init", help="write project.yaml for the RTL in a directory")
+    t.add_argument("dir", nargs="?", default=".")
+    t.add_argument("--top", help="top module (default: the one no source instantiates)")
+    t.add_argument("--source", action="append", default=[], help="source file or glob (repeatable)")
+    t.add_argument("--filelist", help="a .f filelist instead of --source")
+    t.add_argument(
+        "--clock", action="append", default=[], help="clock as PORT or PORT:PERIOD_NS (repeatable)"
+    )
+    t.add_argument(
+        "--reset", action="append", default=[], help="reset as PORT, PORT:low or PORT:high"
+    )
+    t.add_argument("--tech", default="ihp-sg13g2", help="technology key (chipleap tech list)")
+    t.add_argument("--tests", help="directory with the cocotb tests (default: test/ or tests/)")
+    t.add_argument("--name", help="project name (default: the top module)")
+    t.add_argument("--force", action="store_true", help="replace an existing project.yaml")
+    t.set_defaults(func=cmd_project)
+    t = psub.add_parser("check", help="read a project and show it with every default filled in")
+    t.add_argument("path", nargs="?", default=".")
+    t.add_argument("--json", action="store_true")
+    t.set_defaults(func=cmd_project)
 
     s = sub.add_parser("doctor", help="which tools ChipLeap can use here or on a server")
     s.add_argument("--remote", help="also list the commercial tools on this ssh host")

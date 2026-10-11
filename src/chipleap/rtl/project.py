@@ -381,7 +381,7 @@ def _parse_clocks(value: Any) -> tuple[Clock, ...]:
     return tuple(out)
 
 
-def _active_low_by_name(port: str) -> bool:
+def active_low_by_name(port: str) -> bool:
     return bool(re.search(r"(_n|_ni|n|_b)$", port))
 
 
@@ -395,7 +395,7 @@ def _parse_resets(value: Any) -> tuple[Reset, ...]:
         where = f"resets[{i}]"
         r = _mapping(r, where, ("port", "active", "sync"))
         port = _ident(r.get("port"), f"{where}.port")
-        active = r.get("active", "low" if _active_low_by_name(port) else "high")
+        active = r.get("active", "low" if active_low_by_name(port) else "high")
         if active not in ("low", "high"):
             raise ProjectError(f"{where}.active must be low or high")
         sync = r.get("sync", False)
@@ -770,7 +770,7 @@ def init_project(
     data["clocks"] = [{"port": p, "period_ns": float(t)} for p, t in clock_list]
     reset_list = list(resets)
     if not reset_list:
-        reset_list = [(p, _active_low_by_name(p)) for p in ports if _RESET_RE.match(p)][:1]
+        reset_list = [(p, active_low_by_name(p)) for p in ports if _RESET_RE.match(p)][:1]
         if reset_list:
             notes.append(
                 f"reset: {reset_list[0][0]}, active {'low' if reset_list[0][1] else 'high'}"
