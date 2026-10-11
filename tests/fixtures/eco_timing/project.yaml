@@ -5,7 +5,7 @@ schema: project/v1
 name: eco_timing
 top: mac
 sources: [rtl/mul.sv, rtl/mac.sv]
-clocks: [{port: clk_i, period_ns: 4.5}]
+clocks: [{port: clk_i, period_ns: 5.4}]
 resets: [{port: rst_ni, active: low}]
 tech: ihp-sg13g2
 pnr:
