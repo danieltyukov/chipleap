@@ -58,7 +58,7 @@ from chipleap.rtl.synth import (
 )
 from chipleap.rtl.vcd import read_trace
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import eqy, yosys
+from chipleap.verify.tools import eqy, solver_path, yosys
 
 PAIRS = ("rtl-synth", "synth-pnr")
 # Names that place and route and ABC make up: they mean different nets in two netlists.
@@ -289,12 +289,13 @@ def _run(cmd: list[str], cwd: Path, reads: list[Path]) -> str:
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=env,
+            env={**env, "PATH": solver_path(cmd[0])},
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
         )
+        confine.limit_memory(proc.pid)
         try:
             out, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:

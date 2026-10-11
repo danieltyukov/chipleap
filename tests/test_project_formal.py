@@ -7,7 +7,7 @@ import pytest
 
 from chipleap.rtl import formal
 from chipleap.rtl.project import FormalCheck, load_project
-from chipleap.verify.tools import sby, z3
+from chipleap.verify.tools import sby, solver_path, z3
 
 FIXTURE = Path(__file__).parent / "fixtures/formal/fifo.sv"
 PROJECT = """\
@@ -111,6 +111,28 @@ def test_the_log_gives_status_failures_and_covers(tmp_path):
         f"base: {src}:3: ERROR: syntax error\nDONE (ERROR, rc=16)\n", p, tmp_path, "x"
     )
     assert err["status"] == "error" and "syntax error" in err["error"]
+    oom = formal.parse_log(
+        'SBY 22:11:04 [prove] engine_0.basecase: Solver Error: (error "out of memory")\n'
+        "SBY 22:11:04 [prove] ERROR: engine_0: Engine terminated without status.\n"
+        "SBY 22:11:04 [prove] DONE (ERROR, rc=16)\n",
+        p,
+        tmp_path,
+        "prove",
+    )
+    assert oom["status"] == "error"
+    assert "Engine terminated" in oom["error"] and "CHIPLEAP_SOLVER_MEMORY_MB" in oom["error"]
+
+
+def test_the_z3_beside_sby_comes_first(tmp_path, monkeypatch):
+    # install_formal_tools.sh puts a newer z3 than the distributions' beside sby.
+    (tmp_path / "bin").mkdir()
+    for name, text in (("sby", "#!/bin/sh\n"), ("z3", "#!/bin/sh\necho Z3 version 4.15.8\n")):
+        (tmp_path / "bin" / name).write_text(text)
+        (tmp_path / "bin" / name).chmod(0o755)
+    monkeypatch.setenv("CHIPLEAP_SBY", str(tmp_path / "bin/sby"))
+    found = z3()
+    assert found.path == str(tmp_path / "bin/z3") and found.version == "4.15.8"
+    assert solver_path(found.path).startswith(f"{tmp_path / 'bin'}:")
 
 
 def test_without_a_section_or_a_tool_the_step_skips(tmp_path, monkeypatch):
@@ -146,6 +168,19 @@ def test_a_broken_fifo_has_a_counterexample(tmp_path):
     assert len(values["count"]) > n
     assert values["wptr"][n] != (values["rptr"][n] + values["count"][n]) % 4
     assert "fails in step" in r.summary and "rtl/fifo.sv" in r.summary
+
+
+@needs_sby
+def test_abc_pdr_proves_without_a_depth_and_refutes_the_broken_fifo(tmp_path):
+    pdr = "formal: {checks: [{name: pdr, engine: abc pdr}]}\n"
+    r = formal.formal(load_project(fifo_project(tmp_path / "good", pdr)))
+    assert r.status == "pass", r.summary
+    assert r.data["checks"][0]["depth"] is None and "pdr (prove, abc pdr)" in r.summary
+    r = formal.formal(load_project(fifo_project(tmp_path / "bad", pdr, broken=True)))
+    assert r.status == "fail", r.summary
+    (check,) = r.data["checks"]
+    # The counterexample needs yices; without it the failure is still a failure.
+    assert check["failures"] or "needs yices" in check["note"]
 
 
 @needs_sby

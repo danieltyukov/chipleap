@@ -35,7 +35,7 @@ from chipleap.rtl import quote as q
 from chipleap.rtl.project import FormalCheck, Project, ProjectError, active_low_by_name
 from chipleap.rtl.vcd import read_trace
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import sby
+from chipleap.verify.tools import sby, solver_path
 
 INSTALL_HINT = "scripts/install_formal_tools.sh, then CHIPLEAP_SBY"
 # "summary:   failed assertion fifo.p at /x/fifo.sv:40.5-40.63 in step 2"
@@ -48,6 +48,7 @@ _UNREACHED_RE = re.compile(r"Unreached cover statement at (.+?):(\d+)\.\d+-\d+\.
 _UNREACHED_ITEM_RE = re.compile(r"summary:\s+(\S+) at (.+?):(\d+)\.\d+-\d+\.\d+\s*$")
 _TRACE_RE = re.compile(r"summary: (?:(?:counterexample|cover) )?trace(?: \[(\w+)\])?: (\S+)")
 _DONE_RE = re.compile(r"DONE \((\w+), rc=\d+\)")
+_PDR_FAIL_RE = re.compile(r"summary: engine_\d+ \(abc pdr\) returned FAIL")
 _STATUS = {"PASS": "pass", "FAIL": "fail", "UNKNOWN": "unknown"}
 
 
@@ -157,10 +158,26 @@ def parse_log(text: str, project: Project, cwd: Path, name: str) -> dict[str, An
                 {"property": _property(m.group(3)), "file": file, "line": ln, "reached": False}
             )
     out["covers"].sort(key=lambda c: (c["file"], c["line"]))
+    if status == "error" and _PDR_FAIL_RE.search(text):
+        # abc pdr refuted an assertion; SymbiYosys writes its counterexample with yices.
+        out["status"] = "fail"
+        out["note"] = (
+            "abc pdr found an assertion that fails, but writing its counterexample needs "
+            "yices (yices-smt2 on the path); smtbmc z3 gives one too"
+        )
+        return out
     if status == "error":
         errors = [ln for ln in text.splitlines() if "ERROR" in ln and "DONE" not in ln]
         first = errors[0] if errors else (text.strip().splitlines() or ["no output"])[-1]
         first = re.sub(r"^SBY \S+ \[\S+\] ", "", first)
+        if 'error "out of memory"' in text:
+            cap = os.environ.get(confine.MEMORY_ENV, confine.SOLVER_MEMORY_MB)
+            first += (
+                f" (the solver ran out of memory: {confine.MEMORY_ENV} allows {cap} MB; z3 "
+                "4.8 can need far more than a newer one, see scripts/install_formal_tools.sh)"
+            )
+        elif "Unexpected EOF response from solver" in text:
+            first += " (the solver stopped without an answer: it crashed or was killed)"
         out["error"] = first.replace(str(project.root.resolve()) + "/", "")
     return out
 
@@ -172,12 +189,13 @@ def _run(cmd: list[str], cwd: Path, project: Project, workdir: Path) -> str:
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=env,
+            env={**env, "PATH": solver_path(cmd[0])},
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
         )
+        confine.limit_memory(proc.pid)
         try:
             out, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -227,7 +245,8 @@ def run_check(
     head = {
         "name": check.name,
         "mode": check.mode,
-        "depth": check.depth,
+        # abc pdr proves for every cycle: it has no depth.
+        "depth": None if check.engine == "abc pdr" else check.depth,
         "engine": check.engine,
         "top": check.top or project.top,
     }
@@ -274,9 +293,16 @@ def prove(project: Project, only: str = "") -> list[dict[str, Any]]:
 
 def _describe(r: dict[str, Any]) -> str:
     """One check's result in a phrase."""
-    label = f"{r['name']}" + (f" ({r['mode']} depth {r['depth']})" if r["mode"] else "")
+    if not r["mode"]:
+        label = r["name"]
+    elif r["engine"] == "abc pdr":  # proves for every cycle, with no depth to name
+        label = f"{r['name']} ({r['mode']}, abc pdr)"
+    else:
+        label = f"{r['name']} ({r['mode']} depth {r['depth']})"
     if r["status"] == "error":
         return f"{label}: error: {r.get('error', '')}"
+    if r.get("note"):
+        return f"{label}: {r['note']}"
     covers = r["covers"]
     reached = sum(c["reached"] for c in covers)
     if r["failures"]:

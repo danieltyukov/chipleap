@@ -38,7 +38,14 @@ from collections.abc import Iterable, Iterator, Sequence
 from functools import lru_cache
 from pathlib import Path
 
+try:
+    import resource
+except ImportError:  # Windows
+    resource = None  # type: ignore[assignment]
+
 ENV = "CHIPLEAP_CONFINE"
+MEMORY_ENV = "CHIPLEAP_SOLVER_MEMORY_MB"
+SOLVER_MEMORY_MB = 8192
 # Landlock's system calls have the same numbers on every Linux architecture.
 _CREATE_RULESET, _ADD_RULE, _RESTRICT_SELF = 444, 445, 446
 _CREATE_RULESET_VERSION = 1
@@ -158,6 +165,23 @@ def confined(
         rules = sorted({p for p in paths if os.path.exists(p)})
         launcher = [sys.executable, "-I", "-S", str(Path(__file__).resolve())]
         yield [*launcher, json.dumps(rules), "--", *cmd], {**env, "TMPDIR": tmp}
+
+
+def limit_memory(pid: int) -> None:
+    """Cap the address space of a process that runs solvers, and so of every process it
+    starts afterwards (SymbiYosys starts its solvers after Yosys has prepared the model).
+    A solver can grow without end on a proof: z3 4.8.12 took 14 GB for each of the base
+    case and the induction of the UART example's proof within ten minutes, and two of
+    them can take a workstation down. ``CHIPLEAP_SOLVER_MEMORY_MB`` sets the cap per
+    process (0 for none); a solver that reaches it stops and the run reports an error.
+    Linux only: elsewhere nothing is capped."""
+    megabytes = int(os.environ.get(MEMORY_ENV, SOLVER_MEMORY_MB))
+    prlimit = getattr(resource, "prlimit", None)
+    if megabytes <= 0 or prlimit is None:
+        return
+    limit = megabytes * 1024 * 1024
+    with contextlib.suppress(OSError):  # gone already: nothing to cap
+        prlimit(pid, resource.RLIMIT_AS, (limit, limit))
 
 
 def _restrict(paths: Iterable[str]) -> None:

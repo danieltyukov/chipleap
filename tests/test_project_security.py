@@ -530,6 +530,29 @@ def test_synthesis_cannot_read_a_memory_file_a_parameter_names(counter_project, 
     assert r.status == "fail" and "Can not open file" in r.summary, r.summary
 
 
+@pytest.mark.skipif(not hasattr(__import__("resource"), "prlimit"), reason="Linux only")
+def test_solvers_run_under_a_memory_cap(monkeypatch):
+    import resource
+    import sys
+
+    monkeypatch.setenv(confine.MEMORY_ENV, "512")
+    probe = "import resource; input(); print(resource.getrlimit(resource.RLIMIT_AS)[0])"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", probe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+    confine.limit_memory(proc.pid)
+    out, _ = proc.communicate("\n", timeout=30)
+    assert int(out) == 512 * 1024 * 1024
+    monkeypatch.setenv(confine.MEMORY_ENV, "0")  # no cap
+    before = resource.getrlimit(resource.RLIMIT_AS)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", probe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    )
+    confine.limit_memory(proc.pid)
+    out, _ = proc.communicate("\n", timeout=30)
+    assert int(out) == before[0]
+
+
 def test_a_script_tool_can_read_its_interpreter(tmp_path, monkeypatch):
     # sby and eqy are Python scripts: confined, they still need the Python that runs them.
     home = tmp_path / "home"

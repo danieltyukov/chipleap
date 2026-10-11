@@ -113,8 +113,23 @@ def eqy() -> Tool:
     )
 
 
+def solver_path(tool: str | None) -> str:
+    """The search path a formal tool's run gets: the tool's own directory first, where
+    scripts/install_formal_tools.sh puts a z3 newer than the distributions' (z3 4.8.12,
+    in Ubuntu 22.04 and 24.04, ran out of memory on the UART example's proof, which z3
+    4.15 finishes in a second), then the path."""
+    path = os.environ.get("PATH", "")
+    return f"{Path(tool).parent}{os.pathsep}{path}" if tool else path
+
+
 def z3() -> Tool:
-    return find("z3", ["--version"], r"Z3 version (\S+)", "SMT solver for formal and equivalence")
+    """The z3 SymbiYosys runs with: the one beside it, else the one on the path."""
+    beside = os.environ.get("CHIPLEAP_SBY") or shutil.which("sby")
+    path = shutil.which("z3", path=solver_path(beside))
+    purpose = "SMT solver for formal and equivalence"
+    if path is None:
+        return Tool("z3", None, "", purpose)
+    return Tool("z3", path, _version([path, "--version"], r"Z3 version (\S+)"), purpose)
 
 
 def slang() -> Tool:
