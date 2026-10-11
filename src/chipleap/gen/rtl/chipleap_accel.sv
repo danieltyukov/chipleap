@@ -806,12 +806,26 @@ module chipleap_accel #(
     // 16 + log2(V) bits. The result is sign-extended once, so no adder carries through
     // 32 bits of copies of the sign.
     localparam int unsigned PW = 16 + (V > 1 ? $clog2(V) : 0);
+    // The low b bits of x, sign-extended. A sum on level j of the tree fits in 16 + j bits,
+    // and each adder takes its operands cut to that width, so synthesis reads the adder's
+    // width off its own inputs. Left to Yosys, which narrows one adder at a time, an adder
+    // stays full width when it is visited before the adders that feed it, in an order that
+    // shifts with unrelated logic, and a tree of mixed widths is not merged into one
+    // carry-save sum: in LibreLane that stretched the GEMV 1 x 8 engine's datapath from
+    // 6.9 to 9.2 ns at the slow corner.
+    function automatic logic signed [PW-1:0] sx(input logic [PW-1:0] x, input int b);
+      logic [PW-1:0] y;
+      for (int k = 0; k < int'(PW); k++) y[k] = x[k < b ? k : b - 1];
+      return y;
+    endfunction
     always_comb begin
       for (int l = 0; l < int'(L); l++) begin
         logic signed [PW-1:0] t[V];
         for (int v = 0; v < int'(V); v++) t[v] = PW'(mul8(xq[v], wq[l][v]));
         for (int w = int'(V); w > 1; w = (w + 1) / 2) begin
-          for (int i = 0; i < w / 2; i++) t[i] = t[2*i] + t[2*i+1];
+          // With w sums left, each is a sum of V / w products: PW - log2(w) bits.
+          for (int i = 0; i < w / 2; i++)
+            t[i] = sx(t[2*i], PW - $clog2(w)) + sx(t[2*i+1], PW - $clog2(w));
           if (w % 2 == 1) t[w/2] = t[w-1];
         end
         dot[l] = 32'(t[0]);
