@@ -47,6 +47,7 @@ from typing import Any
 
 from chipleap.rtl import confine
 from chipleap.rtl import quote as q
+from chipleap.rtl.pnr import routed_run
 from chipleap.rtl.project import Project, ProjectError
 from chipleap.rtl.synth import (
     SynthError,
@@ -61,7 +62,6 @@ from chipleap.verify.result import StepResult
 from chipleap.verify.tools import eqy, yosys
 
 PAIRS = ("rtl-synth", "synth-pnr")
-RUN_TAG = "chipleap"
 # Names that place and route and ABC make up: they mean different nets in two netlists.
 AUTO_NAMES = ("_*_", "net*", "clknet_*")
 _UNPROVEN_RE = re.compile(r"Unproven \$equiv \S+: \\?(\S+?)_gold(?: \[(\d+)\])?\s")
@@ -78,12 +78,6 @@ class Side:
     label: str  # what the side is, for people
     script: list[str]  # Yosys commands that leave the side's top module in the design
     shown: list[str]  # the files it is made from, relative to the project
-
-
-def routed_run(project: Project) -> Path | None:
-    """The LibreLane run of ``chipleap verify --steps pnr``, if it finished."""
-    run = project.build_dir / "pnr" / "runs" / RUN_TAG
-    return run if (run / "final" / "nl" / f"{project.top}.nl.v").is_file() else None
 
 
 def _librelane_synth(run: Path, top: str) -> Path | None:

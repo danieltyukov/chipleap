@@ -31,6 +31,14 @@ from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane
 
 SDC_NAME = "chipleap.sdc"
+RUN_TAG = "chipleap"
+
+
+def routed_run(project: Project) -> Path | None:
+    """The LibreLane run of ``chipleap verify --steps pnr``, if it finished: its final
+    netlist is there. Equivalence and gate-level simulation read it."""
+    run = project.build_dir / "pnr" / "runs" / RUN_TAG
+    return run if (run / "final" / "nl" / f"{project.top}.nl.v").is_file() else None
 
 
 def sdc(project: Project) -> str:

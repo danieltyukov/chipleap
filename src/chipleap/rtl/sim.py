@@ -183,9 +183,12 @@ def manifest(
     coverage: bool = False,
     test_filter: str = "",
     stage: bool = False,
+    extra_args: tuple[str, ...] = (),
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The runner's manifest. With ``stage`` the sources, include directories, tests and
-    golden model are copied under ``workdir/src`` and named relative to it."""
+    golden model are copied under ``workdir/src`` and named relative to it. ``extra_args``
+    and ``env`` are more simulator options and environment (gate-level simulation's)."""
     tests_dir = project.tests.dir
     if tests_dir is None:
         raise SimError("the project has no tests (add a tests section)")
@@ -214,7 +217,13 @@ def manifest(
         build_args.append(f"-timescale={scale}")
     elif simulator == "questa":
         build_args += ["-timescale", scale]
-    env = {"COCOTB_ANSI_OUTPUT": "0"}
+    build_args += list(extra_args)
+    run_env = {
+        "COCOTB_ANSI_OUTPUT": "0",
+        # A test can read the project's parameters here, also on a netlist that has none.
+        "CHIPLEAP_PARAMETERS": json.dumps(project.parameters, sort_keys=True),
+        **(env or {}),
+    }
     return {
         "simulator": simulator,
         "sources": [name(s) for s in (*project.sources, *project.tests.sources)],
@@ -231,7 +240,7 @@ def manifest(
         "test_filter": test_filter,
         "python_path": py_path,
         "golden": name(project.golden) if project.golden is not None else "",
-        "env": env,
+        "env": run_env,
     }
 
 
@@ -340,6 +349,8 @@ def run_tests(
     test_filter: str = "",
     remote: Remote | None = None,
     workdir: Path | None = None,
+    extra_args: tuple[str, ...] = (),
+    env: dict[str, str] | None = None,
 ) -> SimRun:
     """Build the project and run its cocotb tests. Raises SimError when they cannot run
     at all (no cocotb, no simulator, no tests); a failing build or test is a result."""
@@ -360,7 +371,16 @@ def run_tests(
     tool_version = _open_tool(key).version if key in OPEN else ""
     work = project.work_dir(workdir or ("coverage" if coverage else f"sim-{key}"), empty=True)
     staged = remote is not None
-    m = manifest(project, key, work, coverage=coverage, test_filter=test_filter, stage=staged)
+    m = manifest(
+        project,
+        key,
+        work,
+        coverage=coverage,
+        test_filter=test_filter,
+        stage=staged,
+        extra_args=extra_args,
+        env=env,
+    )
     (work / "manifest.json").write_text(json.dumps(m, indent=1))
     (work / RUNNER).write_text(resources.files("chipleap.rtl").joinpath(RUNNER).read_text())
     timeout = float(os.environ.get("CHIPLEAP_SIM_TIMEOUT", "1800"))
