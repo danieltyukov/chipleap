@@ -1,0 +1,30 @@
+{
+  "data": {
+    "decks": [
+      "main",
+      "extra",
+      "antenna"
+    ],
+    "violations": 0
+  },
+  "engineering": {
+    "status": "pass",
+    "summary": "IHP KLayout DRC decks main, extra, antenna: 0 violations"
+  },
+  "inputs": [
+    {
+      "path": "strongarm.gds",
+      "sha256": "c1da3801ba455aa531b50cb66096428d5146b04e36a094f85a9edeed92a0c391"
+    }
+  ],
+  "operation": "drc",
+  "pdk": {
+    "commit": "22f2a25f1734796de3debbbf29cf697cbbc54081",
+    "name": "ihp-sg13g2"
+  },
+  "schema": "macro.evidence/v1",
+  "tool": {
+    "name": "klayout",
+    "version": "0.30.7"
+  }
+}

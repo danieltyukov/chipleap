@@ -46,7 +46,8 @@ jobs:
     env:
       SV2V_VERSION: v0.0.13
       # The open IHP PDK commit whose typical-corner liberty the RTL project tests
-      # synthesize to; only that file is fetched, nothing is committed.
+      # synthesize to, and whose IO library LEF the chip tests read; only those files
+      # are fetched, nothing is committed.
       IHP_PDK_COMMIT: 22f2a25f1734796de3debbbf29cf697cbbc54081
     steps:
       - uses: actions/checkout@v7
@@ -92,8 +93,16 @@ jobs:
             curl -sSfL -o "$cells/verilog/$f" "$url/verilog/$f"
           done
           echo "CHIPLEAP_LIBERTY=$cells/lib/sg13g2_stdcell_typ_1p20V_25C.lib" >> "$GITHUB_ENV"
-      - name: RTL projects (cocotb, lint, synthesis, formal, CDC, equivalence, gate level)
-        run: pytest tests/test_project*.py tests/test_vcd.py tests/test_tool_path.py -v
+      # The chip tests check IHP's own IO library against what the floorplan expects.
+      - name: Fetch IHP's IO library LEF
+        run: |
+          io="$RUNNER_TEMP/ihp/sg13g2_io"
+          mkdir -p "$io"
+          curl -sSfL -o "$io/sg13g2_io.lef" \
+            "https://raw.githubusercontent.com/IHP-GmbH/IHP-Open-PDK/${IHP_PDK_COMMIT}/ihp-sg13g2/libs.ref/sg13g2_io/lef/sg13g2_io.lef"
+          echo "CHIPLEAP_IO_LEF=$io/sg13g2_io.lef" >> "$GITHUB_ENV"
+      - name: RTL projects (cocotb, lint, synthesis, formal, CDC, equivalence, gate level, chips)
+        run: pytest tests/test_project*.py tests/test_vcd.py tests/test_tool_path.py tests/test_chip*.py -v
       - name: Verify the example RTL project
         run: chipleap verify examples/uart --steps lint,sim,formal,cdc,synth,equiv
       - uses: actions/upload-artifact@v7

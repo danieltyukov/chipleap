@@ -1,0 +1,22 @@
+* strongarm: netlist for LVS written by aispice 0.2.0, in the CDL form IHP's
+* KLayout LVS deck reads. The extracted netlist is strongarm.pex.spice.
+.subckt strongarm clk inm inp outn outp vdd vss
+*.PININFO clk:I inm:I inp:I outn:O outp:O vdd:B vss:B
+MM0 s clk vss vss sg13_lv_nmos w=4u l=0.13u ng=1 m=1
+MM1 xp inp s vss sg13_lv_nmos w=4u l=0.13u ng=1 m=1
+MM2 xn inm s vss sg13_lv_nmos w=4u l=0.13u ng=1 m=1
+MM3 outn outp xp vss sg13_lv_nmos w=2u l=0.13u ng=1 m=1
+MM4 outp outn xn vss sg13_lv_nmos w=2u l=0.13u ng=1 m=1
+MM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1
+MM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1
+MM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u ng=1 m=1
+MM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u ng=1 m=1
+MM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u ng=1 m=1
+MM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u ng=1 m=1
+Mpair_dummy1 s vss s vss sg13_lv_nmos w=2u l=0.13u ng=1 m=1
+Mpair_dummy2 s vss s vss sg13_lv_nmos w=2u l=0.13u ng=1 m=1
+Mlatch_n_dummy1 xp vss xp vss sg13_lv_nmos w=1u l=0.13u ng=1 m=1
+Mlatch_n_dummy2 xp vss xp vss sg13_lv_nmos w=1u l=0.13u ng=1 m=1
+Mlatch_n_dummy3 xn vss xn vss sg13_lv_nmos w=1u l=0.13u ng=1 m=1
+Mlatch_n_dummy4 xn vss xn vss sg13_lv_nmos w=1u l=0.13u ng=1 m=1
+.ends strongarm

@@ -69,6 +69,8 @@ For RTL the user wrote (a project with a `project.yaml`, see [projects.md](proje
 | `equivalence_rtl` | project, check | each pair (`rtl-synth`, `synth-pnr`) proved, bounded, differs (with a counterexample from reset), skipped or error, with the points matched and proved |
 | `cdc_rtl` | project | domains, crossings and findings: rule, severity, source and destination registers and domains, the path; accepted synchronizers, handshakes, gray-coded pointers and FIFO memories |
 | `gate_sim_rtl` | project, tests | the cocotb tests on the routed netlist with SDF (or the synthesized one), as `simulate_rtl` reports them, and what Icarus said about the SDF |
+| `plan_chip` | project | the floorplan of the project's chip section: die, core, every pad with its bond map number, side, net, IO cell and bond pad centre, and where each macro goes; runs no tool |
+| `assemble_chip` | project | the whole chip built and checked ([chips.md](chips.md)): LibreLane's routing results, IHP's LVS and DRC (violations by rule), the supply hookup per side, the precheck's verdicts, the macros' warnings and where the GDS and bond map are |
 | `coverage_gaps` | project, file, kinds, limit, context | the points the last coverage run never reached, by source line with the lines around each, and the project's test functions |
 | `dft_rtl` | project | scan chains (length, ports, clock), flip-flops scanned, Fault's stuck-at coverage and pattern count, the flush and pattern simulation on the scan and routed netlists, the pattern files |
 | `power_rtl` | project, corners | per corner and group, power from the tests' activity on the gate-level netlist and the vectorless figure; pins annotated; the gate-level test results |

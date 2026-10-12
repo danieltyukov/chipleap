@@ -1,0 +1,34 @@
+{
+  "artifacts": [
+    {
+      "path": "strongarm.specs.toml",
+      "sha256": "252f501b28924f0134214a9f8880118f6615da635750d767cd429b5f85a84f7b"
+    }
+  ],
+  "data": {
+    "corners": [
+      "tt/27C"
+    ],
+    "simulator": "ngspice"
+  },
+  "engineering": {
+    "status": "pass",
+    "summary": "2 specs at 1 corners after layout, every value within its limits"
+  },
+  "inputs": [
+    {
+      "path": "strongarm.pex.spice",
+      "sha256": "8b20022635394f6c4f04e0e153fc9fc520910fbe27418ac1a02614e0c4235767"
+    }
+  ],
+  "operation": "sim",
+  "pdk": {
+    "commit": "22f2a25f1734796de3debbbf29cf697cbbc54081",
+    "name": "ihp-sg13g2"
+  },
+  "schema": "macro.evidence/v1",
+  "tool": {
+    "name": "ngspice",
+    "version": "-"
+  }
+}
