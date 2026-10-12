@@ -21,10 +21,10 @@ scripts (Yosys, Tcl), on tool command lines and in results an assistant reads. S
   define values a short literal; paths may not hold characters a script language reads
   as syntax. Such values are refused here, not escaped later.
 
-Later milestones add sections (formal properties, macros, a pad ring). Their names are
-reserved here and rejected with a message that says so. To add one: a frozen dataclass
-and a ``_parse_<name>`` function, a field on ``Project`` with a default, an entry in
-``SECTIONS``, and the key removed from ``RESERVED``.
+Later milestones add sections. Their names are reserved here and rejected with a
+message that says so. To add one: a frozen dataclass and a ``_parse_<name>`` function, a
+field on ``Project`` with a default, an entry in ``SECTIONS``, and the key removed from
+``RESERVED``.
 """
 
 from __future__ import annotations
@@ -79,9 +79,12 @@ CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LIBRELANE_VALUE_RE = re.compile(r"[A-Za-z0-9_./:+ -]*")
 ALLOW_ENV = "CHIPLEAP_ALLOW_PATHS"
 # Sections later milestones will read. A file written for them fails clearly here.
-RESERVED = {
-    "macros": "D3",
-}
+RESERVED: dict[str, str] = {}
+# An SRAM of the PDK the RTL instantiates: the PDK's single-port macros by their names.
+SRAM_CELL_RE = re.compile(r"RM_IHPSG13_1P_[1-9][0-9]{1,4}x[1-9][0-9]?_c[1-9](_bm_bist)?")
+MACRO_DEPTH_MAX = 8  # levels of hierarchy down to a macro's instance
+# Macro coordinates are on the manufacturing grid, 5 nm.
+GRID_NM = 5
 # IHP SG13G2's corners by short name: the liberty's suffix.
 CORNERS = {"typ": "typ_1p20V_25C", "slow": "slow_1p08V_125C", "fast": "fast_1p32V_m40C"}
 CLOCK_MIXING = ("no_mix", "clock_mix")
@@ -298,6 +301,31 @@ class GateSimConfig:
 
 
 @dataclass(frozen=True)
+class SramMacro:
+    """An SRAM macro of the PDK the RTL instantiates (``macros``): the instance's path
+    (``u_core/u_mem``), its cell, where its lower left goes in the core in um (None:
+    ChipLeap places it) and its orientation."""
+
+    instance: str
+    cell: str
+    at_um: tuple[float, float] | None = None
+    orientation: str = "N"
+
+    @property
+    def flat(self) -> str:
+        """The instance's name in a flattened netlist: the path with ``.``."""
+        return self.instance.replace("/", ".")
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"instance": self.instance, "cell": self.cell}
+        if self.at_um is not None:
+            out["at_um"] = list(self.at_um)
+        if self.orientation != "N":
+            out["orientation"] = self.orientation
+        return out
+
+
+@dataclass(frozen=True)
 class Project:
     root: Path  # the directory of the project file; relative paths start here
     file: Path
@@ -330,6 +358,7 @@ class Project:
     ir_drop: IrDropConfig = field(default_factory=IrDropConfig)
     upf: UpfConfig | None = None
     eco: tuple[EcoChange, ...] = ()
+    macros: tuple[SramMacro, ...] = ()
 
     @property
     def build_dir(self) -> Path:
@@ -538,6 +567,8 @@ class Project:
             out["upf"] = {"domains": domains}
         if self.eco:
             out["eco"] = [c.to_dict() for c in self.eco]
+        if self.macros:
+            out["macros"] = [m.to_dict() for m in self.macros]
         if self.chip is not None:
             out["chip"] = _chip_dict(self.chip, self.rel)
         return out
@@ -1497,6 +1528,57 @@ def _chip_pad(value: Any, where: str) -> Pad:
     return Pad("analog", _ident(a["analog"], f"{where}.analog"), resistor)
 
 
+def _parse_macros(value: Any) -> tuple[SramMacro, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ProjectError("macros must be a list of {instance, cell, at_um, orientation}")
+    if len(value) > MACROS_MAX:
+        raise ProjectError(f"macros: at most {MACROS_MAX} macros")
+    out: list[SramMacro] = []
+    for i, m in enumerate(value):
+        where = f"macros[{i}]"
+        m = _mapping(m, where, ("instance", "cell", "at_um", "orientation"))
+        inst = m.get("instance")
+        if (
+            not isinstance(inst, str)
+            or not INSTANCE_PATH_RE.fullmatch(inst)
+            or inst.count("/") >= MACRO_DEPTH_MAX
+        ):
+            raise ProjectError(
+                f"{where}.instance must be the instance's path, identifiers joined by / "
+                f"(u_core/u_mem), at most {MACRO_DEPTH_MAX} levels"
+            )
+        if inst in {x.instance for x in out}:
+            raise ProjectError(f"{where}.instance: {inst} is listed twice")
+        cell = m.get("cell")
+        if not isinstance(cell, str) or not SRAM_CELL_RE.fullmatch(cell):
+            raise ProjectError(
+                f"{where}.cell must name one of IHP's single-port SRAMs "
+                "(RM_IHPSG13_1P_<words>x<bits>_c<n>[_bm_bist])"
+            )
+        orient = _choice(m.get("orientation", "N"), ORIENTATIONS, f"{where}.orientation")
+        at = None
+        if m.get("at_um") is not None:
+            raw = m["at_um"]
+            if not isinstance(raw, list) or len(raw) != 2:
+                raise ProjectError(f"{where}.at_um must be [x, y] in um from the core's corner")
+            vals = []
+            for k, v in enumerate(raw):
+                if (
+                    isinstance(v, bool)
+                    or not isinstance(v, (int, float))
+                    or not (0 <= v <= CORE_MAX_UM)
+                ):
+                    raise ProjectError(f"{where}.at_um[{k}] must be from 0 to {CORE_MAX_UM:g}")
+                if round(v * 1000) % GRID_NM or abs(v * 1000 - round(v * 1000)) > 1e-6:
+                    raise ProjectError(f"{where}.at_um[{k}] must be on the {GRID_NM} nm grid")
+                vals.append(float(v))
+            at = (vals[0], vals[1])
+        out.append(SramMacro(inst, cell, at, orient))
+    return tuple(out)
+
+
 def _parse_chip(value: Any, paths: _Paths, top: str) -> ChipConfig | None:
     if value is None:
         return None
@@ -1661,6 +1743,7 @@ SECTIONS = (
     "ir_drop",
     "upf",
     "eco",
+    "macros",
     "chip",
 )
 
@@ -1764,6 +1847,7 @@ def parse_project(
         ir_drop=_parse_ir_drop(data.get("ir_drop")),
         upf=_parse_upf(data["upf"]) if "upf" in data else None,
         eco=_parse_eco(data.get("eco")),
+        macros=_parse_macros(data.get("macros")),
     )
 
 

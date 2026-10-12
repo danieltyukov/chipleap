@@ -27,6 +27,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from chipleap.rtl import macros
 from chipleap.rtl.diag import PARSERS, Diagnostic, relative
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
@@ -215,12 +216,23 @@ def manifest(
         "CHIPLEAP_PARAMETERS": json.dumps(project.parameters, sort_keys=True),
         **(env or {}),
     }
+    # The SRAM macros: the PDK's models, behavioural under FUNCTIONAL, in the work
+    # directory, so they travel with it and name no file outside it.
+    try:
+        models = [
+            m.relative_to(workdir.resolve()).as_posix() for m in macros.models(project, workdir)
+        ]
+    except macros.MacroStepError as exc:
+        raise SimError(str(exc)) from exc
+    defines: dict[str, Any] = {k: (1 if v is None else v) for k, v in project.defines.items()}
+    if models:
+        defines.setdefault("FUNCTIONAL", 1)
     return {
         "simulator": simulator,
-        "sources": [name(s) for s in (*project.sources, *project.tests.sources)],
+        "sources": [*models, *(name(s) for s in (*project.sources, *project.tests.sources))],
         "includes": [name(d) for d in project.include_dirs],
         # cocotb writes NAME=VALUE; a bare define is defined as 1.
-        "defines": {k: (1 if v is None else v) for k, v in project.defines.items()},
+        "defines": defines,
         "parameters": dict(project.parameters),
         "toplevel": project.tests.toplevel,
         "modules": list(project.tests.modules),

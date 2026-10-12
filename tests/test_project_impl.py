@@ -27,9 +27,8 @@ def test_defaults_without_sections(counter_project):
     assert p.dft is None and p.upf is None and p.eco == ()
     assert p.power == PowerConfig() and p.ir_drop == IrDropConfig()
     assert p.power.corners == ("typ",) and p.power.netlist == "auto"
-    for key in ("dft", "power", "ir_drop", "upf", "eco"):
+    for key in ("dft", "power", "ir_drop", "upf", "eco", "macros"):
         assert key not in RESERVED and key not in p.to_dict()
-    assert RESERVED["macros"] == "D3"  # part a reads it
 
 
 def test_dft_section(counter_project):

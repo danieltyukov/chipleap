@@ -15,14 +15,22 @@ project lists; inputs and outputs are timed against the first clock.
 The LibreLane wrapper mounts only the run directory into its container, so the RTL is
 copied into it: one sv2v output with includes and defines resolved when sv2v is
 installed, else the sources and include directories as they are.
+
+A project with SRAM macros (``macros``) gets their views from the PDK, copied beside the
+run, and a floorplan of ChipLeap's: the die sized from the macros and the cells' area at
+the project's utilisation, the macros in rows above and below the logic
+(``chipleap.macro.place``), or, with ``pnr.die_um``, where each macro's ``at_um`` puts it.
+The power grid is LibreLane's with a macro grid over each SRAM (``chipleap.macro.grid``).
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from chipleap.rtl import builddir
+from chipleap.macro import grid, place, sram
+from chipleap.rtl import builddir, macros
 from chipleap.rtl import quote as q
 from chipleap.rtl.openroad import ECO_MANIFEST, PNR_MANIFEST, RUN_TAG
 from chipleap.rtl.project import Project, runs_tools
@@ -173,7 +181,79 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
     cfg.update(verilog_config(project, workdir))
     if project.parameters:
         cfg["SYNTH_PARAMETERS"] = [f"{k}={v}" for k, v in project.parameters.items()]
+    if project.macros:
+        cfg.update(macro_config(project, workdir))
     return _finish(project, workdir, cfg)
+
+
+def _cell_area(project: Project, workdir: Path) -> float:
+    """The standard cells' area, from a synthesis of the project of its own."""
+    from chipleap.rtl.synth import SynthUnavailable, synthesize
+
+    try:
+        return synthesize(project, workdir / "estimate").area_um2
+    except (SynthError, SynthUnavailable) as exc:
+        raise PnrError(f"sizing the die around the macros needs a synthesis: {exc}") from exc
+
+
+def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
+    """LibreLane's settings for the project's SRAM macros: their views, the floorplan
+    around them and the power grid over them, written into ``workdir``."""
+    try:
+        _, views = macros.views(project, workdir)
+    except macros.MacroStepError as exc:
+        raise PnrError(str(exc)) from exc
+    sizes = {
+        m.flat: place.Macro(m.flat, views[m.cell].view.width, views[m.cell].view.height)
+        for m in project.macros
+    }
+    try:
+        if project.pnr.die_um:
+            missing = [m.instance for m in project.macros if m.at_um is None]
+            if missing:
+                raise PnrError(
+                    f"with pnr.die_um every macro needs its at_um ({', '.join(missing)}); or "
+                    "leave die_um out and ChipLeap sizes the die and places them"
+                )
+            fp = place.given(
+                project.pnr.die_um,
+                [(sizes[m.flat], *m.at_um, m.orientation) for m in project.macros if m.at_um],
+            )
+        else:
+            placed = [m.instance for m in project.macros if m.at_um is not None]
+            if placed:
+                raise PnrError(
+                    f"at_um ({', '.join(placed)}) needs pnr.die_um: a die of your own size; "
+                    "without it ChipLeap sizes the die and places every macro"
+                )
+            fp = place.rows(
+                list(sizes.values()),
+                _cell_area(project, workdir),
+                project.pnr.utilisation / 100,
+            )
+        cell = {m.flat: m.cell for m in project.macros}
+        script = grid.core_script(
+            [
+                grid.Placement(p.instance, views[cell[p.instance]].view, p.x, p.y, p.orient)
+                for p in fp.macros
+            ],
+            fp.core[1],
+        )
+    except (place.PlaceError, grid.GridError) as exc:
+        raise PnrError(f"macros: {exc}") from exc
+    builddir.write_text(workdir, "pdn.tcl", script)
+    entries, _ = sram.librelane_macros(
+        views, [(p.instance, cell[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
+    )
+    return {
+        "FP_SIZING": "absolute",
+        "DIE_AREA": [0, 0, *fp.die],
+        "CORE_AREA": list(fp.core),
+        "MACROS": entries,
+        "PDN_CFG": "dir::pdn.tcl",
+        "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
+        "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
+    }
 
 
 def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -189,16 +269,18 @@ def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, A
         (workdir / SDC_NAME).write_text(sdc(project))
     cfg["PNR_SDC_FILE"] = f"dir::{SDC_NAME}"
     cfg["SIGNOFF_SDC_FILE"] = f"dir::{SDC_NAME}"
-    cfg["FP_CORE_UTIL"] = project.pnr.utilisation
     cfg["PL_TARGET_DENSITY_PCT"] = project.pnr.density
-    if project.pnr.die_um:
+    if not project.macros:
+        cfg["FP_CORE_UTIL"] = project.pnr.utilisation
+    if project.pnr.die_um and not project.macros:
         w, h = project.pnr.die_um
         cfg["FP_SIZING"] = "absolute"
         cfg["DIE_AREA"] = [0, 0, w, h]
     cfg.update(signoff(*margins(project)))
     cfg.update(project.pnr.librelane)
     # LibreLane hands these values to Tcl; refuse any a Tcl word could not hold as text.
-    for value in cfg.values():
+    # The macros' entries are ChipLeap's own: checked names and paths it wrote.
+    for value in (v for k, v in cfg.items() if k != "MACROS"):
         for item in value if isinstance(value, list) else [value]:
             if isinstance(item, str):
                 try:
@@ -220,17 +302,27 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     # finished: later steps reuse only what it records.
     unseal(work, PNR_MANIFEST)
     unseal(work, ECO_MANIFEST)
+    if (why := macros.unsupported(project, "dft")) and project.dft and project.dft.insert:
+        raise PnrError(f"scan insertion (dft.insert): {why}")
     cfg = config(project, work)
     metrics, gds = run_librelane(work, cfg, RUN_TAG)
-    seal_routed(work)
+    seal_routed(work, bool(project.macros))
     clk = project.fastest_clock
-    return parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds)
+    r = parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds)
+    if not project.macros:
+        return r
+    area = macros.area_um2(project) or 0.0
+    return replace(r, macros=tuple((m.flat, m.cell) for m in project.macros), macro_um2=area)
 
 
-def seal_routed(work: Path) -> Sealed:
+def seal_routed(work: Path, with_macros: bool = False) -> Sealed:
     """Record the routed run in ``work`` (``build/pnr``): the configuration, the
-    constraints and sources ChipLeap copied beside it, and LibreLane's run directory."""
-    return seal(work, PNR_MANIFEST, "pnr", ["config.json", SDC_NAME, "src", f"runs/{RUN_TAG}"])
+    constraints and sources ChipLeap copied beside it (and the macros' views and their
+    power grid), and LibreLane's run directory."""
+    extra = ["macros", "pdn.tcl"] if with_macros else []
+    return seal(
+        work, PNR_MANIFEST, "pnr", ["config.json", SDC_NAME, "src", *extra, f"runs/{RUN_TAG}"]
+    )
 
 
 def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
@@ -261,6 +353,14 @@ def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
         "max_cap_violations": count("design__max_cap_violation__count"),
         "power_mw": round(r.power_mw, 4),
         "gds": project.rel(r.gds) if r.gds else None,
+        **(
+            {
+                "macros": [{"instance": i, "cell": c} for i, c in r.macros],
+                "macro_um2": round(r.macro_um2),
+            }
+            if r.macros
+            else {}
+        ),
     }
 
 
@@ -282,9 +382,12 @@ def pnr(project: Project) -> StepResult:
         checks = f"{r.drc_errors} DRC, {r.lvs_errors} LVS and {r.antenna_nets} antenna violations"
     clk = project.fastest_clock
     clock = f"{r.clock_mhz:g} MHz on {clk.port}" if clk else f"a {r.clock_mhz:g} MHz virtual clock"
+    srams = ""
+    if r.macros:
+        srams = f" and {len(r.macros)} SRAM macro{'s' if len(r.macros) != 1 else ''}"
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.4f} mm2 core at "
-        f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock} "
+        f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells{srams}; {clock} "
         f"{'met' if met else 'missed'} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
         f"and about {r.fmax_mhz:.0f} MHz at the typical one); {checks}"
     )

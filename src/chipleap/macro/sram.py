@@ -192,19 +192,33 @@ def _buses(view: MacroView) -> list[tuple[str, str, int]]:
     return out
 
 
+def _module(cell: str, ports: list[tuple[str, str, int]], source: str) -> str:
+    lines = [
+        f"// Written by ChipLeap from {source}: the macro's ports, for lint and synthesis.",
+        "/* verilator lint_off UNUSEDSIGNAL */",
+        "/* verilator lint_off UNDRIVEN */",
+        "(* blackbox *)",
+        f"module {cell} ({', '.join(name for name, _, _ in ports)});",
+        *(f"  {d} {f'[{w - 1}:0] ' if w else ''}{n};" for n, d, w in ports),
+        "endmodule",
+        "/* verilator lint_on UNDRIVEN */",
+        "/* verilator lint_on UNUSEDSIGNAL */",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def blackbox(view: MacroView) -> str:
     """The macro as an empty module with its LEF's signal ports, for LibreLane's linter
     and synthesis (``vh`` in ``MACROS``); the netlist then keeps it as an instance."""
-    ports = _buses(view)
-    lines = [
-        "// Written by ChipLeap from the macro's LEF: its ports, for lint and synthesis.",
-        "(* blackbox *)",
-        f"module {view.cell} ({', '.join(name for name, _, _ in ports)});",
-    ]
-    for name, direction, width in ports:
-        lines.append(f"  {direction} {f'[{width - 1}:0] ' if width else ''}{name};")
-    lines.append("endmodule")
-    return "\n".join(lines) + "\n"
+    return _module(view.cell, _buses(view), "its LEF")
+
+
+def stub(s: Sram) -> str:
+    """The same module from the macro's name alone (``ports``), where the PDK is not
+    needed: a project's lint and synthesis."""
+    if NAME_RE.fullmatch(s.cell) is None:
+        raise SramError(f"{s.cell[:64]!r} is not a single-port SRAM of {LIBRARY}")
+    return _module(s.cell, ports(s), "its name")
 
 
 def ports(sram: Sram) -> list[tuple[str, str, int]]:

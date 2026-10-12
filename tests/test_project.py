@@ -101,7 +101,7 @@ def test_full_project(rtl):
     ("change", "message"),
     [
         ({"speed": 1}, "unknown top-level keys: speed"),
-        ({"macros": {}}, "macros: reserved for a later version of ChipLeap (D3)"),
+        ({"macros": {}}, "macros must be a list of {instance, cell, at_um, orientation}"),
         ({"chip": {}}, "chip.pads: needs at least one vdd, vss, iovdd, iovss pad"),
         ({"schema": "project/v9"}, "schema 'project/v9' is not supported"),
         ({"top": "2bad"}, "top must be a Verilog identifier"),

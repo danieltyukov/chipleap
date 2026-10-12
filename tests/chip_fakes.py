@@ -228,4 +228,6 @@ def sram_1p(
         (lib / "lib" / f"{cell}_{corner}.lib").write_text(f"library ({cell}_{corner}) {{ }}\n")
     (lib / "cdl" / f"{cell}.cdl").write_text(f".SUBCKT {cell} A_CLK VDD! VSS!\n.ENDS\n")
     (lib / "verilog" / f"{cell}.v").write_text(f"module {cell} ();\nendmodule\n")
+    core = "RM_IHPSG13_1P_core_behavioral" + ("_bm_bist" if bm else "")
+    (lib / "verilog" / f"{core}.v").write_text(f"module {core} ();\nendmodule\n")
     return cell
