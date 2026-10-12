@@ -249,6 +249,8 @@ def core_ports(project: Project, workdir: Path) -> dict[str, Port]:
     top = q.plain(project.top)
     script = [
         *read_commands(project, files, raw),
+        # Every module of the core, for the check that no macro shares a name with one.
+        "tee -q -o core_modules.txt ls",
         f"blackbox {top}",
         f"hierarchy -top {top}",
         f"write_json {q.yosys(out)}",
@@ -279,6 +281,16 @@ def core_ports(project: Project, workdir: Path) -> dict[str, Port]:
     if out.stat().st_size > PORTS_JSON_MAX:
         raise NetlistError("Yosys's port list is larger than expected")
     return parse_ports(json.loads(out.read_text()), project.top)
+
+
+def core_modules(workdir: Path) -> list[str]:
+    """The core's modules that ``core_ports`` listed, as the source names them."""
+    from chipleap.chip.merge import yosys_modules
+
+    path = workdir / "core_modules.txt"
+    if not path.is_file() or path.stat().st_size > PORTS_JSON_MAX:
+        raise NetlistError("Yosys did not list the core's modules")
+    return yosys_modules(path.read_text(errors="replace"))
 
 
 # Binding

@@ -18,11 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.chip import checks, floorplan, flow, io, netlist, pdn
+from chipleap.chip import checks, floorplan, flow, io, merge, netlist, pdn
 from chipleap.chip.checks import CheckError
 from chipleap.chip.config import ChipConfig
 from chipleap.chip.floorplan import Floorplan, FloorplanError
 from chipleap.chip.io import IoError
+from chipleap.chip.merge import MergeError
 from chipleap.chip.netlist import NetlistError
 from chipleap.chip.pdn import PdnError
 from chipleap.chip.run import ToolError, klayout, plain, private_dir, python_with_klayout, run
@@ -42,6 +43,7 @@ BOND_SIZE = "70u"  # IHP's bondpad pcell, square
 SEAL_EDGE_UM = 25  # the seal ring pcell's edge box on each side, outside its w and l
 ERRORS = (
     MacroImportError,
+    MergeError,
     NetlistError,
     FloorplanError,
     PdnError,
@@ -148,7 +150,8 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     cells = io.read_lef(io.lef_path(pdk).read_text())
     commit = io.pdk_commit(pdk)
     spec = f"ihp-sg13g2@{commit}" if commit else "ihp-sg13g2"
-    ports = netlist.core_ports(project, builddir.work_dir(work, "ports"))
+    ports_dir = builddir.work_dir(work, "ports")
+    ports = netlist.core_ports(project, ports_dir)
     flow_dir = builddir.work_dir(work, "flow")
     verilog = verilog_config(project, flow_dir)
     reserved = layer.reserved_names(pdk, (chip.name, project.top))
@@ -169,6 +172,12 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     plan = floorplan.plan(chip, cells, sizes, binding.directions)
     if any(not c.cell for c in plan.ring):
         raise NetlistError("a pad has no IO cell")
+    merge.check_modules(
+        netlist.core_modules(ports_dir),
+        chip.name,
+        sorted({c.cell for c in plan.ring}),
+        imported.views,
+    )
     flow.write_io(flow_dir, pdk, cells, sorted({c.cell for c in plan.ring}))
     pad = cells[io.PAD_CELLS["in"]]
     if f"dir::src/{chip.name}.v" in verilog.get("VERILOG_FILES", []):
@@ -432,6 +441,8 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
     p = prepare(project, pdk)
     metrics, run_dir = flow.run(p.flow_dir, p.cfg)
     outs = flow.outputs(run_dir, name)
+    # What LibreLane merged, before anything it made is used.
+    merged = merge.check_merges(outs["resolved"], p.flow_dir, name, outs["def"].read_text())
     clk = project.fastest_clock
     check_metrics(metrics)
     r = parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, outs["gds"])
@@ -462,6 +473,7 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
             for m in p.plan.macros
         ],
         "warnings": p.binding.warnings,
+        "merged_names": merged,
         "route_drc_errors": r.drc_errors,
         "antenna_nets": r.antenna_nets,
         "setup_slack_ns": round(r.setup_slack_ns, 3),

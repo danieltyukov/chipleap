@@ -522,7 +522,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             for t in tools
         ]
     print(table(["tool", "found", "version", "used for"], rows))
-    return 0
+    return _formal_selftest()
+
+
+def _formal_selftest() -> int:
+    """Ask the SymbiYosys and EQY ChipLeap would use questions with known answers: a build
+    that does not match the Yosys it drives can answer wrong without failing."""
+    from chipleap.rtl.selftest import formal_selftest
+
+    checks = formal_selftest()
+    if not checks:
+        return 0
+    print("\nFormal tools self-test (questions with known answers):")
+    for c in checks:
+        print(f"  {'pass' if c.ok else 'FAIL'}  {c.message}")
+    if all(c.ok for c in checks):
+        return 0
+    print(
+        "\nchipleap: the formal and equivalence steps would give wrong answers with these "
+        "tools; fix them before trusting a proof",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def cmd_tech(args: argparse.Namespace) -> int:

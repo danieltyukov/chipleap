@@ -32,6 +32,12 @@ def project_with(tmp_path: Path, package: Path, name: str | None = None) -> tupl
 NO_NAMES = Reserved(frozenset(), ())
 
 
+def generated(*extra: str) -> Reserved:
+    """The names the flow itself uses, and ``extra``, without a PDK's."""
+    names = frozenset(n.casefold() for n in (*macros.GENERATED, *extra))
+    return Reserved(names, spaces=tuple(n.casefold() for n in extra))
+
+
 def import_one(
     root: Path,
     package: Path,
@@ -45,7 +51,7 @@ def import_one(
         lambda p: read_inside(p, (root,)),
         root / "build",
         pdk,
-        reserved if reserved is not None else macros.reserved_names(None),
+        reserved if reserved is not None else generated(),
     )
 
 
@@ -318,7 +324,7 @@ def proj(tmp_path: Path) -> Path:
 
 
 def reserved_with(*names: str) -> Reserved:
-    return macros.reserved_names(None, names)
+    return generated(*names)
 
 
 def test_a_package_named_like_the_pdk_cannot_replace_its_cells(proj):
@@ -351,8 +357,8 @@ def test_a_package_whose_name_space_holds_a_reserved_name_is_refused(proj):
 )
 def test_reserved_package_names(name, message):
     with pytest.raises(MacroImportError, match=message):
-        macros.reserved_names(None, ("uart_chip",)).check_package(name)
-    macros.reserved_names(None, ("uart_chip",)).check_package("strongarm")
+        generated("uart_chip", "uart").check_package(name)
+    generated("uart_chip", "uart").check_package("strongarm")
 
 
 def test_the_pdks_cell_names_are_reserved(tmp_path):
