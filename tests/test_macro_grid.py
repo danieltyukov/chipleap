@@ -61,7 +61,7 @@ def test_the_core_script_is_librelanes_grid_and_a_macro_grid_per_cell():
     assert sum(line.startswith("define_pdn_grid -macro") for line in lines) == 1
     assert (
         f"define_pdn_grid -macro -cells {{{CELL}}} -name macro_{CELL} -starts_with POWER "
-        "-voltage_domains CORE -halo {10 10}"
+        "-voltage_domains CORE -halo {5 5}"
     ) in lines
     for pair in ("Metal4 Metal5", "Metal5 TopMetal1", "TopMetal1 TopMetal2"):
         assert f"add_pdn_connect -grid macro_{CELL} -layers {{{pair}}}" in lines
@@ -146,9 +146,11 @@ def test_nudge_finds_the_nearest_placement_holding_a_pair():
 
 def test_a_macro_under_no_pair_is_refused_with_where_to_put_it():
     with pytest.raises(
-        GridError, match=r"12\.5 um above the core's bottom edge.* 2\.5 or 42\.14 um"
+        GridError, match=r"12\.5 um above the core's bottom edge.*place it at 42\.14 um$"
     ):
         grid.check_pairs([Placement("u_mem", sram(height=64.36), 30.0, 112.5)], 100.0)
+    with pytest.raises(GridError, match=r"place it at 78\.1 or 117\.74 um$"):
+        grid.check_pairs([Placement("u_mem", sram(height=64.36), 0.0, 190.0)], 100.0)
     with pytest.raises(GridError, match="move it inside the core"):
         grid.check_pairs([Placement("u_mem", sram(height=64.36), 0.0, 60.0)], 100.0)
     grid.check_pairs([Placement("u_mem", sram(height=64.36), 0.0, 150.0)], 100.0)

@@ -52,7 +52,12 @@ STRIPE_SPACING_UM = 4.0
 # How far inside the macro the grid's stripes reach, at most, from its top and bottom.
 INSET_UM = 10.0
 SUPPLY_LAYER = "Metal4"
-HALO_UM = 10.0
+HALO_UM = 10.0  # kept free of standard cells around a macro: its rows are cut this far
+# pdngen clears the core's straps this far around a macro grid. It must be less than the
+# halo the rows are cut to: with the same 10 um, the core's TopMetal1 straps stopped
+# about 9 um short of the first rails beside a row of macros, and pdngen could not repair
+# the rails it left unconnected there (PDN-0178, PDN-0179).
+GRID_HALO_UM = 5.0
 INSTANCE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){0,7}")
 PIN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*!?")
 CELL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -184,7 +189,7 @@ def grid_lines(placements: Sequence[Placement], vdd: str, gnd: str) -> list[str]
         name = q.plain(f"macro_{cell}")
         lines += [
             f"define_pdn_grid -macro -cells {{{cell}}} -name {name} "
-            f"-starts_with POWER -voltage_domains CORE -halo {{{HALO_UM:g} {HALO_UM:g}}}",
+            f"-starts_with POWER -voltage_domains CORE -halo {{{GRID_HALO_UM:g} {GRID_HALO_UM:g}}}",
             f"add_pdn_stripe -grid {name} -layer {STRAP_LAYER} -width {STRAP_WIDTH_UM:g} "
             f"-pitch {STRAP_PITCH_UM:g} -offset {STRAP_OFFSET_UM:g} "
             f"-spacing {STRAP_SPACING_UM:g} -starts_with POWER",
@@ -206,7 +211,9 @@ def check_pairs(placements: Iterable[Placement], core_y0: float) -> None:
         if tm2_pairs(core_y0, p.y, p.y + p.height):
             continue
         at = [nudge(core_y0, p.y, p.height, down=True), nudge(core_y0, p.y, p.height)]
-        where = " or ".join(f"{y - core_y0:g}" for y in at if y is not None and y >= core_y0)
+        where = " or ".join(
+            f"{y - core_y0:g}" for y in at if y is not None and y >= core_y0 + HALO_UM
+        )
         raise GridError(
             f"macro {p.instance}, {p.y - core_y0:g} um above the core's bottom edge, lies "
             f"under no whole VDD and VSS pair of the core's TopMetal2 stripes, so its "

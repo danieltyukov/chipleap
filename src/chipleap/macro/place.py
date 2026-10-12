@@ -8,6 +8,13 @@ macro to reach the logic. Each macro keeps its halo from the core's edges and fr
 others, and lies under a whole TopMetal2 supply pair of the core's grid
 (``chipleap.macro.grid``): a short one moves towards the band until it does.
 
+OpenROAD takes the core to be the bounding box of its rows, and pdngen draws the core's
+stripes only inside it. The rows under a row of macros as wide as the core are cut, which
+would leave the macros outside it, with no TopMetal2 stripe over them for their grid to
+join. So a column of rows ``SIDE_UM`` wide stays free of macros at the core's left edge:
+the core keeps its height, and the core's first TopMetal1 VDD and VSS stripes (13.6 and
+19.8 um in) fall in the column and strap its rails.
+
 The band holds the standard cells at ``util`` of its area, from an estimate of their
 area: the die is sized here, before synthesis, so the floorplan is ChipLeap's and its
 numbers are known to the power grid.
@@ -26,6 +33,7 @@ HALO_UM = grid.HALO_UM
 MARGIN_UM = 20.0  # from the die's edge to the core: room for the pins and their routes
 MIN_BAND_UM = 40.0
 MIN_CORE_UM = 100.0
+SIDE_UM = 30.0  # the column of rows at the core's left edge, before the first halo
 
 
 class PlaceError(ValueError):
@@ -63,6 +71,26 @@ def _up(v: float, step: float) -> float:
     return round(math.ceil(round(v / step, 6)) * step, 4)
 
 
+def _down(v: float, step: float) -> float:
+    return round(math.floor(round(v / step, 6)) * step, 4)
+
+
+def given(die: tuple[float, float], macros: Sequence[tuple[Macro, float, float, str]]) -> Floorplan:
+    """The floorplan of a die a project sized and macros it placed (each with its lower
+    left from the core's, in um, and its orientation): the core inside the margins, on the
+    site grid, the macros checked."""
+    x0, y0 = _up(MARGIN_UM, SITE_UM[0]), _up(MARGIN_UM, SITE_UM[1])
+    x1, y1 = _down(die[0] - MARGIN_UM, SITE_UM[0]), _down(die[1] - MARGIN_UM, SITE_UM[1])
+    if x1 - x0 < MIN_CORE_UM or y1 - y0 < MIN_CORE_UM:
+        raise PlaceError(f"a die of {die[0]:g} x {die[1]:g} um leaves too small a core")
+    placed = tuple(
+        Placed(m.instance, round(x0 + x, 4), round(y0 + y, 4), orient) for m, x, y, orient in macros
+    )
+    out = Floorplan(die, (x0, y0, x1, y1), placed)
+    check(out, [m for m, _, _, _ in macros])
+    return out
+
+
 def rows(macros: Sequence[Macro], cell_um2: float, util: float = 0.45) -> Floorplan:
     """The floorplan for ``macros`` and ``cell_um2`` of standard cells at ``util``."""
     if not 0.05 <= util <= 0.95:
@@ -77,9 +105,8 @@ def rows(macros: Sequence[Macro], cell_um2: float, util: float = 0.45) -> Floorp
     # The widest first, each to the narrower row: the rows come out about as wide.
     for m in sorted(macros, key=lambda m: (-m.width, -m.height, m.instance)):
         (top if width(top) <= width(bottom) else bottom).append(m)
-    core_w = _up(
-        max(MIN_CORE_UM, width(top) + 2 * HALO_UM, width(bottom) + 2 * HALO_UM), SITE_UM[0]
-    )
+    edges = SIDE_UM + 2 * HALO_UM
+    core_w = _up(max(MIN_CORE_UM, width(top) + edges, width(bottom) + edges), SITE_UM[0])
 
     def depth(row: list[Macro]) -> float:
         return max((m.height for m in row), default=-2 * HALO_UM) + 2 * HALO_UM
@@ -92,13 +119,14 @@ def rows(macros: Sequence[Macro], cell_um2: float, util: float = 0.45) -> Floorp
 
     placed: list[Placed] = []
     for row, orient in ((top, "N"), (bottom, "FS")):
-        x = x0 + HALO_UM
+        x = x0 + SIDE_UM + HALO_UM
         for m in row:
             if orient == "N":
-                y = grid.nudge(y0, y1 - HALO_UM - m.height, m.height, grid_um=0.005, down=True)
+                top_y = round(y1 - HALO_UM - m.height, 4)
+                y = grid.nudge(y0, top_y, m.height, grid_um=0.005, down=True)
             else:
                 y = grid.nudge(y0, y0 + HALO_UM, m.height, grid_um=0.005)
-            if y is None or y < y0 + HALO_UM or y + m.height > y1 - HALO_UM:
+            if y is None or y < y0 + HALO_UM - 1e-6 or y + m.height > y1 - HALO_UM + 1e-6:
                 raise PlaceError(
                     f"macro {m.instance} ({m.width:g} x {m.height:g} um) has no place under a "
                     "supply pair of the core's grid"
@@ -106,12 +134,13 @@ def rows(macros: Sequence[Macro], cell_um2: float, util: float = 0.45) -> Floorp
             placed.append(Placed(m.instance, round(_up(x, SITE_UM[0]), 4), y, orient))
             x = _up(x, SITE_UM[0]) + m.width + 2 * HALO_UM
     out = Floorplan(die, (x0, y0, x1, y1), tuple(placed))
-    _check(out, macros)
+    check(out, macros)
     return out
 
 
-def _check(plan: Floorplan, macros: Sequence[Macro]) -> None:
-    """Every macro inside the core by its halo, and two halos from every other."""
+def check(plan: Floorplan, macros: Sequence[Macro]) -> None:
+    """Every macro inside the core by its halo, and two halos from every other; for a
+    floorplan ChipLeap made or one a project gave."""
     size = {m.instance: m for m in macros}
     x0, y0, x1, y1 = plan.core
     gap = 2 * HALO_UM - 1e-6
@@ -127,6 +156,12 @@ def _check(plan: Floorplan, macros: Sequence[Macro]) -> None:
         )
         if a[0] < inside[0] or a[1] < inside[1] or a[2] > inside[2] or a[3] > inside[3]:
             raise PlaceError(f"macro {p.instance} is not inside the core by its halo")
+        if a[0] < inside[0] + SIDE_UM:
+            raise PlaceError(
+                f"macro {p.instance} is {a[0] - x0:g} um from the core's left edge; keep it "
+                f"{SIDE_UM + HALO_UM:g} um away, for the column of rows that keeps the core's "
+                "power grid across the whole core"
+            )
         for name, b in boxes:
             if not (
                 a[2] + gap <= b[0] or b[2] + gap <= a[0] or a[3] + gap <= b[1] or b[3] + gap <= a[1]

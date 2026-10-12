@@ -263,6 +263,25 @@ def place_and_route(
         metrics, gds = run_librelane(workdir, config(accel, clock_mhz))
         result = parse(metrics, clock_mhz, gds)
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
+    cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
+    metrics, gds = run_librelane(workdir, cfg)
+    result = parse(metrics, clock_mhz, gds)
+    counts: dict[str, int] = {}
+    for _, cell in plan.instances():
+        counts[cell] = counts.get(cell, 0) + 1
+    return replace(
+        result,
+        macros=tuple(plan.instances()),
+        macro_um2=plan.area_um2,
+        buffers="SRAM macros: " + ", ".join(f"{n} x {c}" for c, n in sorted(counts.items())),
+    )
+
+
+def sram_flow(
+    accel: Accel, clock_mhz: float, workdir: Path, pdk: Path
+) -> tuple[dict[str, Any], banks.Banks]:
+    """The files of a macro-backed run in ``workdir`` (the generated top, the macros'
+    views, the power grid) and its LibreLane configuration; the RTL is in ``src``."""
     plan = banks.plan(accel, sram.catalog(pdk))
     views = {s.cell: sram.views(pdk, s.cell, workdir) for s in plan.cells()}
     cells = dict(plan.instances())
@@ -273,7 +292,7 @@ def place_and_route(
         ],
         model_cell_um2(accel),
     )
-    (src / f"{banks.TOP}.v").write_text(banks.top_sv(plan))
+    (workdir / "src" / f"{banks.TOP}.v").write_text(banks.top_sv(plan))
     placements = [
         grid.Placement(p.instance, views[cells[p.instance]].view, p.x, p.y, p.orient)
         for p in fp.macros
@@ -282,17 +301,7 @@ def place_and_route(
     macros, _ = sram.librelane_macros(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )
-    metrics, gds = run_librelane(workdir, sram_config(accel, clock_mhz, fp, macros))
-    result = parse(metrics, clock_mhz, gds)
-    counts: dict[str, int] = {}
-    for cell in cells.values():
-        counts[cell] = counts.get(cell, 0) + 1
-    return replace(
-        result,
-        macros=tuple(plan.instances()),
-        macro_um2=plan.area_um2,
-        buffers="SRAM macros: " + ", ".join(f"{n} x {c}" for c, n in sorted(counts.items())),
-    )
+    return sram_config(accel, clock_mhz, fp, macros), plan
 
 
 def _timed_out(exc: launch.TimedOut, log: Path) -> str:
