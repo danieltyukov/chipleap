@@ -110,6 +110,7 @@ chip:                         # optional: the whole chip, with a pad ring and ma
     east: [iovdd, iovss]
     west: [{analog: ain_p}]
   macros: [{instance: comp, package: macros/strongarm.macro, connect: {inp: ain_p}}]
+  io: {output_load_pf: 5}     # the world outside the pads, for timing at the chip's ports
 ```
 
 Paths are relative to the project file and must stay inside its directory: see [Files outside the project](#files-outside-the-project). Environment variables and `~` are not expanded. Every key is checked and errors name the key, for example `clocks[0] needs period_ns or freq_mhz (one of them)` or `tests.modules: test_x.py not found in test`. `chipleap project check` prints the project with every default filled in.

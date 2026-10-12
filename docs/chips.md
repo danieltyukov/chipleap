@@ -33,6 +33,11 @@ chip:
       at_um: [60, 260]        # lower left, from the core's lower left; default: a row along its top
       orientation: N          # N, S, FN or FS
       connect: {clk: clk_i, inp: ain_p, inm: ain_m, outp: rx_i}
+  io:                         # the world outside the pads, for timing at the chip's ports
+    input_delay_ns: 2         # default: a fifth of the first clock's period
+    output_delay_ns: 2        # default: a fifth of the first clock's period
+    output_load_pf: 5         # what each output pad drives; default 5
+    input_transition_ns: 1    # the edge rate at the input pads; default 1
 ```
 
 A pad names a bit of the core top's ports (`clk_i`, `tx_data_i[3]`); an input becomes `sg13g2_IOPadIn` and an output `sg13g2_IOPadOut4mA`, by the port's direction as Yosys elaborates the top with the project's parameters. Inout ports are refused. `{analog: NET}` is `sg13g2_IOPadAnalog`, its core-side `pad` pin on `NET` (`padres` with `resistor: true`). Each supply kind is needed at least once.
@@ -57,15 +62,29 @@ The bond map numbers the pads from 1 at the top of the west side, counter-clockw
 6. **Finishing**, in KLayout: IHP's `bondpad` pcell (70 um square) against every pad's bond side, IHP's `sealring` pcell around the die, a PR boundary on the die when the layout has none (`<name>_nofill.gds`), then IHP's `filler.py` for Activ, GatPoly, Metal1 to Metal5 and both top metals (`<name>.gds`).
 7. **LVS** with IHP's deck, on the chip before fill without its IO cells, bond pads and seal ring: each IO cell's core-side pins stay as metal labelled with the net OpenROAD put on them. The netlist is OpenROAD's without the IO cells, whose core-side nets become its ports, with the standard cells' CDL and each macro's subcircuits, so the macro's transistors are compared too. A pad wired to the wrong net, a macro pin left open or two nets shorted all fail it. IHP's deck cannot compare the IO cells, so whether the supply pads reach the core is checked from the DEF (step 9).
 8. **DRC** with IHP's deck on the finished chip: every table, density and the extra rules included. Recommended rules are left out (`--no_recommended`): a bond pad against its IO cell, as on IHP's own reference designs, always breaks `Pad.d1R` and `Pad.fR_*`, which are recommendations.
-9. **Supply hookup**: from the final DEF, the TopVia2 cuts pdngen put on the IO ring's `vdd` and `vss` rails, per net and side. None for `VDD` or `VSS` fails the chip.
-10. **Precheck**, what a shuttle's precheck looks at that is public: one top cell with the chip's name, only layers in IHP's layer map, no `#` or `/` in a cell name (Tiny Tapeout's checks), no shape without area, a PR boundary on the die, and the layout's extent on the seal ring's outline and the 5 nm grid. IHP's density rules are in the DRC run.
-11. **The bond map**: `<name>.bondmap.csv` and `.json` with each pad's number, side, net, kind, IO cell, instance and bond pad centre and size in um.
+9. **Timing at the ports** (see [below](#timing-at-the-ports)): OpenSTA on the routed chip with IHP's IO liberty, at every corner.
+10. **Supply hookup**: from the final DEF, the TopVia2 cuts pdngen put on the IO ring's `vdd` and `vss` rails, per net and side. None for `VDD` or `VSS` fails the chip.
+11. **Precheck**, what a shuttle's precheck looks at that is public: one top cell with the chip's name, only layers in IHP's layer map, no `#` or `/` in a cell name (Tiny Tapeout's checks), no shape without area, a PR boundary on the die, and the layout's extent on the seal ring's outline and the 5 nm grid. IHP's density rules are in the DRC run.
+12. **The bond map**: `<name>.bondmap.csv` and `.json` with each pad's number, side, net, kind, IO cell, instance and bond pad centre and size in um.
 
 Everything goes to `build/chip/`: `<name>.gds`, the bond map, `chip.json` (the step's data) and each stage's inputs and logs in `flow/`, `finish/`, `lvs/`, `drc/` and `precheck/`. The step passes when routing DRC, IHP's DRC and LVS are clean, both supplies reach the ring, the precheck passes and timing is met at the slow corner. On the UART example it took about 13 minutes here: LibreLane 2.5, fill 2.5, LVS a quarter of a minute and DRC 7.
 
+## Timing at the ports
+
+LibreLane optimises and times the core against its side of the pads, the IO cells' `p2c` and `c2p` pins, with an IO liberty that has no timing arcs: its slack does not include the pads. After routing, ChipLeap times the whole chip again at its own ports, with OpenSTA in OpenROAD, at every corner LibreLane signed the core off at (typical, slow and fast): the routed netlist and its parasitics, the standard cells' liberty of the corner, IHP's `sg13g2_io` liberty of the matching corner (1.2 V and 3.3 V typical, 1.08 V and 3.0 V at 125 C, 1.32 V and 3.6 V at -40 C), which has each pad's arc, and the macros' liberty. Each clock is created on its pad's port, so the input pad is part of the clock's insertion delay. The data ports get the budget of the world outside, `chip.io`:
+
+- `input_delay_ns`: how long after the clock edge at the clock pad the outside world's data reaches an input pad (the other chip's clock-to-output and the board's flight time).
+- `output_delay_ns`: how long before the next clock edge at the clock pad an output must be at its pad for the other chip to take it (its setup time and the board's flight time).
+- `output_load_pf`: what each output pad drives (bond wire, package pin, trace and the other chip's input); IHP characterises its output pads from 1 to 10 pF.
+- `input_transition_ns`: the edge rate of the signals at the input pads.
+
+Both delays default to a fifth of the first clock's period, as LibreLane's own IO constraint does for a core alone. The report gives each corner's worst setup and hold slack at the ports and, at the slow corner, the worst pad-to-core, core-to-pad and pad-to-pad paths with how much of their delay is inside the pads. A signal pad whose IO cell has no arc in the corner's liberty is listed as not timed and the chip does not pass: its delay is never taken as zero. Macros have no timing arcs (their liberty is written from the manifest), so paths through a macro are not timed.
+
+On the UART chip at 100 MHz with the defaults, the slow corner's worst setup slack goes from +6.302 ns at the core's side of the pads to +0.971 ns at the ports: a receive-data output's path spends 5.4 ns in its 4 mA pad driving 5 pF. Hold stays at +0.101 ns (fast corner).
+
 ## What it needs
 
-LibreLane (as for `pnr`), Yosys, KLayout 0.30 or newer, a Python with KLayout's module for IHP's runners (`pip install klayout`; `CHIPLEAP_KLAYOUT_PYTHON` names another Python), and an IHP-Open-PDK checkout: `CHIPLEAP_IHP_PDK` names its `ihp-sg13g2` directory, or ChipLeap takes the one the standard-cell liberty is in. The step skips itself, with the reason, when any is missing. IHP's runners build shell command lines from the paths they are given, so ChipLeap runs them in a private directory on copies of their inputs, and the PDK's path must be letters, digits and `_ . / + -`. `CHIPLEAP_CHIP_TIMEOUT` limits each KLayout and runner call (3 hours by default); LibreLane has `CHIPLEAP_PNR_TIMEOUT`.
+LibreLane (as for `pnr`), Yosys, OpenROAD (for the timing at the ports), KLayout 0.30 or newer, a Python with KLayout's module for IHP's runners (`pip install klayout`; `CHIPLEAP_KLAYOUT_PYTHON` names another Python), and an IHP-Open-PDK checkout: `CHIPLEAP_IHP_PDK` names its `ihp-sg13g2` directory, or ChipLeap takes the one the standard-cell liberty is in. The step skips itself, with the reason, when any is missing. IHP's runners build shell command lines from the paths they are given, so ChipLeap runs them in a private directory on copies of their inputs, and the PDK's path must be letters, digits and `_ . / + -`. `CHIPLEAP_CHIP_TIMEOUT` limits each KLayout and runner call (3 hours by default); LibreLane has `CHIPLEAP_PNR_TIMEOUT`.
 
 The IO cells, fill, DRC and LVS come from the PDK checkout; the standard cells and the routing come from the PDK LibreLane installs for itself, at its own commit. A macro built at another commit than the checkout's is a warning.
 
@@ -90,4 +109,4 @@ Every name that reaches the chip top, the SDC, the DEF, the PDN script or a KLay
 - Pads are `sg13g2_IOPadIn`, `sg13g2_IOPadOut4mA`, `sg13g2_IOPadAnalog` and the four supply pads; the 16 and 30 mA output cells hold clamps whose Metal1 pins are off grid on IHP's deck, and bidirectional pads are not offered.
 - One core voltage domain; macros on other supplies are refused.
 - A macro's supply pins must reach its bottom or top edge on Metal2 to Metal5. Supply pins on the top metals (for pdngen's macro grid) are not handled yet.
-- The chip is DRC and LVS checked; timing through the pads uses the core-side pins, without the pads' own delays, which the IO liberty does not model.
+- The parasitics of the ports' timing are LibreLane's nominal extraction; the bond wires and package are in `output_load_pf` and the input budget, not modelled.

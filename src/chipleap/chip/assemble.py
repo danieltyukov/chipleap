@@ -18,11 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.chip import checks, floorplan, flow, io, merge, netlist, pdn
+from chipleap.chip import checks, floorplan, flow, io, iotiming, merge, netlist, pdn
 from chipleap.chip.checks import CheckError
 from chipleap.chip.config import ChipConfig
 from chipleap.chip.floorplan import Floorplan, FloorplanError
 from chipleap.chip.io import IoError
+from chipleap.chip.iotiming import IoTimingError
 from chipleap.chip.merge import MergeError
 from chipleap.chip.netlist import NetlistError
 from chipleap.chip.pdn import PdnError
@@ -31,17 +32,20 @@ from chipleap.macro import layer
 from chipleap.macro.layer import MacroImportError
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, parse_toml
 from chipleap.rtl import builddir
+from chipleap.rtl.openroad import OpenroadError
 from chipleap.rtl.pnr import verilog_config
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS
 from chipleap.verify.pnr import PnrError, parse
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import librelane, yosys
+from chipleap.verify.tools import librelane, openroad, yosys
 
 SCRIPTS = Path(__file__).resolve().parent / "klayout"
 BOND_SIZE = "70u"  # IHP's bondpad pcell, square
 SEAL_EDGE_UM = 25  # the seal ring pcell's edge box on each side, outside its w and l
 ERRORS = (
+    IoTimingError,
+    OpenroadError,
     MacroImportError,
     MergeError,
     NetlistError,
@@ -446,6 +450,17 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
     clk = project.fastest_clock
     check_metrics(metrics)
     r = parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, outs["gds"])
+    io_timing = iotiming.run(
+        p.work,
+        run_dir,
+        p.pdk,
+        name,
+        p.binding,
+        {c.port: c.period_ns for c in project.clocks},
+        chip.io,
+        [(v.lef, v.lib) for v in p.imported.views.values()],
+        p.flow_dir / "io" / f"{io.IO}_chip.lef",
+    )
     nofill, final = finish(p, outs["gds"], name)
     lvs_data = lvs(p, nofill, outs, name)
     drc_result = drc(p, final, name)
@@ -455,7 +470,7 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
     builddir.write_text(p.work, f"{name}.bondmap.csv", csv_text)
     builddir.write_text(p.work, f"{name}.bondmap.json", checks.dump(rows))
     data: dict[str, Any] = {
-        "tool": "LibreLane, KLayout and IHP's DRC and LVS decks",
+        "tool": "LibreLane, OpenSTA, KLayout and IHP's DRC and LVS decks",
         "name": name,
         "pdk": p.pdk_spec,
         "die_um": list(p.plan.die),
@@ -476,8 +491,11 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
         "merged_names": merged,
         "route_drc_errors": r.drc_errors,
         "antenna_nets": r.antenna_nets,
+        # LibreLane's, at the core's side of the pads
         "setup_slack_ns": round(r.setup_slack_ns, 3),
         "hold_slack_ns": round(r.hold_slack_ns, 3),
+        # ChipLeap's, at the chip's ports through the pads
+        "io_timing": io_timing.to_dict(),
         "cells": r.cells,
         "lvs": lvs_data,
         "drc": {
@@ -516,6 +534,16 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
         problems.append(
             f"timing missed (setup {data['setup_slack_ns']:g} ns, hold {data['hold_slack_ns']:g} ns)"
         )
+    io_t = data.get("io_timing")
+    if io_t is not None:
+        for c in io_t["corners"]:
+            for check in ("setup", "hold"):
+                v = c[f"{check}_slack_ns"]
+                if v is not None and v < 0:
+                    problems.append(
+                        f"{check} missed at the ports at the {c['corner']} corner ({v:g} ns)"
+                    )
+        problems += [f"not timed: {u}" for u in io_t["untimed_pads"]]
     w, h = (
         data["outline_um"][2] - data["outline_um"][0],
         data["outline_um"][3] - data["outline_um"][1],
@@ -526,9 +554,14 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
     )
     if problems:
         return False, f"{head}; " + "; ".join(problems)
+    timing = ""
+    if io_t is not None:
+        slow = next((c for c in io_t["corners"] if c["corner"] == "slow"), None)
+        if slow is not None and slow["setup_slack_ns"] is not None:
+            timing = f", timing met through the pads ({slow['setup_slack_ns']:+.3f} ns at the slow corner)"
     return True, (
         f"{head}; LVS clean on IHP's deck, DRC clean on IHP's deck (density included, "
-        "recommended rules not checked), supplies reach the ring, precheck passed"
+        f"recommended rules not checked), supplies reach the ring, precheck passed{timing}"
     )
 
 
@@ -542,7 +575,12 @@ def chip(project: Project) -> StepResult:
     pdk = io.pdk_dir()
     if pdk is None:
         return StepResult("chip", "skipped", missing_pdk())
-    for label, tool in (("Yosys", yosys()), ("LibreLane", librelane()), ("KLayout", klayout())):
+    for label, tool in (
+        ("Yosys", yosys()),
+        ("LibreLane", librelane()),
+        ("KLayout", klayout()),
+        ("OpenROAD", openroad()),
+    ):
         if not tool.found:
             return StepResult("chip", "skipped", tool.missing(label))
     if python_with_klayout() is None:
