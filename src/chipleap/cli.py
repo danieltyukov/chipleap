@@ -411,6 +411,35 @@ def cmd_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chip(args: argparse.Namespace) -> int:
+    from chipleap.chip.assemble import plan_chip
+    from chipleap.rtl.project import load_project
+
+    plan = plan_chip(load_project(args.path, args.allow_path))
+    if args.json:
+        _print_json(plan)
+        return 0
+    die, core, outline = plan["die_um"], plan["core_um"], plan["outline_um"]
+    print(
+        f"{plan['name']}: die {die[0]:g} x {die[1]:g} um "
+        f"({outline[2] - outline[0]:g} x {outline[3] - outline[1]:g} um with the seal ring), "
+        f"core {core[0]:g},{core[1]:g} to {core[2]:g},{core[3]:g} um"
+    )
+    print(
+        f"{len(plan['pads'])} pads at a {plan['pad_pitch_um']:g} um pitch, "
+        f"{plan['ring_cells']} IO ring cells in all"
+    )
+    for pad in plan["pads"]:
+        what = pad["net"] or pad["kind"]
+        cell = pad["cell"] or "(in or out, by its port)"
+        x, y = pad["bond_center_um"]
+        print(f"  {pad['number']:3d}  {pad['side']:5s}  {what:20s} {cell:32s} bond at {x:g},{y:g}")
+    for m in plan["macros"]:
+        x, y = m["at_um"]
+        print(f"  macro {m['instance']} ({m['cell']}) at {x:g},{y:g} um, {m['orientation']}")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     code = cmd_explore(args)
     if code != 0 or not args.out:
@@ -725,8 +754,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="comma-separated steps; for a bundle consistency,lint,sim,synth,xheep, for a "
         "project lint,sim,coverage,formal,cdc,synth,equiv; pnr (place and route), gls "
-        "(gate-level simulation of its netlist) and the steps after it (eco, dft, power, "
-        "ir_drop, upf) are opt-in, and all runs every step",
+        "(gate-level simulation of its netlist), the steps after it (eco, dft, power, "
+        "ir_drop, upf) and chip (the whole chip with its pad ring and macros) are opt-in, and "
+        "all runs every step",
     )
     s.add_argument("--xheep", help="X-HEEP checkout (default: CHIPLEAP_XHEEP_DIR or the cache)")
     s.add_argument("--fetch-xheep", action="store_true", help="clone the tested X-HEEP commit")
@@ -833,6 +863,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="let the project use files from this directory outside it",
     )
     s.set_defaults(func=cmd_eco)
+
+    s = sub.add_parser("chip", help="a project's chip: pad ring, macros and floorplan")
+    csub = s.add_subparsers(dest="chip_cmd", required=True)
+    t = csub.add_parser("plan", help="show the chip's floorplan without running a tool")
+    t.add_argument("path", nargs="?", default=".")
+    t.add_argument(
+        "--allow-path",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="let the project use files from this directory outside it (repeatable)",
+    )
+    t.add_argument("--json", action="store_true")
+    t.set_defaults(func=cmd_chip)
 
     s = sub.add_parser("doctor", help="which tools ChipLeap can use here or on a server")
     s.add_argument("--remote", help="also list the commercial tools on this ssh host")

@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from chipleap.chip.assemble import chip
 from chipleap.rtl import builddir, commercial
 from chipleap.rtl.cdc import cdc
 from chipleap.rtl.coverage import coverage
@@ -37,6 +38,7 @@ from chipleap.verify.tools import untrusted
 # Equivalence and gate-level simulation come after place and route, so they see its
 # netlist. The ECO comes right after place and route too, so that equivalence, gate-level
 # simulation, DFT's check of the routed chains, power and IR drop see the changed layout.
+# The chip (pad ring, macros, finishing, DRC and LVS on the whole die) comes last.
 PROJECT_STEPS = (
     "lint",
     "sim",
@@ -52,9 +54,11 @@ PROJECT_STEPS = (
     "power",
     "ir_drop",
     "upf",
+    "chip",
 )
 # Place and route takes minutes, so it and the steps that read its result (gate-level
-# simulation, ECO, DFT, power, IR drop, UPF) run only when named or with "all".
+# simulation, ECO, DFT, power, IR drop, UPF) run only when named or with "all", and so
+# does the chip, which routes the whole die.
 DEFAULT_STEPS = ("lint", "sim", "coverage", "formal", "cdc", "synth", "equiv")
 SIM_TOOLS = ("auto", "icarus", "verilator", *COMMERCIAL)
 SYNTH_TOOLS = ("yosys", "genus", "dc")
@@ -153,6 +157,8 @@ def _run_step(
         return ir_drop(project)
     if step == "upf":
         return upf(project)
+    if step == "chip":
+        return chip(project)
     raise AssertionError(step)  # run_step checked the name
 
 
