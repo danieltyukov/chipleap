@@ -124,7 +124,7 @@ The verification sections are checked like the rest: check names are identifiers
 
 A power domain's elements are hierarchical instance paths (`u_rx`, `u_core/u_alu`); exactly one domain has none, the top. ECO targets are names in the routed netlist, which may hold characters other names may not (`\u_rx.data_q[3]`): any printable characters but white space, quotes, braces, `;`, a backtick and `$`. They reach OpenROAD as data, never as script text.
 
-The `chip` section is described in [chips.md](chips.md). A section name (`macros`) that later versions will read is rejected with a message saying they are not read yet, so a file written for a newer ChipLeap fails clearly.
+The `chip` section is described in [chips.md](chips.md). A section name that later versions will read (`macros`) is rejected with a message saying it is not read yet, so a file written for a newer ChipLeap fails clearly.
 
 ## The steps
 

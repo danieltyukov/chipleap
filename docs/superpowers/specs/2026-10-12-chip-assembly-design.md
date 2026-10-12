@@ -74,7 +74,7 @@ A KLayout script ChipLeap writes from checked values: IHP's `bondpad` pcell (70 
 
 ### Where it lives
 
-`chipleap.chip`: `config` (the section), `io` (the IO library), `floorplan`, `netlist`, `macros`, `pdn`, `flow` (LibreLane), `finish`, `checks` (DRC, LVS, hookup, precheck, bond map). `chipleap verify PROJECT --steps chip` runs it (only when named, like `pnr`), `chipleap chip plan PROJECT` shows the floorplan without running a tool, and the MCP tools `plan_chip` and `assemble_chip` do the same. Every step runs under `runs_tools`, writes through `builddir`, quotes every value it puts in Tcl, Verilog, DEF, JSON for KLayout or SDC, and confines what it reads. Results hold no absolute paths.
+`chipleap.chip`: `config` (the section), `io` (the IO library), `floorplan`, `netlist`, `pdn`, `flow` (LibreLane), `run` (KLayout and IHP's runners), `checks` (DRC, LVS, hookup, precheck, bond map), `assemble` (the step), and KLayout scripts in `klayout/`. The macro layer is `chipleap.macro.layer`, shared with D3 part a's SRAMs and later the generated accelerators: `import_packages` (`macro/v1` packages), `pdk_macro` (a PDK macro such as `RM_IHPSG13_1P_*`), `MacroView` and `MacroPin`, `reserved_names`, and `librelane_config` (`MACROS`, `EXTRA_CDLS`). `chipleap verify PROJECT --steps chip` runs it (only when named, like `pnr`), `chipleap chip plan PROJECT` shows the floorplan without running a tool, and the MCP tools `plan_chip` and `assemble_chip` do the same. Every step runs under `runs_tools`, writes through `builddir`, quotes every value it puts in Tcl, Verilog, DEF, JSON for KLayout or SDC, and confines what it reads. Results hold no absolute paths.
 
 ## Security
 
