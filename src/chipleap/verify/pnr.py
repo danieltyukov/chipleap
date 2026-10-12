@@ -265,6 +265,9 @@ def place_and_route(
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
     cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
     metrics, gds = run_librelane(workdir, cfg)
+    from chipleap.rtl.pnr import check_merged
+
+    check_merged(workdir / "runs" / "chipleap", workdir, banks.TOP)
     result = parse(metrics, clock_mhz, gds)
     counts: dict[str, int] = {}
     for _, cell in plan.instances():

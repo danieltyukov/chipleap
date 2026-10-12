@@ -91,6 +91,7 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     monkeypatch.setattr(pnr, "librelane", lambda: SimpleNamespace(found=True, path="ll"))
     monkeypatch.setattr(pnr, "_sv2v", lambda a, b: b.write_text(a.read_text()))
     monkeypatch.setattr(pnr, "run_librelane", run)
+    monkeypatch.setattr("chipleap.rtl.pnr.check_merged", lambda *a: {})
     r = pnr.place_and_route(SMOLLM2, 90.0, work, pdk=pdk)
     cfg = seen["cfg"]
     cell = "RM_IHPSG13_1P_256x64_c2_bm_bist"

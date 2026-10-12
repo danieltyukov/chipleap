@@ -110,9 +110,10 @@ proc chipleap_hookup {net layer vias x_um y_um dir} {
     }
     if { $best == "" } { error "chipleap: no standard-cell row $dir of the macro pin at $x_um $y_um" }
     lassign $best ytop ybot orient
-    # R0 rows have VSS at the bottom and VDD at the top; flipped rows the other way.
+    # R0 rows have VSS at the bottom and VDD at the top; flipped rows the other way. The
+    # power net is LibreLane's VDD_NET: VDD in a chip, VPWR in an RTL project's block.
     set vdd_top [expr {$orient == "R0"}]
-    if { ($net == "VDD") == $vdd_top } { set y $ytop } else { set y $ybot }
+    if { ($net == $::env(VDD_NET)) == $vdd_top } { set y $ytop } else { set y $ybot }
     set n [$block findNet $net]
     set sw [odb::dbSWire_create $n ROUTED]
     set hw [expr {int(0.15 * $dbu)}]
@@ -163,25 +164,15 @@ def script(macros: Mapping[str, tuple[Placed, MacroView]], core_y0: float | None
             f"add_global_connection -net {net} -inst_pattern {{^(pad|fill|corner)_.*}} "
             f"-pin_pattern {{^{io_pin}$}} -{kind}"
         )
-    hooks: list[tuple[str, str, float, float, str]] = []
-    gridded: list[grid.Placement] = []
-    for inst, (placed, view) in macros.items():
-        if not view.supply_hookup:
-            gridded.append(grid.Placement(inst, view, placed.x, placed.y, placed.orient))
-            continue
-        if not IDENT_RE.fullmatch(inst):
-            raise PdnError(f"macro instance {inst!r} is not a plain name")
-        for pin in view.pins:
-            if pin.is_supply:
-                # Both names are plain identifiers (checked here and in hookups), and the
-                # braces keep Tcl from reading the regular expression's $.
-                if not IDENT_RE.fullmatch(pin.name):
-                    raise PdnError(f"{view.cell}: supply pin {pin.name} is not a plain name")
-                lines.append(
-                    f"add_global_connection -net {SUPPLY_NETS[pin.kind]} "
-                    f"-inst_pattern {{^{inst}$}} -pin_pattern {{^{pin.name}$}} -{pin.kind}"
-                )
-        hooks += hookups(placed, view)
+    connects, hooks = hookup_lines(
+        {i: m for i, m in macros.items() if m[1].supply_hookup}, "VDD", "VSS"
+    )
+    lines += connects
+    gridded = [
+        grid.Placement(inst, view, placed.x, placed.y, placed.orient)
+        for inst, (placed, view) in macros.items()
+        if not view.supply_hookup
+    ]
     lines += [
         "global_connect",
         "set_voltage_domain -name CORE -power VDD -ground VSS",
@@ -208,9 +199,39 @@ def script(macros: Mapping[str, tuple[Placed, MacroView]], core_y0: float | None
             lines += grid.grid_lines(gridded, "VDD", "VSS")
         except grid.GridError as exc:
             raise PdnError(str(exc)) from None
-    for net, layer, x, y, direction in hooks:
-        vias = [VIA_DOWN[f"Metal{k}"] for k in range(int(layer[-1]), 1, -1)]
-        lines.append(
-            f"chipleap_hookup {net} {layer} {q.tcl_list(vias)} {x:.4f} {y:.4f} {direction}"
-        )
+    lines += hooks
     return "\n".join(lines) + "\n"
+
+
+def hookup_lines(
+    macros: Mapping[str, tuple[Placed, MacroView]], vdd: str, gnd: str
+) -> tuple[list[str], list[str]]:
+    """For macros whose supply pins reach an edge: the global connections of those pins
+    to ``vdd`` and ``gnd`` (Tcl words: net names, or ``$::env(VDD_NET)``), and the
+    ``chipleap_hookup`` calls that strap each to the rails (``HOOKUP_PROC`` defines it).
+    An instance may be a flattened path (``u_core.u_cmp``)."""
+    nets = {"VDD": vdd, "VSS": gnd}
+    connects: list[str] = []
+    hooks: list[str] = []
+    for inst, (placed, view) in macros.items():
+        try:
+            pattern = grid.inst_pattern(inst)
+        except grid.GridError:
+            raise PdnError(f"macro instance {inst!r} is not a plain name") from None
+        for pin in view.pins:
+            if pin.is_supply:
+                # The pin is a plain identifier (checked here and in hookups), and the
+                # braces keep Tcl from reading the regular expression's $.
+                if not IDENT_RE.fullmatch(pin.name):
+                    raise PdnError(f"{view.cell}: supply pin {pin.name} is not a plain name")
+                connects.append(
+                    f"add_global_connection -net {nets[SUPPLY_NETS[pin.kind]]} "
+                    f"-inst_pattern {{{pattern}}} -pin_pattern {{^{pin.name}$}} -{pin.kind}"
+                )
+        for net, layer, x, y, direction in hookups(placed, view):
+            vias = [VIA_DOWN[f"Metal{k}"] for k in range(int(layer[-1]), 1, -1)]
+            hooks.append(
+                f"chipleap_hookup {nets[net]} {layer} {q.tcl_list(vias)} {x:.4f} {y:.4f} "
+                f"{direction}"
+            )
+    return connects, hooks

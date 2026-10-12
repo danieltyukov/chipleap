@@ -161,7 +161,8 @@ def nudge(
     return min(lo for lo, hi in fits if lo >= at) / 1000
 
 
-def _inst_pattern(instance: str) -> str:
+def inst_pattern(instance: str) -> str:
+    """The regular expression pdngen matches ``instance`` by, dots escaped."""
     if not INSTANCE_RE.fullmatch(instance):
         raise GridError(f"macro instance {instance!r} is not a plain hierarchical name")
     return "^" + instance.replace(".", r"\.") + "$"
@@ -174,7 +175,7 @@ def grid_lines(placements: Sequence[Placement], vdd: str, gnd: str) -> list[str]
     lines: list[str] = []
     cells: dict[str, MacroView] = {}
     for p in placements:
-        pattern = _inst_pattern(p.instance)
+        pattern = inst_pattern(p.instance)
         for pin, kind in supply_pins(p.view):
             net = vdd if kind == "power" else gnd
             lines.append(

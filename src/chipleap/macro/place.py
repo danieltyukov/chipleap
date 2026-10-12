@@ -45,6 +45,7 @@ class Macro:
     instance: str
     width: float
     height: float
+    gridded: bool = True  # powered by a macro grid, so under a TopMetal2 supply pair
 
 
 @dataclass(frozen=True)
@@ -121,10 +122,11 @@ def rows(macros: Sequence[Macro], cell_um2: float, util: float = 0.45) -> Floorp
     for row, orient in ((top, "N"), (bottom, "FS")):
         x = x0 + SIDE_UM + HALO_UM
         for m in row:
-            if orient == "N":
-                top_y = round(y1 - HALO_UM - m.height, 4)
+            top_y = round(y1 - HALO_UM - m.height, 4)
+            y: float | None = top_y if orient == "N" else round(y0 + HALO_UM, 4)
+            if m.gridded and orient == "N":
                 y = grid.nudge(y0, top_y, m.height, grid_um=0.005, down=True)
-            else:
+            elif m.gridded:
                 y = grid.nudge(y0, y0 + HALO_UM, m.height, grid_um=0.005)
             if y is None or y < y0 + HALO_UM - 1e-6 or y + m.height > y1 - HALO_UM + 1e-6:
                 raise PlaceError(

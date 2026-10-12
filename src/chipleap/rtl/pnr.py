@@ -197,14 +197,26 @@ def _cell_area(project: Project, workdir: Path) -> float:
 
 
 def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
-    """LibreLane's settings for the project's SRAM macros: their views, the floorplan
-    around them and the power grid over them, written into ``workdir``."""
+    """LibreLane's settings for the project's hard macros: their views, the floorplan
+    around them and their power, written into ``workdir``. An SRAM gets the macro grid
+    over it; a package whose supply pins reach an edge gets them strapped to the rails,
+    as in a chip (``chipleap.chip.pdn``)."""
+    from chipleap.chip import pdn
+    from chipleap.chip.floorplan import Placed
+    from chipleap.macro.layer import MacroImportError
+
     try:
-        _, views = macros.views(project, workdir)
-    except macros.MacroStepError as exc:
-        raise PnrError(str(exc)) from exc
+        views, by_sram, cell = macros.views(project, workdir)
+        macros.check_modules(project, builddir.work_dir(workdir, "modules"), sorted(views))
+    except (macros.MacroStepError, MacroImportError) as exc:
+        raise PnrError(f"macros: {exc}") from exc
     sizes = {
-        m.flat: place.Macro(m.flat, views[m.cell].view.width, views[m.cell].view.height)
+        m.flat: place.Macro(
+            m.flat,
+            views[cell[m.flat]].width,
+            views[cell[m.flat]].height,
+            gridded=not views[cell[m.flat]].supply_hookup,
+        )
         for m in project.macros
     }
     try:
@@ -231,19 +243,40 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
                 _cell_area(project, workdir),
                 project.pnr.utilisation / 100,
             )
-        cell = {m.flat: m.cell for m in project.macros}
-        script = grid.core_script(
-            [
-                grid.Placement(p.instance, views[cell[p.instance]].view, p.x, p.y, p.orient)
-                for p in fp.macros
-            ],
-            fp.core[1],
-        )
-    except (place.PlaceError, grid.GridError) as exc:
+        gridded = [
+            grid.Placement(p.instance, views[cell[p.instance]], p.x, p.y, p.orient)
+            for p in fp.macros
+            if sizes[p.instance].gridded
+        ]
+        script = grid.core_script(gridded, fp.core[1])
+        hooked = {
+            p.instance: (
+                Placed(
+                    p.instance,
+                    cell[p.instance],
+                    p.x,
+                    p.y,
+                    p.orient,
+                    sizes[p.instance].width,
+                    sizes[p.instance].height,
+                ),
+                views[cell[p.instance]],
+            )
+            for p in fp.macros
+            if not sizes[p.instance].gridded
+        }
+        if hooked:
+            connects, hooks = pdn.hookup_lines(hooked, "$::env(VDD_NET)", "$::env(GND_NET)")
+            script += "\n".join([*connects, "global_connect", pdn.HOOKUP_PROC.strip("\n"), *hooks])
+            script += "\n"
+    except (place.PlaceError, grid.GridError, pdn.PdnError) as exc:
         raise PnrError(f"macros: {exc}") from exc
     builddir.write_text(workdir, "pdn.tcl", script)
     entries, _ = sram.librelane_macros(
-        views, [(p.instance, cell[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
+        by_sram,
+        [(p.instance, cell[p.instance], p.x, p.y, p.orient) for p in fp.macros],
+        workdir,
+        views,
     )
     return {
         "FP_SIZING": "absolute",
@@ -306,13 +339,32 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
         raise PnrError(f"scan insertion (dft.insert): {why}")
     cfg = config(project, work)
     metrics, gds = run_librelane(work, cfg, RUN_TAG)
+    if project.macros:
+        check_merged(work / "runs" / RUN_TAG, work, project.top)
     seal_routed(work, bool(project.macros))
     clk = project.fastest_clock
     r = parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds)
     if not project.macros:
         return r
     area = macros.area_um2(project) or 0.0
-    return replace(r, macros=tuple((m.flat, m.cell) for m in project.macros), macro_um2=area)
+    names = {m.flat: m.cell or (m.package.name if m.package else "") for m in project.macros}
+    return replace(r, macros=tuple(names.items()), macro_um2=area)
+
+
+def check_merged(run_dir: Path, work: Path, top: str) -> dict[str, int]:
+    """The names LibreLane merged into the layout and the LVS netlist, from its resolved
+    configuration: no GDS cell or subcircuit defined twice (``chipleap.chip.merge``), so
+    no macro can stand in for a standard cell or another macro."""
+    from chipleap.chip.merge import MergeError, check_merges
+
+    resolved = run_dir / "resolved.json"
+    def_file = run_dir / "final" / "def" / f"{top}.def"
+    if not resolved.is_file() or not def_file.is_file():
+        raise PnrError("LibreLane's run has no resolved configuration or DEF to check")
+    try:
+        return check_merges(resolved, work, top, def_file.read_text(errors="replace"))
+    except MergeError as exc:
+        raise PnrError(f"merged names: {exc}") from exc
 
 
 def seal_routed(work: Path, with_macros: bool = False) -> Sealed:

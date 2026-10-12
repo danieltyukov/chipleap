@@ -301,13 +301,15 @@ class GateSimConfig:
 
 
 @dataclass(frozen=True)
-class SramMacro:
-    """An SRAM macro of the PDK the RTL instantiates (``macros``): the instance's path
-    (``u_core/u_mem``), its cell, where its lower left goes in the core in um (None:
-    ChipLeap places it) and its orientation."""
+class RtlMacro:
+    """A hard macro the RTL instantiates (``macros``): the instance's path
+    (``u_core/u_mem``), and either an SRAM of the PDK (``cell``) or a ``macro/v1``
+    package (``package``), as a chip's ``macros`` name them; where its lower left goes in
+    the core in um (None: ChipLeap places it) and its orientation."""
 
     instance: str
-    cell: str
+    cell: str = ""  # an SRAM of the PDK's sg13g2_sram
+    package: Path | None = None  # a macro/v1 package directory
     at_um: tuple[float, float] | None = None
     orientation: str = "N"
 
@@ -316,8 +318,12 @@ class SramMacro:
         """The instance's name in a flattened netlist: the path with ``.``."""
         return self.instance.replace("/", ".")
 
-    def to_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"instance": self.instance, "cell": self.cell}
+    def to_dict(self, rel: Callable[[Path], str]) -> dict[str, Any]:
+        out: dict[str, Any] = {"instance": self.instance}
+        if self.package is not None:
+            out["package"] = rel(self.package)
+        else:
+            out["cell"] = self.cell
         if self.at_um is not None:
             out["at_um"] = list(self.at_um)
         if self.orientation != "N":
@@ -358,7 +364,7 @@ class Project:
     ir_drop: IrDropConfig = field(default_factory=IrDropConfig)
     upf: UpfConfig | None = None
     eco: tuple[EcoChange, ...] = ()
-    macros: tuple[SramMacro, ...] = ()
+    macros: tuple[RtlMacro, ...] = ()
 
     @property
     def build_dir(self) -> Path:
@@ -568,7 +574,7 @@ class Project:
         if self.eco:
             out["eco"] = [c.to_dict() for c in self.eco]
         if self.macros:
-            out["macros"] = [m.to_dict() for m in self.macros]
+            out["macros"] = [m.to_dict(self.rel) for m in self.macros]
         if self.chip is not None:
             out["chip"] = _chip_dict(self.chip, self.rel)
         return out
@@ -1528,17 +1534,19 @@ def _chip_pad(value: Any, where: str) -> Pad:
     return Pad("analog", _ident(a["analog"], f"{where}.analog"), resistor)
 
 
-def _parse_macros(value: Any) -> tuple[SramMacro, ...]:
+def _parse_macros(value: Any, paths: _Paths) -> tuple[RtlMacro, ...]:
     if value is None:
         return ()
     if not isinstance(value, list):
-        raise ProjectError("macros must be a list of {instance, cell, at_um, orientation}")
+        raise ProjectError(
+            "macros must be a list of {instance, cell or package, at_um, orientation}"
+        )
     if len(value) > MACROS_MAX:
         raise ProjectError(f"macros: at most {MACROS_MAX} macros")
-    out: list[SramMacro] = []
+    out: list[RtlMacro] = []
     for i, m in enumerate(value):
         where = f"macros[{i}]"
-        m = _mapping(m, where, ("instance", "cell", "at_um", "orientation"))
+        m = _mapping(m, where, ("instance", "cell", "package", "at_um", "orientation"))
         inst = m.get("instance")
         if (
             not isinstance(inst, str)
@@ -1551,12 +1559,23 @@ def _parse_macros(value: Any) -> tuple[SramMacro, ...]:
             )
         if inst in {x.instance for x in out}:
             raise ProjectError(f"{where}.instance: {inst} is listed twice")
-        cell = m.get("cell")
-        if not isinstance(cell, str) or not SRAM_CELL_RE.fullmatch(cell):
+        if ("cell" in m) == ("package" in m):
             raise ProjectError(
-                f"{where}.cell must name one of IHP's single-port SRAMs "
-                "(RM_IHPSG13_1P_<words>x<bits>_c<n>[_bm_bist])"
+                f"{where} needs a cell (an SRAM of the PDK) or a package (a macro/v1 "
+                "directory), one of them"
             )
+        cell, package = "", None
+        if "package" in m:
+            if not isinstance(m["package"], str):
+                raise ProjectError(f"{where}.package must be the path of a .macro directory")
+            package = paths.path(paths.root, m["package"], f"{where}.package", kind="dir")
+        else:
+            cell = m["cell"]
+            if not isinstance(cell, str) or not SRAM_CELL_RE.fullmatch(cell):
+                raise ProjectError(
+                    f"{where}.cell must name one of IHP's single-port SRAMs "
+                    "(RM_IHPSG13_1P_<words>x<bits>_c<n>[_bm_bist])"
+                )
         orient = _choice(m.get("orientation", "N"), ORIENTATIONS, f"{where}.orientation")
         at = None
         if m.get("at_um") is not None:
@@ -1575,7 +1594,7 @@ def _parse_macros(value: Any) -> tuple[SramMacro, ...]:
                     raise ProjectError(f"{where}.at_um[{k}] must be on the {GRID_NM} nm grid")
                 vals.append(float(v))
             at = (vals[0], vals[1])
-        out.append(SramMacro(inst, cell, at, orient))
+        out.append(RtlMacro(inst, cell, package, at, orient))
     return tuple(out)
 
 
@@ -1847,7 +1866,7 @@ def parse_project(
         ir_drop=_parse_ir_drop(data.get("ir_drop")),
         upf=_parse_upf(data["upf"]) if "upf" in data else None,
         eco=_parse_eco(data.get("eco")),
-        macros=_parse_macros(data.get("macros")),
+        macros=_parse_macros(data.get("macros"), paths),
     )
 
 

@@ -118,16 +118,22 @@ def prepare_verilog(project: Project, workdir: Path) -> tuple[list[Path], bool]:
     return [out], False
 
 
-def read_commands(project: Project, files: list[Path], raw: bool) -> list[str]:
-    """The Yosys commands that read the project: sources, include directories, defines,
-    parameters and the top."""
+def source_reads(project: Project, files: list[Path], raw: bool) -> list[str]:
+    """The Yosys commands that read the project's sources, with its include directories
+    and defines when the files still need them."""
     opts: list[str] = []
     if raw:
         opts += [f"-I {q.yosys(i)}" for i in project.include_dirs]
         opts += [f"-D {q.yosys(x)}" for x in project.define_args()]
-    # The SRAM macros first, as black boxes: synthesis keeps each as an instance.
+    return [" ".join(["read_verilog -sv", *opts, q.yosys(f)]) for f in files]
+
+
+def read_commands(project: Project, files: list[Path], raw: bool) -> list[str]:
+    """The Yosys commands that read the project: sources, include directories, defines,
+    parameters and the top."""
+    # The hard macros first, as black boxes: synthesis keeps each as an instance.
     boxes = [f"read_verilog -sv {q.yosys(m)}" for m in macros.stubs(project)]
-    reads = [*boxes, *(" ".join(["read_verilog -sv", *opts, q.yosys(f)]) for f in files)]
+    reads = [*boxes, *source_reads(project, files, raw)]
     chparam = " ".join(f"-set {q.plain(k)} {int(v)}" for k, v in project.parameters.items())
     top = q.plain(project.top)
     return [
@@ -304,7 +310,7 @@ def _macro_data(project: Project) -> dict[str, Any]:
     except macros.MacroStepError:
         area = None
     return {
-        "macros": [m.to_dict() for m in project.macros],
+        "macros": [m.to_dict(project.rel) for m in project.macros],
         "macro_um2": round(area, 2) if area is not None else None,
     }
 

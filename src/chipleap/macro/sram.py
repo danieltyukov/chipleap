@@ -192,7 +192,9 @@ def _buses(view: MacroView) -> list[tuple[str, str, int]]:
     return out
 
 
-def _module(cell: str, ports: list[tuple[str, str, int]], source: str) -> str:
+def module(cell: str, ports: list[tuple[str, str, int]], source: str) -> str:
+    """An empty module ``cell`` with ``ports`` (name, direction, width; 0 a single bit),
+    marked a black box: what lint and synthesis read in a macro's place."""
     lines = [
         f"// Written by ChipLeap from {source}: the macro's ports, for lint and synthesis.",
         "/* verilator lint_off UNUSEDSIGNAL */",
@@ -210,7 +212,7 @@ def _module(cell: str, ports: list[tuple[str, str, int]], source: str) -> str:
 def blackbox(view: MacroView) -> str:
     """The macro as an empty module with its LEF's signal ports, for LibreLane's linter
     and synthesis (``vh`` in ``MACROS``); the netlist then keeps it as an instance."""
-    return _module(view.cell, _buses(view), "its LEF")
+    return module(view.cell, _buses(view), "its LEF")
 
 
 def stub(s: Sram) -> str:
@@ -218,7 +220,7 @@ def stub(s: Sram) -> str:
     needed: a project's lint and synthesis."""
     if NAME_RE.fullmatch(s.cell) is None:
         raise SramError(f"{s.cell[:64]!r} is not a single-port SRAM of {LIBRARY}")
-    return _module(s.cell, ports(s), "its name")
+    return module(s.cell, ports(s), "its name")
 
 
 def ports(sram: Sram) -> list[tuple[str, str, int]]:
@@ -288,15 +290,17 @@ def librelane_macros(
     srams: Mapping[str, SramViews],
     placements: Iterable[tuple[str, str, float, float, str]],
     flow_dir: Path,
+    others: Mapping[str, MacroView] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    """LibreLane's ``MACROS`` and the macros' ``EXTRA_CDLS`` for placed SRAMs (instance,
-    cell, x, y, orientation): the macro layer's entries with the liberty of every corner
-    and the black-box module (``vh``)."""
-    placements = list(placements)
-    macros, cdls = layer.librelane_config(
-        {cell: v.view for cell, v in srams.items()}, placements, flow_dir
-    )
+    """LibreLane's ``MACROS`` and the macros' ``EXTRA_CDLS`` for placed macros (instance,
+    cell, x, y, orientation): the macro layer's entries (``others`` holds the views of
+    macros that are not SRAMs, such as packages), each SRAM's with the liberty of every
+    corner and its black-box module (``vh``)."""
+    views = {**(others or {}), **{cell: v.view for cell, v in srams.items()}}
+    macros, cdls = layer.librelane_config(views, list(placements), flow_dir)
     for cell, entry in macros.items():
+        if cell not in srams:
+            continue
         v = srams[cell]
         entry["lib"] = {pattern: [layer._dir(path, flow_dir)] for pattern, path in v.libs.items()}
         entry["vh"] = [layer._dir(v.stub, flow_dir)]
