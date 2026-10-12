@@ -155,6 +155,8 @@ def test_a_routed_run_chipleap_did_not_record_is_not_compared(tmp_path):
     shutil.copy(ROUTED / "uart.nl.v", run / "final/nl/uart.nl.v")
     r = equiv.check_pair(load_project(root), "synth-pnr")
     assert r["status"] == "skipped" and "manifest.json is missing" in r["reason"], r
+    if liberty_for("ihp-sg13g2") is None:
+        return  # the netlists are read only once the liberty is there
     # Recorded, then the routed netlist swapped: refused before Yosys reads it.
     seal_routed(root / "build/pnr")
     (run / "final/nl/uart.nl.v").write_text("module uart(); endmodule\n")
