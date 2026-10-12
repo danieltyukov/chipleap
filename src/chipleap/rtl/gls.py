@@ -32,7 +32,7 @@ from typing import Any
 
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
-from chipleap.rtl.pnr import routed_run
+from chipleap.rtl.openroad import OpenroadError, read_recorded, recorded_files, routed_run
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.sim import SimError, SimUnavailable, run_tests, sim_data, summarize
 from chipleap.rtl.synth import SynthError, liberty_for, synthesize
@@ -104,6 +104,24 @@ def annotated(text: str, top: str, sdf: Path) -> str:
     return text[: end.start()] + line + text[end.start() :]
 
 
+# The inputs scan insertion adds (chipleap.rtl.dft), as a netlist declares them.
+SCAN_INPUT_RE = re.compile(r"\binput\s+(?:wire\s+)?(scan_(?:enable|in)_\d+)\s*[;,)]")
+
+
+def scan_inputs(text: str) -> list[str]:
+    """The scan inputs a netlist declares, if scan insertion added any."""
+    return sorted(set(SCAN_INPUT_RE.findall(text)))
+
+
+def hold_low(top: str, ports: list[str]) -> str:
+    """A second top module that holds ``ports`` of ``top`` at 0 for the whole run. Port
+    names come from the netlist and are plain identifiers (``SCAN_INPUT_RE``)."""
+    lines = ["module chipleap_gls_aux;", "  initial begin"]
+    lines += [f"    force {q.plain(top)}.{q.plain(p)} = 1'b0;" for p in ports]
+    lines += ["  end", "endmodule"]
+    return "\n".join(lines) + "\n"
+
+
 def _netlist(project: Project) -> tuple[Path, Path | None, str]:
     """The netlist to simulate, its SDF (None without delays) and its corner."""
     cfg = project.gate_sim
@@ -120,8 +138,11 @@ def _netlist(project: Project) -> tuple[Path, Path | None, str]:
         )
     corner = cfg.corner or DEFAULT_CORNER
     sdf = run / "final" / "sdf" / corner / f"{project.top}__{corner}.sdf"
-    if not sdf.is_file():
-        have = sorted(p.name for p in (run / "final" / "sdf").glob("*") if p.is_dir())
+    # Only what ChipLeap recorded of the run counts (chipleap.rtl.provenance).
+    files = recorded_files(project, run)
+    if sdf not in files:
+        sdfs = run / "final" / "sdf"
+        have = sorted({f.parent.name for f in files if f.parent.parent == sdfs})
         raise GlsUnavailable(f"no SDF for corner {corner}; the run has {', '.join(have) or 'none'}")
     return run / "final" / "nl" / f"{project.top}.nl.v", sdf, corner
 
@@ -136,16 +157,35 @@ def prepare(project: Project, workdir: Path) -> tuple[Project, tuple[str, ...], 
         builddir.write_bytes(workdir, f"cells/{m.name}", m.read_bytes())
         for m in cell_models(project)
     ]
-    text = project.read(netlist).decode(errors="replace")
+    # A routed netlist and its SDF are read as ChipLeap recorded them, hash checked; the
+    # synthesized netlist is this step's own.
+    read = (lambda p: read_recorded(project, p)) if sdf is not None else project.read
+    text = read(netlist).decode(errors="replace")
     args: tuple[str, ...] = ()
     if sdf is not None:
         local_sdf = builddir.write_text(
-            workdir, sdf.name, normalize_sdf(project.read(sdf).decode(errors="replace"))
+            workdir, sdf.name, normalize_sdf(read(sdf).decode(errors="replace"))
         )
         text = annotated(text, project.top, local_sdf)
         args = ("-gspecify", "-ginterconnect", f"-T{project.gate_sim.delays}")
     copy = builddir.write_text(workdir, f"{project.top}.gls.v", text)
-    gate = dataclasses.replace(project, sources=(*sources, copy), include_dirs=(), parameters={})
+    extra: list[Path] = []
+    # A netlist with scan chains (dft.insert) has scan ports the tests know nothing of; they
+    # are held at their functional values, as the power step holds them.
+    scan = scan_inputs(text)
+    if scan:
+        if project.tests.toplevel != project.top:
+            raise GlsUnavailable(
+                f"the routed netlist has scan ports ({scan[0]}) and the tests' top is "
+                f"{project.tests.toplevel}, not {project.top}: drive them low in the tests"
+            )
+        extra.append(
+            builddir.write_text(workdir, "chipleap_gls_aux.v", hold_low(project.top, scan))
+        )
+        args = (*args, "-s", "chipleap_gls_aux")
+    gate = dataclasses.replace(
+        project, sources=(*sources, copy, *extra), include_dirs=(), parameters={}
+    )
     used = {
         "netlist": project.rel(netlist),
         "sdf": project.rel(sdf) if sdf else None,
@@ -175,6 +215,8 @@ def gls(project: Project, test_filter: str = "") -> StepResult:
         gate, args, used = prepare(project, workdir)
     except GlsUnavailable as exc:
         return StepResult("gls", "skipped", str(exc))
+    except OpenroadError as exc:
+        return StepResult("gls", "fail", str(exc).splitlines()[0], {"error": str(exc)})
     env = {"GATES": "yes", "CHIPLEAP_PARAMETERS": json.dumps(project.parameters, sort_keys=True)}
     try:
         run = run_tests(

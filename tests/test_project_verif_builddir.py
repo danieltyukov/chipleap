@@ -111,7 +111,7 @@ def test_a_routed_run_behind_a_symlink_is_not_read(counter_project, home, tools,
     p = load_project(counter_project)
     before = tree(home)
     r = run_step(p, step)
-    assert r.status == "fail" and "leads through a symlink" in r.summary, r.summary
+    assert r.status == "fail" and "build/pnr is a symlink" in r.summary, r.summary
     assert tree(home) == before
 
 

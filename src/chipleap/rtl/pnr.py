@@ -24,33 +24,15 @@ from typing import Any
 
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
-from chipleap.rtl.builddir import BuildDirError
+from chipleap.rtl.openroad import ECO_MANIFEST, PNR_MANIFEST, RUN_TAG
 from chipleap.rtl.project import Project, runs_tools
+from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
 from chipleap.verify.pnr import PnrError, PnrResult, parse, run_librelane, signoff
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane
 
 SDC_NAME = "chipleap.sdc"
-RUN_TAG = "chipleap"
-
-
-def routed_run(project: Project) -> Path | None:
-    """The LibreLane run of ``chipleap verify --steps pnr``, if it finished: its final
-    netlist is there. Equivalence and gate-level simulation read it. A project from
-    someone else's repository can ship ``build`` or ``build/pnr`` as a symlink, so the
-    directories down to the run must be the project's own: one reached through a symlink
-    is refused (BuildDirError), never read."""
-    parts = ("build", "pnr", "runs", RUN_TAG)
-    run = project.root.joinpath(*parts)
-    if not (run / "final" / "nl" / f"{project.top}.nl.v").is_file():
-        return None
-    if run.resolve() != project.root.resolve().joinpath(*parts):
-        raise BuildDirError(
-            f"{'/'.join(parts)} leads through a symlink; ChipLeap reads only a run in the "
-            "project's own build directory: remove the symlink and run place and route again"
-        )
-    return run
 
 
 def sdc(project: Project) -> str:
@@ -142,15 +124,35 @@ def margins(project: Project) -> tuple[float, float]:
     return round(min(0.8, 0.08 * period), 3), round(min(1.6, 0.16 * period), 3)
 
 
+def _scan_netlist(project: Project, workdir: Path, src: Path) -> dict[str, Any]:
+    """The configuration's sources for a project with scan: OpenROAD's scan-inserted
+    netlist. LibreLane's synthesis keeps its cells and buffers its assignments; Verilator
+    cannot lint a netlist without the cell models, so lint is off."""
+    from chipleap.rtl.dft import DftError, insert_scan, scan_sealed
+    from chipleap.rtl.netlist import NetlistError
+    from chipleap.rtl.openroad import OpenroadError
+
+    try:
+        scan = insert_scan(project, workdir / "scan")
+        # Through the insertion's manifest: LibreLane routes the bytes that were checked.
+        scan_sealed(scan).copy(scan.netlist, src / scan.netlist.name)
+    except (DftError, OpenroadError, NetlistError, SealError) as exc:
+        raise PnrError(f"scan insertion (dft.insert) failed: {exc}") from exc
+    return {"VERILOG_FILES": [f"dir::src/{scan.netlist.name}"], "RUN_LINTER": False}
+
+
 def config(project: Project, workdir: Path) -> dict[str, Any]:
     """The LibreLane configuration for ``project``; copies its RTL and constraints into
-    ``workdir``."""
+    ``workdir``. With ``dft.insert`` the scan-inserted netlist takes the RTL's place."""
     src = builddir.work_dir(workdir, "src", empty=True)
+    cfg: dict[str, Any] = {"DESIGN_NAME": project.top}
+    if project.dft is not None and project.dft.insert:
+        cfg.update(_scan_netlist(project, workdir, src))
+        return _finish(project, workdir, cfg)
     try:
         files, raw = prepare_verilog(project, src)
     except SynthError as exc:
         raise PnrError(str(exc)) from exc
-    cfg: dict[str, Any] = {"DESIGN_NAME": project.top}
     if raw:
         cfg["VERILOG_FILES"] = [_copy_into(project, f, src) for f in files]
         if project.include_dirs:
@@ -163,6 +165,11 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
         cfg["VERILOG_FILES"] = [f"dir::src/{f.name}" for f in files]
     if project.parameters:
         cfg["SYNTH_PARAMETERS"] = [f"{k}={v}" for k, v in project.parameters.items()]
+    return _finish(project, workdir, cfg)
+
+
+def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+    """The clocks, constraints and signoff settings every configuration shares."""
     clk = project.fastest_clock
     if project.clocks:
         ports = [c.port for c in project.clocks]
@@ -200,10 +207,22 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     if not (ll := librelane()).found:
         raise PnrError(ll.missing("LibreLane"))
     work = project.work_dir(workdir or "pnr")
+    # The manifests go first, so a run that stops halfway leaves none (and an ECO of the
+    # previous run is no longer current); the new one is written once LibreLane has
+    # finished: later steps reuse only what it records.
+    unseal(work, PNR_MANIFEST)
+    unseal(work, ECO_MANIFEST)
     cfg = config(project, work)
-    metrics, gds = run_librelane(work, cfg)
+    metrics, gds = run_librelane(work, cfg, RUN_TAG)
+    seal_routed(work)
     clk = project.fastest_clock
     return parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds)
+
+
+def seal_routed(work: Path) -> Sealed:
+    """Record the routed run in ``work`` (``build/pnr``): the configuration, the
+    constraints and sources ChipLeap copied beside it, and LibreLane's run directory."""
+    return seal(work, PNR_MANIFEST, "pnr", ["config.json", SDC_NAME, "src", f"runs/{RUN_TAG}"])
 
 
 def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:

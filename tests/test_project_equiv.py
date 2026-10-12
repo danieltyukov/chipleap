@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from chipleap.rtl import equiv
+from chipleap.rtl.pnr import seal_routed
 from chipleap.rtl.project import load_project
 from chipleap.rtl.synth import liberty_for
 from chipleap.verify.tools import eqy, yosys
@@ -130,6 +131,7 @@ def test_place_and_route_kept_the_uart_logic(tmp_path):
     (run / "final/nl").mkdir(parents=True)
     shutil.copy(ROUTED / "uart.synth.nl.v", run / "06-yosys-synthesis/uart.nl.v")
     shutil.copy(ROUTED / "uart.nl.v", run / "final/nl/uart.nl.v")
+    seal_routed(root / "build/pnr")  # as place and route records its run
     r = equiv.check_pair(load_project(root), "synth-pnr")
     assert r["status"] == "proved", r
     assert r["points"] > 500 and r["gate"] == "build/pnr/runs/chipleap/final/nl/uart.nl.v"
@@ -141,3 +143,22 @@ def test_the_step_reports_every_pair(counter_project):
     assert r.status == "pass", r.summary
     assert [x["pair"] for x in r.data["pairs"]] == ["rtl-synth"]
     assert "rtl-synth: proved" in r.summary
+
+
+def test_a_routed_run_chipleap_did_not_record_is_not_compared(tmp_path):
+    root = tmp_path / "uart"
+    shutil.copytree(EXAMPLE, root, ignore=shutil.ignore_patterns("build"))
+    run = root / "build/pnr/runs/chipleap"
+    (run / "06-yosys-synthesis").mkdir(parents=True)
+    (run / "final/nl").mkdir(parents=True)
+    shutil.copy(ROUTED / "uart.synth.nl.v", run / "06-yosys-synthesis/uart.nl.v")
+    shutil.copy(ROUTED / "uart.nl.v", run / "final/nl/uart.nl.v")
+    r = equiv.check_pair(load_project(root), "synth-pnr")
+    assert r["status"] == "skipped" and "manifest.json is missing" in r["reason"], r
+    if liberty_for("ihp-sg13g2") is None:
+        return  # the netlists are read only once the liberty is there
+    # Recorded, then the routed netlist swapped: refused before Yosys reads it.
+    seal_routed(root / "build/pnr")
+    (run / "final/nl/uart.nl.v").write_text("module uart(); endmodule\n")
+    with pytest.raises(Exception, match="changed after ChipLeap recorded it"):
+        equiv.check_pair(load_project(root), "synth-pnr")

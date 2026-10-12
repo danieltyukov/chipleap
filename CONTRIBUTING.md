@@ -4,7 +4,7 @@ Thanks for helping with ChipLeap. This page covers the setup, how the code is or
 
 ## Setup
 
-You need Python 3.10 or newer and git. Verilator 5, Yosys, sv2v and the IHP SG13G2 PDK are needed only for the RTL tests and `chipleap verify`; tests that need them skip themselves.
+You need Python 3.10 or newer and git. Verilator 5, Yosys, sv2v and the IHP SG13G2 PDK are needed only for the RTL tests and `chipleap verify`; tests that need them skip themselves. The steps after place and route also use OpenROAD, Icarus 13 (`CHIPLEAP_GL_IVERILOG`), Fault (`pip install fault-dft`, in a tool environment of its own) and Quaigh (`cargo install quaigh`); their real runs are behind `CHIPLEAP_RUN_IMPL=1`.
 
 ```sh
 git clone https://github.com/danieltyukov/chipleap.git

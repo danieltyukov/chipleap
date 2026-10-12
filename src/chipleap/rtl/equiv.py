@@ -46,7 +46,13 @@ from typing import Any
 
 from chipleap.rtl import builddir, confine
 from chipleap.rtl import quote as q
-from chipleap.rtl.pnr import routed_run
+from chipleap.rtl.openroad import (
+    OpenroadError,
+    read_recorded,
+    recorded_files,
+    routed_run,
+    run_dir,
+)
 from chipleap.rtl.project import Project, ProjectError, runs_tools
 from chipleap.rtl.synth import (
     SynthError,
@@ -83,9 +89,23 @@ class Side:
     shown: list[str]  # the files it is made from, relative to the project
 
 
-def _librelane_synth(run: Path, top: str) -> Path | None:
-    found = sorted(run.glob(f"*-yosys-synthesis/{top}.nl.v"))
+def _librelane_synth(project: Project) -> Path | None:
+    """LibreLane's own synthesized netlist in the routed run, as ChipLeap recorded it."""
+    base = run_dir(project)
+    found = [
+        f
+        for f in recorded_files(project, base)
+        if f.parent.parent == base
+        and f.parent.name.endswith("-yosys-synthesis")
+        and f.name == f"{project.top}.nl.v"
+    ]
     return found[-1] if found else None
+
+
+def _copy_recorded(project: Project, netlist: Path, workdir: Path, name: str) -> Path:
+    """A netlist of the routed run (or its ECO) copied into the work directory as ChipLeap
+    recorded it, hash checked (``chipleap.rtl.provenance``)."""
+    return builddir.write_bytes(workdir, name, read_recorded(project, netlist))
 
 
 def _copy_in(project: Project, netlist: Path, workdir: Path, name: str) -> Path:
@@ -144,20 +164,27 @@ def sides(
         )
         return gold, gate
     if pair == "synth-pnr":
+        # The routed design later steps read: an ECO's when ChipLeap made one from the
+        # current run. LibreLane's synthesized netlist is the original run's either way.
         run = routed_run(project)
-        synth = _librelane_synth(run, project.top) if run else None
+        synth = _librelane_synth(project) if run else None
         if run is None or synth is None:
             raise EquivUnavailable(NO_ROUTED_RUN)
-        final = gate_netlist or run / "final" / "nl" / f"{project.top}.nl.v"
+        final = run / "final" / "nl" / f"{project.top}.nl.v"
         gold = Side(
             "LibreLane's synthesized netlist",
-            _netlist(liberty, _copy_in(project, synth, workdir, "gold.v")),
+            _netlist(liberty, _copy_recorded(project, synth, workdir, "gold.v")),
             [project.rel(synth)],
+        )
+        gate_file = (
+            _copy_in(project, gate_netlist, workdir, "gate.v")
+            if gate_netlist is not None
+            else _copy_recorded(project, final, workdir, "gate.v")
         )
         gate = Side(
             "the routed netlist",
-            _netlist(liberty, _copy_in(project, final, workdir, "gate.v")),
-            [project.rel(final)],
+            _netlist(liberty, gate_file),
+            [project.rel(gate_netlist or final)],
         )
         return gold, gate
     raise ValueError(f"unknown pair {pair!r}; pairs: {', '.join(PAIRS)}")
@@ -327,8 +354,13 @@ def check_pair(project: Project, pair: str, *, gate_netlist: Path | None = None)
     engine = project.equivalence.engine
     head: dict[str, Any] = {"pair": pair, "engine": engine}
     # What the pair needs from the project comes first: it says what to run next.
-    if pair == "synth-pnr" and routed_run(project) is None:
-        return {**head, "status": "skipped", "reason": NO_ROUTED_RUN}
+    if pair == "synth-pnr":
+        try:
+            routed = routed_run(project)
+        except OpenroadError as exc:  # a routed run ChipLeap did not record here
+            return {**head, "status": "skipped", "reason": str(exc)}
+        if routed is None:
+            return {**head, "status": "skipped", "reason": NO_ROUTED_RUN}
     liberty = liberty_for(project.tech)
     if liberty is None:
         return {**head, "status": "skipped", "reason": no_liberty(project.tech)}
@@ -385,7 +417,11 @@ def check_pair(project: Project, pair: str, *, gate_netlist: Path | None = None)
 def _pairs(project: Project) -> list[str]:
     if project.equivalence.checks:
         return list(project.equivalence.checks)
-    return ["rtl-synth", *(["synth-pnr"] if routed_run(project) else [])]
+    try:
+        routed = routed_run(project) is not None
+    except OpenroadError:
+        routed = True  # check_pair says why it cannot use it
+    return ["rtl-synth", *(["synth-pnr"] if routed else [])]
 
 
 def _describe(r: dict[str, Any]) -> str:

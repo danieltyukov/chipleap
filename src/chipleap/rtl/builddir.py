@@ -88,6 +88,23 @@ def work_dir(root: Path, *parts: str, empty: bool = False) -> Path:
     return target
 
 
+def existing_dir(root: Path, *parts: str) -> Path | None:
+    """``root/parts...`` when it exists, reached below ``root`` without a symlink, for a
+    step that only reads what another step left there; None when a part is missing.
+    Nothing is created or removed. What is read there must still be checked (a routed
+    run against ChipLeap's manifest, ``chipleap.rtl.provenance``): this only keeps a
+    step from being pointed at another directory's results."""
+    here = Path(root)
+    for name in _names(parts):
+        here = here / name
+        try:
+            st = os.lstat(here)
+        except FileNotFoundError:
+            return None
+        _refuse(here, st, directory=True)
+    return here
+
+
 def output_dir(path: Path, *, empty: bool = False) -> Path:
     """A directory the user named for ChipLeap's output (``-o out``), as a resolved path.
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Sequence
 from typing import Any
 
@@ -23,6 +24,11 @@ STEP_TITLES = {
     "cdc": "Clock and reset domain crossings",
     "equiv": "Equivalence",
     "gls": "Gate-level simulation",
+    "eco": "Engineering change order",
+    "dft": "Design for test",
+    "power": "Gate-level power",
+    "ir_drop": "IR drop",
+    "upf": "Power intent (UPF)",
 }
 DIAG_ROWS = 100
 
@@ -116,6 +122,55 @@ def _kv(r: StepResult) -> list[tuple[str, str]]:
                 f"{d['drc_errors']} / {d.get('lvs_errors', d.get('connectivity_errors', 0))}"
                 f" / {d['antenna_nets']}",
             ),
+        ]
+    if r.name == "dft" and "chains" in d:
+        kv = [
+            ("scan chains", str(len(d["chains"]))),
+            ("flip-flops scanned", f"{d['scanned']} of {d['flops']}"),
+        ]
+        if d.get("atpg"):
+            a = d["atpg"]
+            kv += [
+                ("stuck-at coverage", f"{a['coverage_pct']:.1f}%"),
+                ("patterns", str(a["patterns"])),
+            ]
+        for key, label in (("simulation", "scan netlist"), ("simulation_routed", "routed netlist")):
+            sim = d.get(key)
+            if sim:
+                ok = sim["flush"] == "pass" and not sim["errors"]
+                kv.append(
+                    (
+                        f"patterns simulated, {label}",
+                        f"{sim['patterns']} {'pass' if ok else 'fail'}",
+                    )
+                )
+        return kv
+    if r.name == "power" and "corners" in d:
+        kv = []
+        for c in d["corners"]:
+            value = c["vcd_mw"] if c["vcd_mw"] is not None else c["vectorless_mw"]
+            how = "from the tests" if c["vcd_mw"] is not None else "vectorless"
+            kv.append((f"{c['corner']} ({how})", f"{value:.3g} mW"))
+        if d.get("librelane_mw") is not None:
+            kv.append(("LibreLane's estimate", f"{d['librelane_mw']:.3g} mW"))
+        return kv
+    if r.name == "ir_drop" and "nets" in d:
+        return [
+            (f"worst on {n['net']}", f"{n['worst_mv']:.3g} mV ({n['worst_pct']:.2g}%)")
+            for n in d["nets"]
+        ]
+    if r.name == "upf" and "domains" in d:
+        return [
+            ("power domains", str(len(d["domains"]))),
+            ("signals between domains", str(sum(c["nets"] for c in d["crossings"]))),
+        ]
+    if r.name == "eco" and "after" in d:
+        b, a = d["before"], d["after"]
+        return [
+            ("changes", str(len(d["changes"]))),
+            ("setup slack, slow", f"{b['setup_slack_ns']:+.3f} to {a['setup_slack_ns']:+.3f} ns"),
+            ("hold slack", f"{b['hold_slack_ns']:+.3f} to {a['hold_slack_ns']:+.3f} ns"),
+            ("DRC / LVS / antenna", f"{a['drc_errors']} / {a['lvs_errors']} / {a['antenna_nets']}"),
         ]
     if r.name == "coverage" and "kinds" in d:
         return [
@@ -250,6 +305,130 @@ def _coverage_rows(r: StepResult) -> tuple[list[str], list[list[str]]]:
     return ["file", *kinds], rows
 
 
+def _num(value: Any, fmt: str = ".3g") -> str:
+    return "" if value is None else format(value, fmt)
+
+
+def _impl_tables(r: StepResult) -> list[tuple[str, list[str], list[list[str]]]]:
+    """The implementation steps' tables: (caption, head, rows)."""
+    d = r.data
+    out: list[tuple[str, list[str], list[list[str]]]] = []
+    if r.name == "dft" and d.get("chains"):
+        out.append(
+            (
+                "Scan chains",
+                ["chain", "flip-flops", "scan in", "scan out", "clock"],
+                [
+                    [c["name"], str(c["length"]), c["scan_in"], c["scan_out"], c["clock"]]
+                    for c in d["chains"]
+                ],
+            )
+        )
+        for key in ("simulation", "simulation_routed"):
+            sim = d.get(key) or {}
+            if sim.get("mismatches"):
+                out.append(("Mismatches", ["where"], [[m] for m in sim["mismatches"]]))
+    if r.name == "power" and d.get("corners"):
+        rows = []
+        for c in d["corners"]:
+            for g, v in c["groups"].items():
+                rows.append([c["corner"], g, _num(v["vectorless_mw"]), _num(v["vcd_mw"])])
+            rows.append([c["corner"], "Total", _num(c["vectorless_mw"]), _num(c["vcd_mw"])])
+        out.append(
+            ("Power by group, mW", ["corner", "group", "vectorless", "from the tests"], rows)
+        )
+    if r.name == "ir_drop" and d.get("nets"):
+        out.append(
+            (
+                "Supply nets",
+                ["net", "worst mV", "average mV", "worst %", "worst cells"],
+                [
+                    [
+                        n["net"],
+                        _num(n["worst_mv"]),
+                        _num(n["average_mv"]),
+                        _num(n["worst_pct"], ".2g"),
+                        ", ".join(w["instance"] for w in n["worst_instances"][:3]),
+                    ]
+                    for n in d["nets"]
+                ],
+            )
+        )
+    if r.name == "upf" and d.get("domains"):
+        out.append(
+            (
+                "Power domains",
+                ["domain", "elements", "cells", "voltage", "area (um)", "placed inside"],
+                [
+                    [
+                        x["name"],
+                        " ".join(x["elements"]),
+                        str(x["cells"]),
+                        _num(x["voltage"], "g"),
+                        " ".join(f"{v:g}" for v in x["area_um"]) if x["area_um"] else "the core",
+                        ""
+                        if x["placed_inside"] is None
+                        else f"{x['placed_inside']} of {x['cells']}",
+                    ]
+                    for x in d["domains"]
+                ],
+            )
+        )
+        if d.get("crossings"):
+            out.append(
+                (
+                    "Signals between domains",
+                    ["from", "to", "signals", "level shifters", "such as"],
+                    [
+                        [
+                            c["from"],
+                            c["to"],
+                            str(c["nets"]),
+                            "needed" if c["needs_level_shifters"] else "",
+                            ", ".join(c["examples"][:3]),
+                        ]
+                        for c in d["crossings"]
+                    ],
+                )
+            )
+    if r.name == "eco" and d.get("changes"):
+        out.append(
+            (
+                "Changes",
+                ["change", "target", "cell", "result"],
+                [
+                    [
+                        next(k for k in ("resize", "buffer", "repair") if k in c),
+                        str(c.get("resize") or c.get("buffer") or c.get("repair")),
+                        c.get("cell", ""),
+                        c.get("result", ""),
+                    ]
+                    for c in d["changes"]
+                ],
+            )
+        )
+    return out
+
+
+def _maps(p: Project, r: StepResult) -> list[tuple[str, str]]:
+    """The IR drop maps: (net, SVG text), read from the project's build directory."""
+    if r.name != "ir_drop":
+        return []
+    out = []
+    for n in r.data.get("nets", []):
+        rel = n.get("map")
+        path = p.root / rel if rel else None
+        if (
+            path is not None
+            and path.is_file()
+            and path.resolve().is_relative_to(p.build_dir.resolve())
+        ):
+            text = path.read_text(errors="replace")
+            if text.lstrip().startswith("<svg"):
+                out.append((n["net"], text))
+    return out
+
+
 def project_markdown(p: Project, results: Sequence[StepResult]) -> str:
     lines = [f"# Verification of {p.name}", ""]
     if p.description:
@@ -273,6 +452,12 @@ def project_markdown(p: Project, results: Sequence[StepResult]) -> str:
             lines += [md_table(head, rows), ""]
         for head, rows in _tables(r):
             lines += [md_table(head, rows), ""]
+        for caption, head, rows in _impl_tables(r):
+            lines += [f"{caption}:", "", md_table(head, rows), ""]
+        for net in (
+            (n for n in r.data.get("nets", []) if n.get("map")) if r.name == "ir_drop" else []
+        ):
+            lines += [f"Map of {net['net']}: `{net['map']}`", ""]
         diags = r.data.get("diagnostics") or []
         if diags:
             lines += [md_table(DIAG_HEAD, _diag_rows(diags)), ""]
@@ -336,6 +521,16 @@ def project_html(p: Project, results: Sequence[StepResult]) -> str:
                         [[_loc(u), u["kind"], u["name"]] for u in unc[:50]],
                     )
                 )
+        for caption, head, rows in _impl_tables(r):
+            parts.append(f"<p>{esc(caption)}:</p>")
+            parts.append(_table(head, rows))
+        for net, svg in _maps(p, r):
+            # As an image, so nothing in the file can run in the report, whatever wrote it.
+            data = base64.b64encode(svg.encode()).decode()
+            parts.append(
+                f'<figure><img src="data:image/svg+xml;base64,{data}" alt="IR drop on '
+                f'{esc(net)}"><figcaption>{esc(net)}</figcaption></figure>'
+            )
         diags = r.data.get("diagnostics") or []
         if diags:
             parts.append(_table(DIAG_HEAD, _diag_rows(diags)))

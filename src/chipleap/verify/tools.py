@@ -99,6 +99,11 @@ def _usable_path(exclude: Iterable[str | Path], path: str | None) -> str:
     return search_path(exclude, path) or search_path(exclude, os.defpath)
 
 
+# Search paths other than PATH that a tool resolves an empty or relative entry of against
+# its working directory: Python's module path and the dynamic loader's.
+LIBRARY_PATHS = ("PYTHONPATH", "LD_LIBRARY_PATH")
+
+
 def clean_env(
     prepend: Iterable[str | Path] = (),
     exclude: Iterable[str | Path] = (),
@@ -109,13 +114,34 @@ def clean_env(
     rule. Every program ChipLeap starts gets an environment from here, so a tool that
     starts another by name (SymbiYosys starts yosys and z3, cocotb starts the simulator,
     a script's ``#!/usr/bin/env python3`` starts Python) never finds one in its working
-    directory or the project."""
+    directory or the project. ``PYTHONPATH`` and ``LD_LIBRARY_PATH`` are held to the same
+    rule (one left empty is removed, since an empty one means the current directory), so
+    a project's ``sitecustomize`` or shared library is not loaded either, and a
+    ``PYTHONHOME`` inside the project is dropped."""
     exclude = list(exclude)
     env = dict(os.environ if base is None else base)
     first = search_path(exclude, os.pathsep.join(str(d) for d in prepend))
     rest = _usable_path(exclude, env.get("PATH", os.defpath))
     env["PATH"] = os.pathsep.join(p for p in (first, rest) if p)
+    for var in LIBRARY_PATHS:
+        if var in env:
+            kept = search_path(exclude, env[var])
+            if kept:
+                env[var] = kept
+            else:
+                del env[var]
+    home = env.get("PYTHONHOME")
+    if home is not None and excluded(home, exclude):
+        del env["PYTHONHOME"]
     return env
+
+
+def excluded(path: str | Path, exclude: Iterable[str | Path] = ()) -> bool:
+    """Whether ``path`` is relative, or inside ``exclude`` or an ``untrusted`` directory."""
+    if not os.path.isabs(path):
+        return True
+    real = Path(os.path.realpath(path))
+    return any(real.is_relative_to(b) for b in _banned(exclude))
 
 
 def probe(cmd: list[str], timeout: float = 20) -> subprocess.CompletedProcess[str]:
@@ -208,7 +234,13 @@ def yosys() -> Tool:
 
 
 def openroad() -> Tool:
-    return find("openroad", ["-version"], r"(\S+)", "static timing (OpenSTA)", "CHIPLEAP_OPENROAD")
+    return find(
+        "openroad",
+        ["-version"],
+        r"(\S+)",
+        "static timing, scan insertion, power, IR drop, UPF and ECO (OpenROAD)",
+        "CHIPLEAP_OPENROAD",
+    )
 
 
 def sta() -> Tool:
@@ -290,6 +322,130 @@ def sv2v() -> Tool:
     )
 
 
+GL_ICARUS_MIN = (13,)
+GL_PURPOSE = "gate-level simulation of IHP cells: scan patterns and power activity (13 or newer)"
+
+
+def gl_iverilog() -> Tool:
+    """An Icarus Verilog that simulates IHP SG13G2's cell models. Icarus 12 elaborates
+    them but leaves every flip-flop at X, so it needs 13 or newer: ``CHIPLEAP_GL_IVERILOG``,
+    else the ``iverilog`` ChipLeap uses (``CHIPLEAP_IVERILOG`` or the path) when it is new
+    enough. Its ``vvp`` is the one beside it."""
+    name = "iverilog-gl"
+    path, note = located("iverilog", "CHIPLEAP_GL_IVERILOG")
+    if path is None and not os.environ.get("CHIPLEAP_GL_IVERILOG"):
+        path, note = located("iverilog", "CHIPLEAP_IVERILOG")
+    if path is None:
+        return Tool(name, None, "", GL_PURPOSE, note)
+    version = _version([path, "-V"], r"Icarus Verilog version (\S+)")
+    numbers = tuple(int(x) for x in re.findall(r"\d+", version)[:1])
+    if numbers < GL_ICARUS_MIN:
+        return Tool(name, None, version, GL_PURPOSE, f"{path} is Icarus {version or '?'}")
+    return Tool(name, path, version, GL_PURPOSE)
+
+
+def gl_vvp(tool: Tool) -> str | None:
+    """The ``vvp`` that goes with a gate-level Icarus: the two must be the same version."""
+    if tool.path is None:
+        return None
+    return which(str(Path(tool.path).parent / "vvp"))
+
+
+def quaigh() -> Tool:
+    return find(
+        "quaigh",
+        ["--version"],
+        r"quaigh (\S+)",
+        "test pattern generation for Fault (ATPG)",
+        "CHIPLEAP_QUAIGH",
+    )
+
+
+def nl2bench() -> Tool:
+    return find("nl2bench", ["--help"], r"(nl2bench)", "netlist to bench for Fault's ATPG")
+
+
+def fault() -> Tool:
+    path, note = located("fault", "CHIPLEAP_FAULT")
+    purpose = "ATPG and stuck-at fault coverage (Fault, with Quaigh)"
+    if path is None:
+        return Tool("fault", None, "", purpose, note)
+    try:
+        with tempfile.TemporaryDirectory(prefix="chipleap-probe-") as empty:
+            out = subprocess.run(
+                [path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+                cwd=empty,
+                env=fault_env(path),
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        return Tool("fault", path, "", purpose)
+    m = re.search(r"^(\d+\.\d+\.\d+)\s*$", out.stdout, re.M)
+    return Tool("fault", path, m.group(1) if m else "", purpose)
+
+
+def _interpreter(script: str) -> str | None:
+    """The Python a console script runs under, from its first line, as ``which`` finds
+    it: a bare name after ``env`` is looked up on the trusted search path, not the
+    script's."""
+    try:
+        with open(script, "rb") as fh:
+            head = fh.readline(400).decode(errors="replace").strip()
+    except OSError:
+        return None
+    if not head.startswith("#!"):
+        return None
+    words = head[2:].split()
+    if not words:
+        return None
+    exe = words[-1] if Path(words[0]).name == "env" else words[0]
+    return which(exe) if "python" in Path(exe).name else None
+
+
+def fault_env(fault_path: str, base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment Fault needs. Fault from PyPI embeds Python and does not see the
+    virtual environment it was installed in, so its packages go on ``PYTHONPATH`` (and
+    the base installation in ``PYTHONHOME``), asked of the interpreter Fault is installed
+    with, in isolated mode (``-I``: no current directory, user site or ``PYTHON*``
+    variables). It also runs ``vvp`` from the path, which must match the ``iverilog``
+    that compiled the testbench, so both are named; and Quaigh goes first on the path.
+    Everything goes through ``clean_env``."""
+    env = dict(os.environ if base is None else base)
+    py = _interpreter(fault_path)
+    if py is not None:
+        try:
+            out = probe(
+                [
+                    py,
+                    "-I",
+                    "-c",
+                    "import sys, sysconfig; print(sysconfig.get_paths()['purelib']); "
+                    "print(sys.base_prefix)",
+                ],
+                timeout=60,
+            )
+            lines = out.stdout.splitlines()
+            if out.returncode == 0 and len(lines) >= 2 and not excluded(lines[1]):
+                env["PYTHONPATH"] = os.pathsep.join([lines[0], env.get("PYTHONPATH", "")])
+                env["PYTHONHOME"] = lines[1]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    first: list[str] = []
+    gl = gl_iverilog()
+    vvp = gl_vvp(gl)
+    if gl.path and vvp:
+        env["FAULT_IVERILOG"] = gl.path
+        env["FAULT_VVP"] = vvp
+        first.append(str(Path(gl.path).parent))
+    q = quaigh()
+    if q.path:
+        first.append(str(Path(q.path).parent))
+    return clean_env(first, base=env)
+
+
 def riscv_gcc() -> Tool:
     for name in (
         "riscv32-unknown-elf-gcc",
@@ -323,6 +479,9 @@ def all_tools() -> list[Tool]:
         sby(),
         eqy(),
         z3(),
+        gl_iverilog(),
+        fault(),
+        quaigh(),
     ]
 
 
@@ -341,6 +500,30 @@ COMMERCIAL = (
 
 def commercial() -> list[Tool]:
     return [Tool(n, which(n), "", purpose) for n, purpose in COMMERCIAL]
+
+
+PDK_ROOTS = (
+    "~/.volare",
+    "~/.ciel",
+    "~/.local/share/pdk",
+    "/usr/local/share/pdk",
+    "/opt/pdk",
+)
+
+
+def pdk_roots() -> tuple[Path, ...]:
+    """Where PDKs live on this machine: ``PDK_ROOT`` and the usual install directories,
+    resolved. Files the implementation steps take from a PDK must be under one of them,
+    or beside the liberty ``CHIPLEAP_LIBERTY`` names. Relative settings count for
+    nothing (``liberty_settings_problem``)."""
+    pdk_root = os.environ.get("PDK_ROOT", "")
+    roots = [pdk_root if os.path.isabs(pdk_root) else "", *PDK_ROOTS]
+    out = [Path(r).expanduser().resolve() for r in roots if r and Path(r).expanduser().is_dir()]
+    env = os.environ.get("CHIPLEAP_LIBERTY")
+    if env and os.path.isabs(env) and Path(env).is_file():
+        # libs.ref/<library>/lib/<file>.lib: the library's own directory holds its views.
+        out.append(Path(env).resolve().parent.parent)
+    return tuple(dict.fromkeys(out))
 
 
 def liberty_settings_problem() -> str:
