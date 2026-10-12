@@ -259,6 +259,29 @@
       ]
     },
     {
+      "package": "broken/pdk-cell-name/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_tap\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do"
+        },
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.spice",
+          "message": "subcircuit \"Sg13g2_Dly\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do"
+        }
+      ]
+    },
+    {
       "package": "broken/power-pin-as-signal/tiny_counter.macro",
       "pdk": null,
       "name": "tiny_counter",

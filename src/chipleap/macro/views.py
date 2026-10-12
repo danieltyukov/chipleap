@@ -744,6 +744,20 @@ def spice_subckt(text: str, name: str, limits: Limits = LIMITS) -> SpiceSubckt |
     return None
 
 
+def spice_subckts(text: str, limits: Limits = LIMITS) -> list[str]:
+    """The names of every ``.subckt`` of a SPICE file, in file order. Raises
+    :class:`LimitError` when the file has too many lines."""
+    count = text.count("\n") + text.count("\r") - text.count("\r\n") + 1
+    if count > limits.tokens:
+        raise LimitError(f"the SPICE file has more than {limits.tokens} lines")
+    out = []
+    for raw in _lines(text):
+        ws = words(_spice_code(raw.strip(WHITESPACE)))
+        if len(ws) >= 2 and ascii_lower(ws[0]) == ".subckt":
+            out.append(ws[1])
+    return out
+
+
 def _spice_code(line: str) -> str:
     if line.startswith("*"):
         return ""

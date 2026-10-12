@@ -191,6 +191,8 @@ Known operations: `drc`, `lvs`, `antenna`, `erc`, `density`, `sta`, `pex`, `sim`
 
 The tool that places a macro passes its own PDK: `macro check DIR --pdk ihp-sg13g2` or `--pdk ihp-sg13g2@22f2a25`. A different PDK name is an error; a different commit is a warning, because a PDK update often leaves a block valid but should be looked at.
 
+A chip merges the layouts and the netlists of its cells by name, so a macro cell named like a cell of its PDK would replace that cell. For a package whose `pdk.name` is `ihp-sg13g2`, the package's name, every cell of its GDS and every subcircuit of its SPICE file, compared with ASCII letters folded to lower case, must not begin with `sg13g2` or `rm_ihpsg13`, the names of the PDK's standard, IO and SRAM cells (`pdk.cell_name`). A validator that has the PDK's libraries (the LEF macros, CDL subcircuits and GDS cells of every library under `libs.ref`) also refuses any of those names that equals one of their cells. The check runs with or without `--pdk`, after every other rule: the package's name first, then the cells of the GDS in file order, then the subcircuits in file order, leaving out the top cell and the subcircuit named `<name>`.
+
 ## Limits
 
 A package can come from anyone, so a validator reads it within limits that no real macro comes near. A file or a structure past a limit gives a finding, never a hang, a crash or a machine out of memory, and both tools use the same values. A MiB is 1,048,576 bytes.
@@ -287,6 +289,7 @@ Every finding has a rule id, a severity, the file it concerns (relative to the p
 | `evidence.stale` | error | an input's SHA-256 differs from the package file |
 | `pdk.mismatch` | error | a summary names another PDK or commit than `macro.toml` |
 | `pdk.expected` | error or warning | the package is for another PDK (error) or commit (warning) than `--pdk` |
+| `pdk.cell_name` | error | the package's name, a GDS cell or a subcircuit is in its PDK's cell name space, or is a cell of the PDK's libraries (see Checking against the chip's PDK) |
 | `check.limit` | warning | the report leaves out findings past the first 1,000 |
 
 Messages are identical in both tools, except the detail after `: ` in `*.parse`, `*.syntax` and `file.unreadable` messages, which comes from each tool's parser or operating system. The shared fixtures pin every message.

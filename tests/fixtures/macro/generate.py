@@ -462,10 +462,12 @@ measured = {{ tt = 20.1e-6, ss = 18.7e-6, ff = 22.4e-6 }}
 # The digital macro: a 2-bit counter with enable and active-low reset, 20 x 10 um.
 
 
-def counter_gds(top: str = "tiny_counter", hierarchy: str = "") -> bytes:
+def counter_gds(
+    top: str = "tiny_counter", hierarchy: str = "", tap_name: str = "tiny_counter_tap"
+) -> bytes:
     """The counter's layout; ``hierarchy`` adds references the validators must refuse
     or measure without visiting every instance."""
-    tap = Cell("tiny_counter_tap")
+    tap = Cell(tap_name)
     tap.rect(ACTIV, 0, 0, 300, 300)
     cell = Cell(top)
     cell.rect(PR_BOUNDARY, 0, 0, 20000, 10000)
@@ -474,7 +476,7 @@ def counter_gds(top: str = "tiny_counter", hierarchy: str = "") -> bytes:
     cell.text(METAL1_TEXT, 10000, 9700, "VDD").text(METAL1_TEXT, 10000, 300, "VSS")
     # A routed net with flush ends that stop on the boundary.
     cell.path(METAL1, 200, 0, 0, 5000, 4000, 5000, 4000, 8000)
-    cell.aref("tiny_counter_tap", 4, 2, 6000, 1000, 2000, 1000)
+    cell.aref(tap_name, 4, 2, 6000, 1000, 2000, 1000)
     for name, x0, y0 in (
         ("clk", 0, 2000),
         ("rst_n", 0, 3500),
@@ -972,6 +974,23 @@ VARIANTS: list[tuple[str, Callable[[], Files], str, Callable[[Files], Files]]] =
                 f, "lvs", ["tiny_counter.gds", "tiny_counter.spice"], status="fail"
             ),
         },
+    ),
+    (
+        # Cells named in IHP SG13G2's own name spaces: a tap cell called like a standard
+        # cell, and a subcircuit whose name only differs in case.
+        "pdk-cell-name",
+        counter,
+        "tiny_counter.macro",
+        lambda f: with_evidence(
+            {
+                **f,
+                "tiny_counter.gds": counter_gds(tap_name="sg13g2_tap"),
+                "tiny_counter.spice": (
+                    COUNTER_SPICE + ".SUBCKT Sg13g2_Dly a y\n.ENDS Sg13g2_Dly\n"
+                ).encode(),
+            },
+            "tiny_counter",
+        ),
     ),
     (
         "power-pin-as-signal",

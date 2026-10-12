@@ -37,9 +37,9 @@ EXPECTED = json.loads((FIXTURES / "expected.json").read_text())
 # The contract both repositories share. aispice pins the same hashes in
 # crates/aispice-core/tests/macro_contract.rs; change both together (CONTRIBUTING.md).
 CONTRACT = {
-    "docs/macro-package.md": "b163157047ac18658b59d2bf2aec91a61823cd4056a9bb8d0427d31eb953069c",
+    "docs/macro-package.md": "976788bbecd1b8d34efe2a74ae93dd4477609f6e8d7a0a1bb1b99e716251f643",
     "src/chipleap/macro/macro-v1.schema.json": "01fadd5205677b27ef3dcc5a00c086aaf00f2dba63d398d17fc046dd67254327",
-    "tests/fixtures/macro/SHA256SUMS": "62a75b14e98a40a72df85162862e2cb980be2afd8692aec6b6d42917338b0074",
+    "tests/fixtures/macro/SHA256SUMS": "e81a64f11304d8ea84e0d2636d6bc49693b3a57994123cccf52690f99a69453d",
 }
 
 
@@ -540,3 +540,74 @@ def test_mcp_check_macro_tool(tmp_path):
             assert json.loads(r.content[0].text)["pass"] is True
 
     asyncio.run(go())
+
+
+# pdk.cell_name: cells named like the PDK's own
+
+
+def _generator():
+    return runpy.run_path(str(FIXTURES / "generate.py"))
+
+
+def _counter(tmp_path: Path, name: str, tap: str = "") -> Path:
+    """tiny_counter renamed to ``name``, its tap cell named ``tap``, valid otherwise."""
+    gen = _generator()
+    files = gen["counter"]()
+    out = {}
+    for rel, data in files.items():
+        if rel.startswith("evidence/") or rel.endswith(".gds"):
+            continue
+        out[rel.replace("tiny_counter", name)] = data.replace(b"tiny_counter", name.encode())
+    out[f"{name}.gds"] = gen["counter_gds"](top=name, tap_name=tap or f"{name}_tap")
+    gen["with_evidence"](out, name)
+    dest = tmp_path / f"{name}.macro"
+    gen["write"](dest, out)
+    return dest
+
+
+def test_a_package_named_in_the_pdks_name_space_is_refused(tmp_path):
+    report = check_package(_counter(tmp_path, "sg13g2_counter"))
+    assert [(f.rule, f.file) for f in report.findings] == [
+        ("pdk.cell_name", "macro.toml"),
+        ("pdk.cell_name", "sg13g2_counter.gds"),  # its tap cell, sg13g2_counter_tap
+    ]
+    assert report.findings[0].message == (
+        'name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do'
+    )
+
+
+def test_case_does_not_hide_a_pdk_cell_name(tmp_path):
+    report = check_package(_counter(tmp_path, "counter", tap="RM_IHPSG13_tap"))
+    assert [f.message for f in report.findings] == [
+        'GDS cell "RM_IHPSG13_tap" begins with "rm_ihpsg13", as the cells of PDK "ihp-sg13g2" do'
+    ]
+
+
+def test_a_cell_of_the_pdks_libraries_is_refused_when_the_validator_has_them(tmp_path):
+    pkg = _counter(tmp_path, "counter", tap="nmos")
+    assert check_package(pkg).passed
+    report = check_package(pkg, pdk_cells=["nmos", "pmos"])
+    assert [f.message for f in report.findings] == ['GDS cell "nmos" is a cell of PDK "ihp-sg13g2"']
+    assert check_package(pkg, pdk_cells=["NMOS"]).errors == 1
+
+
+def test_other_pdks_have_no_name_space_of_ihps(tmp_path):
+    pkg = _counter(tmp_path, "sg13g2_counter")
+    toml = pkg / "macro.toml"
+    toml.write_text(toml.read_text().replace('name = "ihp-sg13g2"', 'name = "other-pdk"'))
+    rules = [f.rule for f in check_package(pkg).findings]
+    assert "pdk.cell_name" not in rules
+
+
+def test_the_cli_reads_the_pdks_libraries(tmp_path, capsys):
+    pkg = _counter(tmp_path, "counter", tap="nmos")
+    libs = tmp_path / "pdk" / "ihp-sg13g2" / "libs.ref" / "sg13g2_pr" / "lef"
+    libs.mkdir(parents=True)
+    (libs / "sg13g2_pr.lef").write_text("MACRO nmos\nEND nmos\n")
+    assert main(["macro", "check", str(pkg)]) == 0
+    capsys.readouterr()
+    assert (
+        main(["macro", "check", str(pkg), "--pdk-libs", str(tmp_path / "pdk" / "ihp-sg13g2")]) == 1
+    )
+    assert "pdk.cell_name" in capsys.readouterr().out
+    assert main(["macro", "check", str(pkg), "--pdk-libs", str(tmp_path / "none")]) == 2
