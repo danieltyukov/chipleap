@@ -104,6 +104,11 @@ eco:                          # changes to the routed design, applied by the eco
   - {resize: _211_, cell: sg13g2_nor2_2}
   - {buffer: _212_/Y, cell: sg13g2_buf_2}
   - {repair: setup, margin_ns: 0.5}
+macros:                       # IHP's SRAM macros the RTL instantiates (see below)
+  - instance: u_core/u_mem    # the instance's path; at most 8 levels
+    cell: RM_IHPSG13_1P_1024x32_c2_bm_bist
+    at_um: [40, 20]           # lower left from the core's, in um; needs pnr.die_um
+    orientation: N            # N, S, FN or FS
 chip:                         # optional: the whole chip, with a pad ring and macros (chips.md)
   pads:
     south: [clk_i, rst_ni, vdd, vss]
@@ -124,7 +129,18 @@ The verification sections are checked like the rest: check names are identifiers
 
 A power domain's elements are hierarchical instance paths (`u_rx`, `u_core/u_alu`); exactly one domain has none, the top. ECO targets are names in the routed netlist, which may hold characters other names may not (`\u_rx.data_q[3]`): any printable characters but white space, quotes, braces, `;`, a backtick and `$`. They reach OpenROAD as data, never as script text.
 
-The `chip` section is described in [chips.md](chips.md). A section name that later versions will read (`macros`) is rejected with a message saying it is not read yet, so a file written for a newer ChipLeap fails clearly.
+The `chip` section is described in [chips.md](chips.md).
+
+### SRAM macros
+
+The `macros` section lists the SRAM macros of IHP's PDK (`sg13g2_sram`, the single-port `RM_IHPSG13_1P_*` cells) that the RTL instantiates by their cell names. Each entry gives the instance's path in the design (`u_core/u_mem`; in the flattened netlist it is `u_core.u_mem`), the cell, and optionally where its lower left goes in the core and its orientation. At most 32 macros; coordinates are on the 5 nm grid. The steps use them so:
+
+- `lint` and `synth` read a black-box module with the macro's ports, written from the cell's name, so they work without the PDK. Synthesis keeps each macro as an instance and reports the macros' area from the PDK's LEF beside the standard cells' when the PDK is installed.
+- `sim` and `coverage` add the PDK's own model of each macro, behavioural under `FUNCTIONAL` (which ChipLeap defines), copied from the PDK ChipLeap uses into the step's directory. Without the PDK the step fails and names the variable to set (`CHIPLEAP_IHP_PDK`).
+- `pnr` copies the macros' LEF, GDS, CDL and liberty at every corner beside the run, so timing at the slow corner includes the macros' own arcs and LVS checks them as boxes with their pins. Without `pnr.die_um`, ChipLeap sizes the die from the macros and the standard cells' area (from a synthesis) at `pnr.utilisation`, and places the macros in a row along the top of the core (pins down) and a mirrored row along the bottom (pins up), the logic between them; with `pnr.die_um`, every macro needs its `at_um`. The power grid is LibreLane's, with a macro grid over each SRAM: Metal5 straps across its Metal4 supply stripes and TopMetal1 stripes over them, joined to the core's TopMetal2 stripes. So each macro must lie under a whole VDD and VSS pair of those stripes (every 75.6 um, 10 um inside its top and bottom edges); a placement that is not is refused with where the macro could go. The first 40 um of the core from its left edge stay free of macros, for a column of rows that keeps the core's power grid across the whole core.
+- `formal`, `cdc`, `equiv`, `gls`, `eco`, `dft`, `power`, `ir_drop`, `upf`, `chip` and the commercial tools do not model a macro yet: on a project with macros they skip and name the macros.
+
+`examples/sram` is a 1 KiB scratchpad in one `RM_IHPSG13_1P_256x32_c2_bm_bist` with byte enables, with cocotb tests against a dictionary of words.
 
 ## The steps
 

@@ -24,7 +24,9 @@ Measured on 2026-10-12 with LibreLane 3.0.0.dev44 (its IHP PDK at `cb7daaa`) and
 
 `chipleap.macro.grid` writes the PDN script for any set of placed PDK macros: LibreLane's `pdn_cfg.tcl` sourced, a global connection per supply pin of each instance to `VDD_NET` or `GND_NET`, and one macro grid per cell as in fact 3. D4's chip PDN takes the same grid for every view with `supply_hookup=False`, instead of refusing it. A macro whose supply pins are not on Metal4 is refused, with the layer named.
 
-The core's TopMetal2 stripes (75.6 um pitch) connect each macro grid, so a macro must lie under a whole VDD and VSS pair of them. Macros at least 104 um tall (a pitch, a pair and the grid's inset at both ends) always do; for a shorter one the placement moves it up until a pair falls inside, and the PDN script checks the pair is there before LibreLane runs.
+The macro grid's halo is 5 um, half the 10 um the rows are cut to around a macro. With both at 10 um, the first real run left the rails just beside a row of macros without a core strap and pdngen could not repair them (PDN-0179).
+
+The core's TopMetal2 stripes (75.6 um pitch) connect each macro grid, so a macro must lie under a whole VDD and VSS pair of them. Macros at least 104 um tall (a pitch, a pair and the grid's inset at both ends) always do; a shorter one moves towards the logic until a pair falls inside, and the PDN script checks the pair is there before LibreLane runs, naming where a misplaced macro could go.
 
 ### The generated accelerator
 
@@ -44,7 +46,9 @@ Tests run the macro-backed RTL against the model with Verilator, with ChipLeap's
 
 ### Place and route of the accelerator
 
-`verify --steps pnr` on a bundle, when the build is macro-backed: the RTL as above at the design's real buffer sizes, the macros in a column at the left of the core with a 10 um halo, the die sized from the macros plus the standard cells at the usual utilisation, the macro grid as the PDN, the macros' slow, typical and fast liberty for timing at every corner, and their CDL for LVS. The result adds the macros' area and count, and the report compares the measured area (standard cells plus macros) with the model's accelerator and buffer estimate.
+`verify --steps pnr` on a bundle, when the build is macro-backed: the RTL as above at the design's real buffer sizes, the macros in rows with a 10 um halo, the die sized from the macros plus the model's standard-cell area at 45 % utilisation, the macro grid as the PDN, the macros' slow, typical and fast liberty for timing at every corner, and their CDL for LVS. The result adds the macros' area and count, and the report compares the measured area (standard cells plus macros) with the model's accelerator and buffer estimate.
+
+An IHP SRAM has every signal pin on its bottom edge, along its whole width (784 um on a 64-bit macro), so a column at the core's left edge would send every wire past the macros. The macros go in a row along the top of the core, upright with their pins facing down, and a mirrored row (`FS`) along the bottom with its pins facing up; the logic sits in the band between. OpenROAD's core is the bounding box of its rows, and the rows under a full-width row of macros are cut, which left the macros outside the core's TopMetal2 stripes in the first real run (their grids were islands). So a 30 um column of rows stays at the core's left edge, holding the core's first TopMetal1 pair.
 
 ### RTL projects: the `macros` section
 
@@ -58,10 +62,10 @@ macros:
 
 The RTL instantiates the macro by its cell name. The section is checked like every other: the instance is a path of identifiers (at most 8 levels), the cell is one the PDK's `sg13g2_sram` has (checked when a step needs its views), coordinates are bounded and on the 5 nm grid, at most 32 macros. Steps:
 
-- **lint, synth**: the black-box views (fact 5) join the sources; synthesis reports the macros' area from their liberty.
+- **lint, synth**: black-box views (fact 5), written from the cell's name so neither step needs the PDK, join the sources; synthesis reports the macros' area from the PDK's LEF when it is installed.
 - **sim, coverage**: the PDK's behavioural model (`FUNCTIONAL`) when the PDK is installed; without it the step fails saying which model is missing.
-- **pnr**: LibreLane with `MACROS`, the macro grid, halos, absolute die sizing from the macros and the standard cells, and Netgen LVS with the macros' CDL. The flattened instance name is the path with `.`; a macro without `at_um` is placed by ChipLeap in a column at the core's left edge.
-- The steps of D2 and D3 part b that read the netlist treat a macro as a box: DFT leaves it out of the chains, power and IR drop take its liberty's power, equivalence keeps it as a black box on both sides.
+- **pnr**: LibreLane with `MACROS`, the macro grid, halos, absolute die sizing from the macros and the standard cells, and Netgen LVS with the macros' CDL. The flattened instance name is the path with `.`. Without `pnr.die_um` ChipLeap sizes the die from a synthesis's cell area and places every macro in the rows above; with it, every macro needs its `at_um`.
+- The steps that read the design or its netlist in ways that do not model a macro yet (formal, CDC, equivalence, gate-level simulation, ECO, DFT, power, IR drop, UPF, the chip, and the commercial tools) skip on a project with macros and name them. Treating a macro as a box in each is part 2's, with the whole SoC, which needs it.
 
 ### Security
 
