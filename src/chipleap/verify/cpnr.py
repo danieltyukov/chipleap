@@ -19,7 +19,6 @@ resistance and capacitance the LEF gives each layer.
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 
 from chipleap.gen.rtl import accel_sv
@@ -28,6 +27,7 @@ from chipleap.hw.tech import Technology
 from chipleap.verify.csynth import TOP, genus_script, run_params, specialize, stage
 from chipleap.verify.pnr import PNR_WORDS, PnrError, PnrResult
 from chipleap.verify.remote import Remote, RemoteError, Step, run_steps
+from chipleap.verify.tools import which
 
 TAG = f"w{PNR_WORDS}"
 DONE = "CHIPLEAP_INNOVUS_DONE"
@@ -297,7 +297,7 @@ def place_and_route(
     timeout: float = 14400,
 ) -> PnrResult:
     """Genus then Innovus on the accelerator, here or on ``remote``."""
-    if remote is None and (shutil.which("genus") is None or shutil.which("innovus") is None):
+    if remote is None and (which("genus") is None or which("innovus") is None):
         raise PnrError(
             "Cadence Genus and Innovus are not on the path; run them on a server with --remote HOST"
         )

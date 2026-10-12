@@ -428,13 +428,21 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    from chipleap.verify.tools import all_tools, ihp_liberty
+    from chipleap.verify.tools import all_tools, ihp_liberty, liberty_settings_problem
     from chipleap.verify.xheep import find_checkout
 
-    rows = [[t.name, "yes" if t.found else "no", t.version, t.purpose] for t in all_tools()]
-    import shutil
+    rows = [
+        [
+            t.name,
+            "yes" if t.found else "no",
+            t.version,
+            t.purpose + (f"; {t.note}" if t.note else ""),
+        ]
+        for t in all_tools()
+    ]
+    from chipleap.verify.tools import which
 
-    sv2v = shutil.which("sv2v")
+    sv2v = which("sv2v")
     rows.append(["sv2v", "yes" if sv2v else "no", "", "SystemVerilog front end for older Yosys"])
     lib = ihp_liberty()
     rows.append(
@@ -442,7 +450,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "IHP SG13G2",
             "yes" if lib else "no",
             "",
-            str(lib) if lib else "open PDK for synthesis (set CHIPLEAP_LIBERTY)",
+            str(lib)
+            if lib
+            else liberty_settings_problem() or "open PDK for synthesis (set CHIPLEAP_LIBERTY)",
         ]
     )
     co = find_checkout()
@@ -581,6 +591,40 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eco(args: argparse.Namespace) -> int:
+    from chipleap.rtl.eco import eco, timing_paths
+    from chipleap.rtl.openroad import OpenroadError
+    from chipleap.rtl.project import EcoChange, load_project
+
+    project = load_project(args.project, args.allow_path)
+    if args.paths:
+        kind = "hold" if args.hold else "setup"
+        try:
+            paths, run = timing_paths(project, args.corner, kind, args.count)
+        except OpenroadError as exc:
+            raise ValueError(str(exc).splitlines()[0]) from exc
+        print(f"Worst {kind} paths at the {args.corner} corner of {run}:")
+        for p in paths:
+            print(f"\n{p.slack_ns:+.3f} ns  {p.startpoint} -> {p.endpoint} ({p.group})")
+            for st in p.stages:
+                if st.instance:
+                    print(f"    {st.delay_ns:7.3f} {st.time_ns:8.3f}  {st.pin} ({st.cell})")
+        return 0
+    changes = [
+        *(EcoChange.parse(f"resize:{c}") for c in args.resize),
+        *(EcoChange.parse(f"buffer:{c}") for c in args.buffer),
+        *(EcoChange.parse(f"repair:{c}") for c in args.repair),
+    ]
+    r = eco(project, changes or None)
+    print(f"eco      {r.status.upper():8s} {r.summary}")
+    for c in r.data.get("changes", []):
+        kind = next(k for k in ("resize", "buffer", "repair") if k in c)
+        print(f"  {kind} {c[kind]} {c.get('cell', '')} {c.get('result', '')}".rstrip())
+    if r.status == "pass" and changes:
+        print("Add these to the project's eco section to keep them in its flow.")
+    return 1 if r.status == "fail" else 0
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     from chipleap.mcp_server import replay_calls
 
@@ -680,8 +724,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--steps",
         default=None,
         help="comma-separated steps; for a bundle consistency,lint,sim,synth,xheep, for a "
-        "project lint,sim,coverage,synth; pnr (place and route) is opt-in, and all runs every "
-        "step",
+        "project lint,sim,coverage,formal,cdc,synth,equiv; pnr (place and route), gls "
+        "(gate-level simulation of its netlist) and the steps after it (eco, dft, power, "
+        "ir_drop, upf) are opt-in, and all runs every step",
     )
     s.add_argument("--xheep", help="X-HEEP checkout (default: CHIPLEAP_XHEEP_DIR or the cache)")
     s.add_argument("--fetch-xheep", action="store_true", help="clone the tested X-HEEP commit")
@@ -756,6 +801,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     t.add_argument("--json", action="store_true")
     t.set_defaults(func=cmd_project)
+
+    s = sub.add_parser(
+        "eco", help="change a routed RTL project (resize, buffer, repair) and sign it off again"
+    )
+    s.add_argument("project", help="the project (project.yaml or its directory)")
+    s.add_argument("--resize", action="append", default=[], metavar="INST=CELL", help="swap a cell")
+    s.add_argument(
+        "--buffer",
+        action="append",
+        default=[],
+        metavar="INST/PIN=CELL",
+        help="put a buffer after a driver's output or before a sink's input",
+    )
+    s.add_argument(
+        "--repair",
+        action="append",
+        default=[],
+        metavar="setup|hold[@NS]",
+        help="repair timing again after global routing, with a margin",
+    )
+    s.add_argument("--paths", action="store_true", help="list the worst paths instead")
+    s.add_argument("--corner", default="slow", choices=["typ", "slow", "fast"])
+    s.add_argument("--hold", action="store_true", help="with --paths: hold paths")
+    s.add_argument("--count", type=int, default=5, help="with --paths: paths per group")
+    s.add_argument(
+        "--allow-path",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="let the project use files from this directory outside it",
+    )
+    s.set_defaults(func=cmd_eco)
 
     s = sub.add_parser("doctor", help="which tools ChipLeap can use here or on a server")
     s.add_argument("--remote", help="also list the commercial tools on this ssh host")

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from chipleap.rtl import confine
 from chipleap.rtl.diag import Diagnostic, counts, parse_slang, parse_verilator, relative
-from chipleap.rtl.project import Project
+from chipleap.rtl.project import Project, runs_tools
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import Tool, slang, verilator
 
@@ -120,12 +120,13 @@ def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}" + ("" if n == 1 else "s")
 
 
+@runs_tools
 def lint(project: Project) -> StepResult:
     """Verilator ``-Wall`` and slang ``-Wextra`` on the project's design sources."""
     v, s = verilator(), slang()
     use_slang = project.lint.slang and s.found
     if not v.found and not use_slang:
-        return StepResult("lint", "skipped", "Verilator is not installed")
+        return StepResult("lint", "skipped", v.missing("Verilator"))
     diags: list[Diagnostic] = []
     names = []
     tools: dict[str, str] = {}

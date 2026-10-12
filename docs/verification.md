@@ -15,7 +15,7 @@ Results go to `DIR/verify/verify.json` and `DIR/verify/VERIFY.md`. Choose steps 
 
 A bundle may come from someone else, so ChipLeap never writes through a symlink in it. `DIR` itself (like the directory you give `explore` and `generate` with `-o`) may not be a symlink, and neither may `verify/` or a step's directory in it (`verify/synth`, `verify/pnr`, `verify/genus` and so on): the run stops with an error that names it. A symlink further inside a step's directory is removed before the step writes there, and nothing it points at is touched. On Windows a directory junction, or any other reparse point, counts as a symlink. A directory that `-o` creates gets a `.chipleap` file that says ChipLeap made it, and ChipLeap never empties an output directory without one.
 
-This page is about generated bundles. The same command verifies RTL you wrote, given a `project.yaml`: lint with Verilator and slang, your cocotb tests on Icarus or Verilator, coverage, synthesis and place and route with the signoff settings below. [projects.md](projects.md) describes it.
+This page is about generated bundles. The same command verifies RTL you wrote, given a `project.yaml`: lint with Verilator and slang, your cocotb tests on Icarus or Verilator, coverage, formal proofs of your properties with SymbiYosys, clock and reset domain crossing checks, synthesis, equivalence of the RTL and its netlists, place and route with the signoff settings below, and your tests again on the routed netlist with SDF delays. [projects.md](projects.md) describes it.
 
 ## Consistency
 
@@ -72,6 +72,23 @@ These are the designs routed with this flow at 100 MHz, each with 16-word buffer
 
 The model's clock limit for the accelerator on IHP SG13G2 comes from these runs ([model.md](model.md#technology-data)), so designs the explorer recommends are clocked where they close timing at the slow corner.
 
+## After place and route
+
+RTL projects have five more steps, for what follows place and route in an industrial flow ([projects.md](projects.md#after-place-and-route) describes their sections and results). Each writes an OpenROAD script from the project and runs the `openroad` command on it, and reads OpenROAD's reports back; LibreLane does the routing and the signoff.
+
+| Step | Engines | What it reports |
+|---|---|---|
+| `dft` | OpenROAD `scan_replace` and `execute_dft_plan`, Fault 0.9 with Quaigh, Icarus 13 | scan chains and their order, stuck-at coverage, `patterns.json` and STIL, a flush pattern and ATPG patterns simulated through the chains of the scan netlist and, once it is routed, of the routed one |
+| `pnr` | LibreLane | with `dft.insert`, the scan-inserted netlist routed with the usual signoff |
+| `eco` | OpenROAD on the routed DEF, LibreLane resumed before detailed routing | the changes, and timing, DRC, LVS and antenna before and after |
+| `power` | Icarus 13 with the cell models and the project's cocotb tests, OpenROAD `read_vcd` and `report_power` | power per group at each corner, from the tests' activity and vectorless |
+| `ir_drop` | OpenROAD PDNSim (`analyze_power_grid`) | worst and average drop per supply net, the worst cells, a map |
+| `upf` | OpenROAD `read_upf`, floorplan and placement on a hierarchical netlist | power domains, their cells inside their areas, the signals between domains |
+
+Two OpenROAD builds take part, the `openroad` command and the one inside LibreLane's container, and they never exchange their databases: DEF, Verilog, SPEF and SDC go between them. Every input is staged into the step's work directory, because a containerised `openroad` sees only that, and OpenROAD runs through the same launcher as LibreLane, so a time limit (`CHIPLEAP_OPENROAD_TIMEOUT`, one hour by default), Ctrl-C or a cancelled MCP call stops it and its container. Gate-level simulation of IHP's cells needs Icarus 13 or newer (`CHIPLEAP_GL_IVERILOG`; Icarus 12 leaves every flip-flop at X). `chipleap doctor` lists `openroad`, `iverilog-gl`, `fault` and `quaigh`.
+
+What the open tools cannot do is said where it matters: no open simulator is power aware, so a UPF changes placement but not simulation; LibreLane routes one supply; IHP SG13G2's standard cells have no level shifters, isolation cells or power switches; ATPG is stuck-at only, without at-speed patterns or compression.
+
 ## X-HEEP
 
 Given an X-HEEP checkout (`--xheep DIR`, `CHIPLEAP_XHEEP_DIR`, or `--fetch-xheep` to clone the tested commit into the cache), ChipLeap:
@@ -97,7 +114,20 @@ This needs `hjson` and `mako` in the Python that runs ChipLeap: `pip install "ch
 Tests that need Verilator are marked `rtl` and skip themselves when it is missing; tests
 that need a commercial simulator or synthesis tool on the path are marked `commercial`.
 The RTL project tests (`tests/test_project_*.py`) skip themselves without cocotb, Icarus,
-Verilator 5.036 or newer (for coverage), slang, Yosys or LibreLane, whichever they need.
+Verilator 5.036 or newer (for coverage), slang, Yosys, SymbiYosys and z3, EQY, Icarus 13
+(for gate level) or LibreLane, whichever they need. Each verification check has a passing
+and a failing case: SymbiYosys proves a FIFO's properties and finds the counterexample in a
+broken one; CDC passes two- and three-flop synchronizers, a handshake and a FIFO with gray
+pointers and flags a missing synchronizer, logic before one, binary pointers, an
+unsynchronized asynchronous input and a reset domain crossing; equivalence proves the
+counter's netlist equal to its RTL and catches one changed gate, with Yosys and with EQY;
+the UART's cocotb tests pass on its routed netlist with SDF (from a real LibreLane run kept
+in `tests/fixtures/uart_routed`, since CI cannot route) and fail with one gate changed.
+`tests/test_tool_path.py` plants programs named like the tools in a project and puts `""`
+and `.` on `PATH`, and checks that every step runs the real tools or skips.
+The real runs of the implementation steps need OpenROAD, Fault, Quaigh and Icarus 13 and
+run with `CHIPLEAP_RUN_IMPL=1` (seconds on the fixtures); the ECO tests place and route
+first and run with `CHIPLEAP_RUN_PNR=1`.
 
 ## Commercial tools
 

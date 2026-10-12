@@ -35,6 +35,7 @@ from chipleap.hw.tech import (
     tech_to_dict,
     user_tech_dir,
 )
+from chipleap.verify.tools import clean_env
 
 # Key-based ssh only: a password prompt becomes an error instead of a hang.
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
@@ -79,6 +80,7 @@ def _ssh(host: str, bash_script: str) -> subprocess.CompletedProcess[str]:
         raise TechError(str(exc)) from exc
     return subprocess.run(
         ["ssh", *SSH_OPTS, "--", host, f"bash -c {shlex.quote(bash_script)}"],
+        env=clean_env(),
         capture_output=True,
         text=True,
         check=False,

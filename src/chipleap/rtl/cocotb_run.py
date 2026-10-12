@@ -19,6 +19,19 @@ def _write(path: Path, outcome: dict[str, Any]) -> None:
     path.write_text(json.dumps(outcome, indent=1))
 
 
+def _dump_vcd(runner: Any) -> None:
+    """Let Icarus write the VCD the design's own $dumpfile names. cocotb's runner passes
+    ``-none`` to vvp unless waves are on, and then forces FST, which OpenSTA cannot read;
+    so ``-none`` becomes ``-vcd``. If a cocotb version builds the command differently, no
+    VCD appears and ChipLeap says so."""
+    test_command = runner._test_command
+
+    def with_vcd() -> list[list[str]]:
+        return [["-vcd" if a == "-none" else a for a in cmd] for cmd in test_command()]
+
+    runner._test_command = with_vcd
+
+
 def main(argv: list[str]) -> int:
     manifest = Path(argv[1] if len(argv) > 1 else "manifest.json").resolve()
     m = json.loads(manifest.read_text())
@@ -34,6 +47,8 @@ def main(argv: list[str]) -> int:
         _write(outcome, {"stage": "import", "error": f"cocotb is not installed: {exc}"})
         return 2
     runner = get_runner(m["simulator"])
+    if m.get("vcd") and m["simulator"] == "icarus":
+        _dump_vcd(runner)
     build_dir = work / m.get("build_dir", "sim_build")
     try:
         runner.build(

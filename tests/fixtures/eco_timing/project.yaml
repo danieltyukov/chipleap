@@ -1,0 +1,18 @@
+# A registered 12 x 12 multiplier routed without timing repair, so it misses timing at the
+# slow corner until an ECO's repair: setup (tests/test_project_eco.py). Its multiplier is a
+# power domain at another voltage, which IHP's cells cannot cross (tests/test_project_upf.py).
+schema: project/v1
+name: eco_timing
+top: mac
+sources: [rtl/mul.sv, rtl/mac.sv]
+clocks: [{port: clk_i, period_ns: 5.4}]
+resets: [{port: rst_ni, active: low}]
+tech: ihp-sg13g2
+pnr:
+  librelane: {RUN_POST_CTS_RESIZER_TIMING: false, RUN_POST_GRT_RESIZER_TIMING: false}
+eco:
+  - {repair: setup}
+upf:
+  domains:
+    - {name: PD_TOP, voltage: 1.2}
+    - {name: PD_MUL, elements: [u_mul], voltage: 1.08}
