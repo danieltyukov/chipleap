@@ -653,17 +653,26 @@ def eco_rtl(project: str, changes: list[str]) -> dict[str, Any]:
         raise ToolError(str(exc)) from exc
     if not parsed:
         raise ToolError("give at least one change")
+    from chipleap.rtl import macros
+
+    if (why := macros.unsupported(p, "eco")) is not None:
+        raise ToolError(why)
     out = _step(eco(p, parsed))
     out["keep"] = "add the changes to the project's eco section to make them part of its flow"
     return out
 
 
-def _guarded(step: str, fn: Callable[[], Any]) -> dict[str, Any]:
-    """A step's result; a tool that fails in an unexpected way fails the step, as in
+def _guarded(step: str, fn: Callable[[], Any], project: Any = None) -> dict[str, Any]:
+    """A step's result; a tool that fails in an unexpected way fails the step, and a step
+    that does not model the project's SRAM macros skips, as in
     ``chipleap.rtl.verify.run_step``."""
+    from chipleap.rtl import macros
     from chipleap.rtl.verify import STEP_ERRORS
     from chipleap.verify.result import StepResult
 
+    why = macros.unsupported(project, step) if project is not None else None
+    if why is not None:
+        return _step(StepResult(step, "skipped", why))
     try:
         result = fn()
     except STEP_ERRORS as exc:
@@ -681,7 +690,7 @@ def prove_rtl(project: str, check: str = "") -> dict[str, Any]:
         known = [c.name for c in p.formal.checks] + [f"sby:{x.stem}" for x in p.formal.sby]
         if check not in known:
             raise ToolError(f"no formal check named {check!r}; checks: {', '.join(known)}")
-    return _guarded("formal", lambda: formal(p, check))
+    return _guarded("formal", lambda: formal(p, check), p)
 
 
 def check_assertions(
@@ -697,6 +706,10 @@ def check_assertions(
     from chipleap.rtl import formal
 
     p = _project(project)
+    from chipleap.rtl import macros
+
+    if (why := macros.unsupported(p, "formal")) is not None:
+        raise ToolError(why)
     try:
         return formal.check_assertions(
             p, module, assertions, mode=mode, depth=depth, clock=clock, reset=reset
@@ -711,14 +724,14 @@ def equivalence_rtl(project: str, check: str = "") -> dict[str, Any]:
     if check and check not in PAIRS:
         raise ToolError(f"check must be one of {', '.join(PAIRS)}")
     p = _project(project)
-    return _guarded("equiv", lambda: equiv(p, check))
+    return _guarded("equiv", lambda: equiv(p, check), p)
 
 
 def cdc_rtl(project: str) -> dict[str, Any]:
     from chipleap.rtl.cdc import cdc
 
     p = _project(project)
-    return _guarded("cdc", lambda: cdc(p))
+    return _guarded("cdc", lambda: cdc(p), p)
 
 
 def gate_sim_rtl(project: str, tests: str = "") -> dict[str, Any]:
@@ -726,7 +739,7 @@ def gate_sim_rtl(project: str, tests: str = "") -> dict[str, Any]:
     from chipleap.rtl.gls import gls
 
     p = _project(project)
-    return _guarded("gls", lambda: gls(p, tests))
+    return _guarded("gls", lambda: gls(p, tests), p)
 
 
 def plan_chip(project: str) -> dict[str, Any]:

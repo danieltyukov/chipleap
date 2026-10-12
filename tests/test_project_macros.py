@@ -259,3 +259,14 @@ def test_the_example_simulates_with_the_pdks_model(sram_project):
         pytest.skip("no IHP PDK")
     r = simulate(load_project(sram_project), "icarus")
     assert r.status == "pass", r.summary
+
+
+def test_the_assistants_tools_say_so_too(sram_project):
+    from chipleap import mcp_server
+    from chipleap.mcp_server import ToolError
+
+    out = mcp_server.prove_rtl(str(sram_project))
+    assert out["status"] == "skipped" and "does not model SRAM macros" in out["summary"]
+    assert mcp_server.cdc_rtl(str(sram_project))["status"] == "skipped"
+    with pytest.raises(ToolError, match="does not model SRAM macros"):
+        mcp_server.eco_rtl(str(sram_project), ["repair:setup"])
