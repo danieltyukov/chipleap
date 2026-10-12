@@ -1,0 +1,102 @@
+VERSION 5.7 ;
+  NOWIREEXTENSIONATPIN ON ;
+  DIVIDERCHAR "/" ;
+  BUSBITCHARS "[]" ;
+MACRO strongarm
+  CLASS BLOCK ;
+  FOREIGN strongarm ;
+  ORIGIN 8.550 0.600 ;
+  SIZE 20.930 BY 45.000 ;
+  PIN clk
+    DIRECTION INPUT ;
+    USE CLOCK ;
+    ANTENNAGATEAREA 1.040000 ;
+    PORT
+      LAYER Metal4 ;
+        RECT -1.350 -0.600 -1.050 7.090 ;
+    END
+  END clk
+  PIN inm
+    DIRECTION INPUT ;
+    USE ANALOG ;
+    ANTENNAGATEAREA 0.520000 ;
+    PORT
+      LAYER Metal4 ;
+        RECT -2.550 -0.600 -2.250 17.230 ;
+    END
+  END inm
+  PIN inp
+    DIRECTION INPUT ;
+    USE ANALOG ;
+    ANTENNAGATEAREA 0.520000 ;
+    PORT
+      LAYER Metal4 ;
+        RECT -3.750 -0.600 -3.450 16.630 ;
+    END
+  END inp
+  PIN outn
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.520000 ;
+    ANTENNADIFFAREA 0.950000 ;
+    PORT
+      LAYER Metal4 ;
+        RECT -4.950 -0.600 -4.650 20.330 ;
+    END
+  END outn
+  PIN outp
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.520000 ;
+    ANTENNADIFFAREA 0.950000 ;
+    PORT
+      LAYER Metal4 ;
+        RECT -6.150 -0.600 -5.850 19.130 ;
+    END
+  END outp
+  PIN vdd
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER Metal4 ;
+        RECT -7.350 -0.600 -7.050 28.270 ;
+    END
+  END vdd
+  PIN vss
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER Metal4 ;
+        RECT -8.550 -0.600 -8.250 0.050 ;
+    END
+  END vss
+  OBS
+      LAYER GatPoly ;
+        RECT 0.000 1.400 7.280 43.000 ;
+      LAYER Metal1 ;
+        RECT 0.000 1.400 7.280 43.000 ;
+      LAYER Metal2 ;
+        RECT 0.050 0.005 7.230 44.395 ;
+      LAYER Metal3 ;
+        RECT -8.545 0.000 12.375 44.400 ;
+      LAYER Metal4 ;
+        RECT -8.550 28.480 12.380 44.395 ;
+        RECT -8.550 0.260 -7.560 28.480 ;
+        RECT -8.550 0.250 -8.250 0.260 ;
+        RECT -8.550 0.050 -8.500 0.250 ;
+        RECT -8.040 0.005 -7.560 0.260 ;
+        RECT -6.840 20.540 12.380 28.480 ;
+        RECT -6.840 19.340 -5.160 20.540 ;
+        RECT -6.840 0.005 -6.360 19.340 ;
+        RECT -5.640 0.005 -5.160 19.340 ;
+        RECT -4.440 17.440 12.380 20.540 ;
+        RECT -4.440 16.840 -2.760 17.440 ;
+        RECT -4.440 0.005 -3.960 16.840 ;
+        RECT -3.240 0.005 -2.760 16.840 ;
+        RECT -2.040 7.300 12.380 17.440 ;
+        RECT -2.040 0.005 -1.560 7.300 ;
+        RECT -0.840 0.005 12.380 7.300 ;
+  END
+END strongarm
+END LIBRARY
+

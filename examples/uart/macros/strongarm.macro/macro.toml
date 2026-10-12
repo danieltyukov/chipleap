@@ -1,0 +1,90 @@
+#:schema https://raw.githubusercontent.com/danieltyukov/chipleap/main/src/chipleap/macro/macro-v1.schema.json
+schema = "macro/v1"
+name = "strongarm"
+kind = "analog"
+description = "comparator block from comparator.cir, laid out by aispice"
+
+[pdk]
+name = "ihp-sg13g2"
+commit = "22f2a25f1734796de3debbbf29cf697cbbc54081"
+
+[producer]
+tool = "aispice"
+version = "0.2.0"
+source = "comparator.cir"
+
+[size]
+width_um = 20.93
+height_um = 45.0
+
+[[domains]]
+name = "core"
+voltage = 1.2
+power = ["vdd"]
+ground = ["vss"]
+
+[[pins]]
+name = "clk"
+direction = "input"
+kind = "clock"
+domain = "core"
+layer = "Metal4"
+
+[[pins]]
+name = "inm"
+direction = "input"
+kind = "analog"
+domain = "core"
+layer = "Metal4"
+
+[[pins]]
+name = "inp"
+direction = "input"
+kind = "analog"
+domain = "core"
+layer = "Metal4"
+
+[[pins]]
+name = "outn"
+direction = "output"
+kind = "signal"
+domain = "core"
+layer = "Metal4"
+
+[[pins]]
+name = "outp"
+direction = "output"
+kind = "signal"
+domain = "core"
+layer = "Metal4"
+
+[[pins]]
+name = "vdd"
+direction = "inout"
+kind = "power"
+layer = "Metal4"
+
+[[pins]]
+name = "vss"
+direction = "inout"
+kind = "ground"
+layer = "Metal4"
+
+[[corners]]
+name = "tt_27"
+process = "tt"
+temperature = 27.0
+
+[extra.aispice]
+circuit = "comparator.cir"
+generator = "comparator"
+pin_edge = "bottom"
+pin_pitch_um = 1.2
+
+[extra.aispice.params]
+dummies = 1
+guard_ring = true
+pattern = "common_centroid"
+pin_edge = true
+row_gap = 1.0
+track_pitch = 0.6

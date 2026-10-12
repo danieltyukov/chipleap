@@ -1,0 +1,41 @@
+# Measured by aispice 0.2.0: each spec at every corner after layout, and
+# <spec>_schematic before layout, for comparison.
+schema = "macro.specs/v1"
+
+[[specs]]
+name = "decision"
+description = "After layout (extracted)."
+unit = "V"
+min = 0.8
+definition = "decision = value_at(V(outp,outn), 2.9n) >= 0.8"
+
+[specs.measured]
+tt_27 = 1.1999754650438499
+
+[[specs]]
+name = "outn_low"
+description = "After layout (extracted)."
+unit = "V"
+max = 0.3
+definition = "outn_low = value_at(V(outn), 2.9n) <= 0.3"
+
+[specs.measured]
+tt_27 = 0.00001894325840372191
+
+[[specs]]
+name = "decision_schematic"
+description = "decision before layout (schematic), for comparison; its limits are on decision."
+unit = "V"
+definition = "decision = value_at(V(outp,outn), 2.9n) >= 0.8"
+
+[specs.measured]
+tt_27 = 1.1999994542605952
+
+[[specs]]
+name = "outn_low_schematic"
+description = "outn_low before layout (schematic), for comparison; its limits are on outn_low."
+unit = "V"
+definition = "outn_low = value_at(V(outn), 2.9n) <= 0.3"
+
+[specs.measured]
+tt_27 = 0.0000003993839751659204

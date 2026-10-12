@@ -1,0 +1,28 @@
+{
+  "artifacts": [
+    {
+      "path": "strongarm.pex.spice",
+      "sha256": "8b20022635394f6c4f04e0e153fc9fc520910fbe27418ac1a02614e0c4235767"
+    }
+  ],
+  "engineering": {
+    "status": "pass",
+    "summary": "Magic extraction: 34 device fingers, 37 capacitors (90.2 fF), 0 resistors"
+  },
+  "inputs": [
+    {
+      "path": "strongarm.gds",
+      "sha256": "c1da3801ba455aa531b50cb66096428d5146b04e36a094f85a9edeed92a0c391"
+    }
+  ],
+  "operation": "pex",
+  "pdk": {
+    "commit": "22f2a25f1734796de3debbbf29cf697cbbc54081",
+    "name": "ihp-sg13g2"
+  },
+  "schema": "macro.evidence/v1",
+  "tool": {
+    "name": "magic",
+    "version": "8.3.624"
+  }
+}
