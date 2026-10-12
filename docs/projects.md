@@ -104,6 +104,12 @@ eco:                          # changes to the routed design, applied by the eco
   - {resize: _211_, cell: sg13g2_nor2_2}
   - {buffer: _212_/Y, cell: sg13g2_buf_2}
   - {repair: setup, margin_ns: 0.5}
+chip:                         # optional: the whole chip, with a pad ring and macros (chips.md)
+  pads:
+    south: [clk_i, rst_ni, vdd, vss]
+    east: [iovdd, iovss]
+    west: [{analog: ain_p}]
+  macros: [{instance: comp, package: macros/strongarm.macro, connect: {inp: ain_p}}]
 ```
 
 Paths are relative to the project file and must stay inside its directory: see [Files outside the project](#files-outside-the-project). Environment variables and `~` are not expanded. Every key is checked and errors name the key, for example `clocks[0] needs period_ns or freq_mhz (one of them)` or `tests.modules: test_x.py not found in test`. `chipleap project check` prints the project with every default filled in.
@@ -118,11 +124,11 @@ The verification sections are checked like the rest: check names are identifiers
 
 A power domain's elements are hierarchical instance paths (`u_rx`, `u_core/u_alu`); exactly one domain has none, the top. ECO targets are names in the routed netlist, which may hold characters other names may not (`\u_rx.data_q[3]`): any printable characters but white space, quotes, braces, `;`, a backtick and `$`. They reach OpenROAD as data, never as script text.
 
-Section names (`macros`, `chip`) that later versions will read are rejected with a message saying they are not read yet, so a file written for a newer ChipLeap fails clearly.
+The `chip` section is described in [chips.md](chips.md). A section name (`macros`) that later versions will read is rejected with a message saying they are not read yet, so a file written for a newer ChipLeap fails clearly.
 
 ## The steps
 
-`chipleap verify PROJECT` runs `lint,sim,coverage,formal,cdc,synth,equiv`. Place and route takes minutes and gate-level simulation needs its result, so `pnr` and `gls` run only when named (`--steps pnr,equiv,gls`) or with `--steps all`, which runs everything in the order `lint, sim, coverage, formal, cdc, synth, pnr, eco, equiv, gls, dft, power, ir_drop, upf`: equivalence, gate-level simulation and the steps after place and route (`eco`, `dft`, `power`, `ir_drop`, `upf`, described in [After place and route](#after-place-and-route)) see the netlists the same run made. Each step skips itself with the reason when its tool or its section is missing. Work directories are under `PROJECT/build/`, and the results go to `PROJECT/build/verify/`: `report.html`, `VERIFY.md` and `verify.json`.
+`chipleap verify PROJECT` runs `lint,sim,coverage,formal,cdc,synth,equiv`. Place and route and the chip take minutes and gate-level simulation needs place and route's result, so `pnr`, `gls` and `chip` run only when named (`--steps pnr,equiv,gls`) or with `--steps all`, which runs everything in the order `lint, sim, coverage, formal, cdc, synth, pnr, eco, equiv, gls, dft, power, ir_drop, upf, chip`: equivalence, gate-level simulation and the steps after place and route (`eco`, `dft`, `power`, `ir_drop`, `upf`, described in [After place and route](#after-place-and-route)) see the netlists the same run made. Each step skips itself with the reason when its tool or its section is missing. Work directories are under `PROJECT/build/`, and the results go to `PROJECT/build/verify/`: `report.html`, `VERIFY.md` and `verify.json`.
 
 | Step | What runs | Passes when |
 |---|---|---|
@@ -140,6 +146,7 @@ Section names (`macros`, `chip`) that later versions will read are rejected with
 | `power` | the cocotb tests on the gate-level netlist (Icarus 13), OpenROAD | the tests pass on the netlist and their activity annotates it |
 | `ir_drop` | OpenROAD PDNSim on the routed grid | the worst drop is within `max_drop_pct`, when given |
 | `upf` | OpenROAD `read_upf`, floorplan and placement | every domain resolves, its cells land in its area, no crossing needs a level shifter |
+| `chip` | the core, its macro packages and an IHP pad ring through LibreLane, then bond pads, seal ring, fill, IHP's LVS and DRC decks, the supply hookup and a precheck ([chips.md](chips.md)) | DRC and LVS clean, both supplies reach the ring, the precheck passes, timing met |
 
 **Lint.** Any message fails the step, as for the generated accelerator. Warnings a project accepts belong in a Verilator waiver file listed under `lint.waivers`, so the decision is in the repository. slang elaborates the same top with the same parameters and often finds what Verilator does not, such as implicit truncations; `CHIPLEAP_SLANG` points at it.
 
@@ -224,7 +231,7 @@ The options for generated bundles apply to projects ([commercial-tools.md](comme
 
 The MCP server has tools for projects ([mcp.md](mcp.md)): `describe_project`, `lint_rtl`, `simulate_rtl`, `coverage_rtl`, `synthesize_rtl` and `verify_rtl`, and for the steps after place and route `dft_rtl`, `power_rtl`, `ir_drop_rtl`, `upf_rtl`, `timing_paths_rtl` and `eco_rtl`; the `fix_timing` prompt has an assistant close timing with ECO changes, one at a time. Lint, simulation and synthesis return diagnostics with the tool, severity, file, line, column, the tool's code and, for a failing test, its name, so an assistant can fix the RTL in a loop. The `fix_rtl` prompt walks it through that. Run logs record a digest of every file a project names and the versions of the tools, and `chipleap replay` says whether a different result comes from changed files or changed tools.
 
-For verification depth there are `prove_rtl`, `check_assertions`, `equivalence_rtl`, `cdc_rtl`, `gate_sim_rtl` and `coverage_gaps`. Each returns what an assistant can act on: the failing property with its counterexample as values per step, the points two netlists disagree on with a counterexample from reset, the crossing with its path, the coverage points never reached with their source lines.
+For a chip there are `plan_chip` (the floorplan, without running a tool) and `assemble_chip` (the `chip` step). For verification depth there are `prove_rtl`, `check_assertions`, `equivalence_rtl`, `cdc_rtl`, `gate_sim_rtl` and `coverage_gaps`. Each returns what an assistant can act on: the failing property with its counterexample as values per step, the points two netlists disagree on with a counterexample from reset, the crossing with its path, the coverage points never reached with their source lines.
 
 `check_assertions` proves properties an assistant proposes without editing the project. Each is a boolean expression with a kind (`assert`, `assume` or `cover`) and a name; ChipLeap copies the file that defines the module into `build/formal/proposed`, inserts the properties before its `endmodule`, sampled at the project's clock outside reset, and proves the copy in place of the original. The design's own assertions and covers are left out of that run, so each answer is the proposal's own: `holds`, `fails` with its counterexample, or `unknown`, and `reached` or `unreached` for a cover. An expression may hold identifiers, numbers, operators, brackets and the system functions `$past`, `$rose`, `$fell`, `$stable`, `$changed`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$signed` and `$unsigned`, at most 400 characters, and nothing else: no `;`, quotes, backticks, `#`, `@`, comments, assignments or other `$` names, so a proposal cannot add a statement, a directive or a file read. The `propose_assertions` prompt has an assistant propose invariants and covers for a module, read each counterexample to decide whether the property or the design is wrong, and never weaken a property only to make it pass; `close_coverage` has it raise coverage with new tests, never by changing the RTL or weakening a test.
 
