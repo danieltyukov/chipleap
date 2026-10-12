@@ -745,10 +745,9 @@ module chipleap_accel_core #(
     logic [31:0] g_rowbase;  // word address of activation row gm
     // Three stages: fetch and unpack the operands into xq/wq, multiply and add them into
     // psum_q, accumulate into work/acc. The operand registers cut the path from the buffer
-    // read to the adder tree in two, so the engine closes timing at the slow corner. With
-    // SRAM_BUF the banks' registered read is that cut: xop/wop are the operands either way.
-    logic signed [7:0] xop[V];
-    logic signed [7:0] wop[L][V];
+    // read to the adder tree in two, so the engine closes timing at the slow corner.
+    logic signed [7:0] xq[V];
+    logic signed [7:0] wq[L][V];
     logic ov_q, ofirst_q, olast_q;
     logic [$clog2(ACC_ROWS)-1:0] om_q;
     logic signed [31:0] psum_q[L];
@@ -762,17 +761,15 @@ module chipleap_accel_core #(
     // address arithmetic or barrel shifter sits in the datapath.
     localparam int unsigned XW = V >= 4 ? V / 4 : 1;  // words holding V int8 activations
     localparam int unsigned WW = V >= 4 ? V / 4 : 1;  // words holding V weights at int8
-    wire issue = running && issuing;  // a chunk's operands are fetched this cycle
+    wire issue = running && issuing;  // a chunk's operands are registered this cycle
+    logic signed [7:0] xv[V];  // the chunk's operands, unpacked
+    logic signed [7:0] wv[L][V];
     logic signed [31:0] dot[L];
 
     if (!SB) begin : g_flop
-      logic signed [7:0] xq[V];
-      logic signed [7:0] wq[L][V];
       logic [31:0] xk;  // K offset of the chunk within the X row
       logic [XW*32-1:0] xwords;
-      logic signed [7:0] xv[V];
       logic [31:0] wbit;  // bit offset of the chunk within each weight row
-      logic signed [7:0] wv[L][V];
 
       always_comb begin
         xk = a_koff + gkc * V;
@@ -803,25 +800,21 @@ module chipleap_accel_core #(
           end
         end
       end
-
-      always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-          for (int v = 0; v < int'(V); v++) xq[v] <= '0;
-          for (int l = 0; l < int'(L); l++) for (int v = 0; v < int'(V); v++) wq[l][v] <= '0;
-        end else if (issue) begin
-          xq <= xv;
-          wq <= wv;
-        end
-      end
-      assign xop = xq;
-      assign wop = wq;
     end else begin : g_bank
       // A chunk is COLS bytes at most, at a position aligned to its size (the K
       // alignment), so it is one word of a bank: the X chunk a word of the activation
       // bank its address falls in, each lane's weight chunk a word of that lane's bank at
       // the chunk's offset in the row, sliced from the bit its format puts it at.
+      //
+      // A bank answers a cycle after its address, and an SRAM macro's clock to output
+      // is half the clock period at the slow corner, so each chunk is read a cycle ahead:
+      // at core_start for the tile's first chunk, and in each issue cycle for the next.
+      // Its word is out of the bank in the cycle that issues it, which registers it in
+      // xq and wq as the flop buffers' read is, and the schedule stays the same.
       localparam int unsigned SBI = NAB > 1 ? $clog2(NAB) : 1;
       localparam int unsigned WSI = $clog2(BANK_BITS);
+      logic pf;  // a chunk is read this cycle
+      logic [31:0] pf_rowbase, pf_kc;  // its row and its place in the row
       logic [31:0] xk, xa, wbit;
       logic [31:0] bw_dst;  // where the DMA's word goes, as a buffer address
       logic [SBI-1:0] xb_q;  // the activation bank read, and the slot of the weight banks
@@ -829,9 +822,31 @@ module chipleap_accel_core #(
       logic [WSI-1:0] wsel_q;  // the weight chunk's first bit in the bank word
 
       always_comb begin
-        xk = a_koff + gkc * V;
-        xa = g_rowbase + (xk >> 2);
-        wbit = (gkc * V) << (3 - fmt_shift);
+        pf = 1'b0;
+        pf_rowbase = g_rowbase;
+        pf_kc = gkc;
+        if (core_start) begin
+          pf = 1'b1;
+          pf_rowbase = a_base;
+          pf_kc = '0;
+        end else if (issue) begin
+          // The chunk after this one, as the issue below steps gm and gkc; none after the
+          // tile's last.
+          if (gkc + 1 != nchunks) begin
+            pf = 1'b1;
+            pf_kc = gkc + 1;
+          end else if (gm + 1 != cd.tm) begin
+            pf = 1'b1;
+            pf_kc = '0;
+            pf_rowbase = g_rowbase + a_stride;
+          end
+        end
+      end
+
+      always_comb begin
+        xk = a_koff + pf_kc * V;
+        xa = pf_rowbase + (xk >> 2);
+        wbit = (pf_kc * V) << (3 - fmt_shift);
         bw_dst = 32'(fifo[int'(fifo_rp[0])]);
         abank_re_o = '0;
         abank_we_o = '0;
@@ -841,14 +856,14 @@ module chipleap_accel_core #(
         wbank_addr_o = '0;
         bank_wdata_o = {WPM{rd_rdata_i[0]}};
         bank_wmask_o = BANK_BITS'({32{1'b1}}) << (32 * int'(bw_dst % WPM));
-        if (issue) begin
+        if (pf) begin
           abank_re_o[int'(xa / A_SLOT)] = 1'b1;
           abank_addr_o[int'(xa / A_SLOT)] = ABA'((xa % A_SLOT) / WPM);
         end
         // The loop outside the condition: as a block of its own, sv2v gives its index a
-        // variable that only the issue cycle would set, which synthesis calls a latch.
+        // variable that only the read cycle would set, which synthesis calls a latch.
         for (int l = 0; l < int'(L); l++) begin
-          if (issue) begin
+          if (pf) begin
             wbank_re_o[int'(c_slot) * L + l] = 1'b1;
             wbank_addr_o[int'(c_slot) * L + l] = WBA'((wbit >> 5) / WPM);
           end
@@ -870,7 +885,7 @@ module chipleap_accel_core #(
           xb_q <= '0;
           cs_q <= 1'b0;
           wsel_q <= '0;
-        end else if (issue) begin
+        end else if (pf) begin
           xb_q <= SBI'(xa / A_SLOT);
           cs_q <= c_slot;
           wsel_q <= WSI'(wbit % BANK_BITS);
@@ -880,18 +895,28 @@ module chipleap_accel_core #(
       always_comb begin
         logic [BANK_BITS-1:0] xw;
         xw = abank_rdata_i[int'(xb_q)];
-        for (int v = 0; v < int'(V); v++) xop[v] = xw[8*v+:8];
+        for (int v = 0; v < int'(V); v++) xv[v] = xw[8*v+:8];
         for (int l = 0; l < int'(L); l++) begin
           logic [BANK_BITS-1:0] chunk;
           chunk = wbank_rdata_i[int'(cs_q) * L + l] >> wsel_q;
           for (int v = 0; v < int'(V); v++) begin
             unique case (fmt_shift)
-              2'd1: wop[l][v] = 8'(signed'(chunk[4*v+:4]));
-              2'd2: wop[l][v] = 8'(signed'(chunk[2*v+:2]));
-              default: wop[l][v] = chunk[8*v+:8];
+              2'd1: wv[l][v] = 8'(signed'(chunk[4*v+:4]));
+              2'd2: wv[l][v] = 8'(signed'(chunk[2*v+:2]));
+              default: wv[l][v] = chunk[8*v+:8];
             endcase
           end
         end
+      end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        for (int v = 0; v < int'(V); v++) xq[v] <= '0;
+        for (int l = 0; l < int'(L); l++) for (int v = 0; v < int'(V); v++) wq[l][v] <= '0;
+      end else if (issue) begin
+        xq <= xv;
+        wq <= wv;
       end
     end
 
@@ -903,7 +928,7 @@ module chipleap_accel_core #(
     always_comb begin
       for (int l = 0; l < int'(L); l++) begin
         logic signed [PW-1:0] t[V];
-        for (int v = 0; v < int'(V); v++) t[v] = PW'(mul8(xop[v], wop[l][v]));
+        for (int v = 0; v < int'(V); v++) t[v] = PW'(mul8(xq[v], wq[l][v]));
         for (int w = int'(V); w > 1; w = (w + 1) / 2) begin
           for (int i = 0; i < w / 2; i++) t[i] = t[2*i] + t[2*i+1];
           if (w % 2 == 1) t[w/2] = t[w-1];
