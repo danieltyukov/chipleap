@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from chipleap.chip.floorplan import Placed
+from chipleap.macro import grid
 from chipleap.macro.layer import HOOKUP_LAYERS, MacroView
 from chipleap.rtl import quote as q
 from chipleap.rtl.project import IDENT_RE
@@ -135,8 +136,11 @@ proc chipleap_hookup {net layer vias x_um y_um dir} {
 """
 
 
-def script(macros: Mapping[str, tuple[Placed, MacroView]]) -> str:
-    """The PDN script; ``macros`` maps each macro instance to its placement and views."""
+def script(macros: Mapping[str, tuple[Placed, MacroView]], core_y0: float | None = None) -> str:
+    """The PDN script; ``macros`` maps each macro instance to its placement and views. A
+    macro whose supply stripes run across it (an SRAM) gets pdngen's macro grid
+    (``chipleap.macro.grid``), which needs the core's bottom edge, ``core_y0``, to check
+    a TopMetal2 supply pair crosses it."""
     lines = [
         "# Written by ChipLeap: the core's power grid, joined to the pad ring and the macros.",
         "source $::env(SCRIPTS_DIR)/openroad/common/set_global_connections.tcl",
@@ -160,7 +164,11 @@ def script(macros: Mapping[str, tuple[Placed, MacroView]]) -> str:
             f"-pin_pattern {{^{io_pin}$}} -{kind}"
         )
     hooks: list[tuple[str, str, float, float, str]] = []
+    gridded: list[grid.Placement] = []
     for inst, (placed, view) in macros.items():
+        if not view.supply_hookup:
+            gridded.append(grid.Placement(inst, view, placed.x, placed.y, placed.orient))
+            continue
         if not IDENT_RE.fullmatch(inst):
             raise PdnError(f"macro instance {inst!r} is not a plain name")
         for pin in view.pins:
@@ -192,6 +200,14 @@ def script(macros: Mapping[str, tuple[Placed, MacroView]]) -> str:
         "add_pdn_connect -grid stdcell_grid -layers {Metal1 TopMetal1}",
         HOOKUP_PROC.strip("\n"),
     ]
+    if gridded:
+        if core_y0 is None:
+            raise PdnError("a macro grid needs the core's position")
+        try:
+            grid.check_pairs(gridded, core_y0)
+            lines += grid.grid_lines(gridded, "VDD", "VSS")
+        except grid.GridError as exc:
+            raise PdnError(str(exc)) from None
     for net, layer, x, y, direction in hooks:
         vias = [VIA_DOWN[f"Metal{k}"] for k in range(int(layer[-1]), 1, -1)]
         lines.append(

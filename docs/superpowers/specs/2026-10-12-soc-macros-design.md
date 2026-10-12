@@ -24,7 +24,7 @@ Measured on 2026-10-12 with LibreLane 3.0.0.dev44 (its IHP PDK at `cb7daaa`) and
 
 `chipleap.macro.grid` writes the PDN script for any set of placed PDK macros: LibreLane's `pdn_cfg.tcl` sourced, a global connection per supply pin of each instance to `VDD_NET` or `GND_NET`, and one macro grid per cell as in fact 3. D4's chip PDN takes the same grid for every view with `supply_hookup=False`, instead of refusing it. A macro whose supply pins are not on Metal4 is refused, with the layer named.
 
-The core's TopMetal2 stripes (75.6 um pitch) connect each macro grid, so a macro must lie under a whole VDD and VSS pair of them. Macros taller than 84 um always do; for a shorter one the placement moves it up until a pair falls inside, and the PDN script checks the pair is there before LibreLane runs.
+The core's TopMetal2 stripes (75.6 um pitch) connect each macro grid, so a macro must lie under a whole VDD and VSS pair of them. Macros at least 104 um tall (a pitch, a pair and the grid's inset at both ends) always do; for a shorter one the placement moves it up until a pair falls inside, and the PDN script checks the pair is there before LibreLane runs.
 
 ### The generated accelerator
 

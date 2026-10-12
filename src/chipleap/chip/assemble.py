@@ -184,7 +184,7 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     )
     builddir.write_text(flow_dir, "macro_placement.cfg", netlist.placement(plan))
     placed = {m.inst: (m, imported.views[m.cell]) for m in plan.macros}
-    builddir.write_text(flow_dir, "pdn.tcl", pdn.script(placed))
+    builddir.write_text(flow_dir, "pdn.tcl", pdn.script(placed, plan.core[1]))
     clk = project.fastest_clock
     cfg = flow.config(
         chip,
