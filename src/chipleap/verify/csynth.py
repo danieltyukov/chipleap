@@ -59,12 +59,14 @@ def get_synth_tool(key: str) -> SynthTool:
 
 
 def specialize(sv: str, params: dict[str, int]) -> str:
-    """The RTL with each parameter's default replaced, so the top needs no overrides."""
+    """The RTL with each parameter's default replaced, so the top needs no overrides. Every
+    module that declares it gets the value: ``chipleap_accel`` passes its own parameters
+    to ``chipleap_accel_core``, so both must carry it."""
     out = sv
     for name, value in params.items():
         pattern = re.compile(rf"(parameter\s+int\s+unsigned\s+{name}\s*=\s*)[^,\n)]+")
-        out, n = pattern.subn(rf"\g<1>{value}", out, count=1)
-        if n != 1:
+        out, n = pattern.subn(rf"\g<1>{value}", out)
+        if n < 1:
             raise SynthError(f"parameter {name} not found in the RTL")
     return out
 
