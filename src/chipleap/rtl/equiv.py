@@ -311,9 +311,10 @@ def _first_error(log: str) -> str:
     return (errors or [ln.strip() for ln in log.strip().splitlines()[-1:]] or ["no output"])[0]
 
 
-def _run(cmd: list[str], cwd: Path, reads: list[Path]) -> str:
-    """A confined run; returns its output. A timeout comes back as an error line."""
-    timeout = float(os.environ.get("CHIPLEAP_EQUIV_TIMEOUT", "1800"))
+def _run(cmd: list[str], cwd: Path, reads: list[Path], timeout: float | None = None) -> str:
+    """A confined run; returns its output. A timeout comes back as an error line;
+    ``timeout`` replaces CHIPLEAP_EQUIV_TIMEOUT."""
+    timeout = timeout or float(os.environ.get("CHIPLEAP_EQUIV_TIMEOUT", "1800"))
     with confine.confined(cmd, reads, solver_path(cmd[0], exclude=reads)) as (argv, env):
         proc = subprocess.Popen(
             argv,
