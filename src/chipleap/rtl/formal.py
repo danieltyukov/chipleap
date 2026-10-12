@@ -49,6 +49,13 @@ _UNREACHED_ITEM_RE = re.compile(r"summary:\s+(\S+) at (.+?):(\d+)\.\d+-\d+\.\d+\
 _TRACE_RE = re.compile(r"summary: (?:(?:counterexample|cover) )?trace(?: \[(\w+)\])?: (\S+)")
 _DONE_RE = re.compile(r"DONE \((\w+), rc=\d+\)")
 _PDR_FAIL_RE = re.compile(r"summary: engine_\d+ \(abc pdr\) returned FAIL")
+# What the engine itself said, before SymbiYosys summarizes it.
+_ENGINE_REACHED_RE = re.compile(r"engine_\d+: .*Reached cover statement at (.+?) in step \d+")
+_ENGINE_ASSERT_FAILED_RE = re.compile(r"engine_\d+: .*Assert failed in ")
+MISMATCH_HINT = (
+    "this SymbiYosys does not match the Yosys it runs: set CHIPLEAP_SBY to a build from "
+    "the Yosys's own tag (scripts/install_formal_tools.sh)"
+)
 _STATUS = {"PASS": "pass", "FAIL": "fail", "UNKNOWN": "unknown"}
 
 
@@ -162,6 +169,12 @@ def parse_log(text: str, project: Project, cwd: Path, name: str) -> dict[str, An
                 {"property": _property(m.group(3)), "file": file, "line": ln, "reached": False}
             )
     out["covers"].sort(key=lambda c: (c["file"], c["line"]))
+    disagreement = _disagreement(text, out)
+    if disagreement:
+        # A SymbiYosys newer than its Yosys summarizes covers wrongly: a cover its engine
+        # reached comes out unreached, or not at all. Neither a pass nor a fail is known.
+        out.update(status="error", error=f"{disagreement}; {MISMATCH_HINT}", covers=[])
+        return out
     if status == "error" and _PDR_FAIL_RE.search(text):
         # abc pdr refuted an assertion; SymbiYosys writes its counterexample with yices.
         out["status"] = "fail"
@@ -186,9 +199,28 @@ def parse_log(text: str, project: Project, cwd: Path, name: str) -> dict[str, An
     return out
 
 
-def _run(cmd: list[str], cwd: Path, project: Project, workdir: Path) -> str:
+def _disagreement(text: str, result: dict[str, Any]) -> str:
+    """How SymbiYosys's summary contradicts what its engine reported, or "": covers the
+    engine reached that the summary does not report reached, or an assertion the engine
+    saw fail in a run summarized as passing."""
+    engine = sorted(set(_ENGINE_REACHED_RE.findall(text)))
+    summarized = sum(c["reached"] for c in result["covers"])
+    if len(engine) > summarized:
+        return (
+            f"SymbiYosys's engine reached {len(engine)} cover statement"
+            f"{'s' if len(engine) != 1 else ''} ({', '.join(engine[:3])}) but its summary "
+            f"reports {summarized} reached"
+        )
+    if result["status"] == "pass" and _ENGINE_ASSERT_FAILED_RE.search(text):
+        return "SymbiYosys's engine saw an assertion fail but its summary says the check passed"
+    return ""
+
+
+def _run(
+    cmd: list[str], cwd: Path, project: Project, workdir: Path, timeout: float | None = None
+) -> str:
     """Run SymbiYosys confined; returns its output. A timeout is an error in the output."""
-    timeout = float(os.environ.get("CHIPLEAP_FORMAL_TIMEOUT", "1800"))
+    timeout = timeout or float(os.environ.get("CHIPLEAP_FORMAL_TIMEOUT", "1800"))
     reads = [*project.roots, workdir]
     with confine.confined(cmd, reads, solver_path(cmd[0], exclude=reads)) as (argv, env):
         proc = subprocess.Popen(
@@ -236,16 +268,18 @@ def run_check(
     *,
     includes: list[Path] | None = None,
     after: list[str] | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """One check: write its .sby, run SymbiYosys, and return its result. ``files`` stands
-    in for the project's sources and formal sources (proposed assertions use it)."""
+    in for the project's sources and formal sources (proposed assertions use it);
+    ``timeout`` replaces CHIPLEAP_FORMAL_TIMEOUT."""
     tool = sby()
     if tool.path is None:
         raise RuntimeError(_no_sby(tool))
     srcs = files if files is not None else _sources(project)
     text = sby_text(project, check, srcs, includes=includes, after=after)
     config = builddir.write_text(workdir, f"{check.name}.sby", text)
-    out = _run([tool.path, "-f", "-d", check.name, config.name], workdir, project, workdir)
+    out = _run([tool.path, "-f", "-d", check.name, config.name], workdir, project, workdir, timeout)
     builddir.write_text(workdir, f"{check.name}.log", out)
     result = parse_log(out, project, workdir, check.name)
     head = {
