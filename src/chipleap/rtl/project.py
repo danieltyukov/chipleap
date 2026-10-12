@@ -1505,6 +1505,9 @@ def _parse_chip(value: Any, paths: _Paths, top: str) -> ChipConfig | None:
     pitch = _positive(c.get("pad_pitch_um", 100), "chip.pad_pitch_um", PAD_PITCH_MAX)
     if pitch < PAD_PITCH_MIN:
         raise ProjectError(f"chip.pad_pitch_um must be at least {PAD_PITCH_MIN:g} for bonding")
+    if pitch != int(pitch):
+        # The fillers come in whole micrometres; any remainder would break the ring's rails.
+        raise ProjectError("chip.pad_pitch_um must be a whole number of um")
     core = None
     if c.get("core_um") is not None:
         raw = c["core_um"]
@@ -1584,7 +1587,11 @@ def _parse_chip(value: Any, paths: _Paths, top: str) -> ChipConfig | None:
             raise ProjectError(f"{where}.connect must map the macro's pins to nets")
         connect: dict[str, str] = {}
         for pin, net in conn.items():
-            _ident(pin, f"{where}.connect: a pin")
+            if not isinstance(pin, str) or port_bit(pin) is None:
+                raise ProjectError(
+                    f"{where}.connect: {str(pin)[:40]!r} is not a pin: a name, a bus or a bit "
+                    "of one (q[3])"
+                )
             if not isinstance(net, str) or port_bit(net) is None:
                 raise ProjectError(
                     f"{where}.connect.{pin} must be a net: a port bit of the top or a name"

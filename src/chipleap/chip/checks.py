@@ -162,12 +162,19 @@ def lvs_plan(plan: Floorplan, name: str, inputs: LvsInputs, src: Path, out: Path
     }
 
 
+LVS_PASS = re.compile(
+    r"^[0-9: +-]+: Memory Usage \(\d+K\) : INFO : Congratulations! Netlists match\.$"
+)
+
+
 def lvs_outcome(log: str) -> str:
-    """``pass``, ``fail`` or ``unknown`` from the LVS deck's log."""
-    if "Congratulations! Netlists match." in log:
-        return "pass"
-    if "Netlists don't match" in log:
+    """``pass``, ``fail`` or ``unknown`` from the LVS deck's log. A failure anywhere wins,
+    and a pass is only the deck's own whole line, so no name in the layout can print one."""
+    lines = [ln.rstrip() for ln in log.splitlines()]
+    if any("Netlists don't match" in ln for ln in lines):
         return "fail"
+    if any(LVS_PASS.match(ln) for ln in lines):
+        return "pass"
     return "unknown"
 
 

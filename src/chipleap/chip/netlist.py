@@ -27,7 +27,7 @@ from typing import Any
 
 from chipleap.chip.config import ChipConfig, port_bit
 from chipleap.chip.floorplan import Floorplan, Placed
-from chipleap.chip.macros import MacroView
+from chipleap.macro.layer import MacroView
 from chipleap.rtl import builddir, confine
 from chipleap.rtl import quote as q
 from chipleap.rtl.project import IDENT_RE, Project, runs_tools
@@ -175,6 +175,9 @@ VERILOG_KEYWORDS = frozenset(
         "longint",
     ]
 )
+
+
+SUPPLY_NETS = frozenset({"vdd", "vss", "iovdd", "iovss"})
 
 
 class NetlistError(ValueError):
@@ -326,12 +329,61 @@ def _core_bit(net: str, ports: Mapping[str, Port]) -> str | None:
 def _own_net(
     net: str, core_nets: Mapping[str, str], chip_ports: Mapping[str, str], what: str
 ) -> None:
-    """Refuse a net the chip section names that is also one ChipLeap names itself."""
+    """Refuse a net the chip section names that is also one ChipLeap names itself, or a
+    supply's."""
+    if net.casefold() in SUPPLY_NETS:
+        raise NetlistError(f"{what} {net}: {net} is a supply's name")
     for bit, core in core_nets.items():
         if net == core:
             raise NetlistError(f"{what} {net}: {net} is the net of core port bit {bit}")
     if net in chip_ports:
         raise NetlistError(f"{what} {net}: {net} is the chip's port for a pad")
+
+
+def _expand_connect(
+    instance: str, connect: Mapping[str, str], view: MacroView, ports: Mapping[str, Port]
+) -> dict[str, str]:
+    """``connect`` bit by bit. A key is a pin, a bit of a bus pin (``q[3]``) or a whole
+    bus (``q``); a whole bus connects to a core port of its width, bit 0 to the port's
+    least significant bit, or to a net of its own, ``NAME_0`` and up."""
+    out: dict[str, str] = {}
+    for key, value in connect.items():
+        pin = view.pin(key)
+        if pin is not None:
+            if pin.is_supply:
+                raise NetlistError(
+                    f"macro {instance}: {key} is a supply pin; ChipLeap connects it to "
+                    f"{'VDD' if pin.kind == 'power' else 'VSS'} itself"
+                )
+            bits = {key: value}
+        elif bus := view.bus(key):
+            port = ports.get(value)
+            if port is not None:
+                if port.width != len(bus):
+                    raise NetlistError(
+                        f"macro {instance}: bus {key} has {len(bus)} bits and core port "
+                        f"{value} {port.width}"
+                    )
+                lsb_first = list(reversed(port.bits()))
+                bits = {p.name: lsb_first[i] for i, p in enumerate(bus)}
+            elif IDENT_RE.fullmatch(value):
+                bits = {p.name: f"{value}_{i}" for i, p in enumerate(bus)}
+            else:
+                raise NetlistError(
+                    f"macro {instance}: bus {key} connects to a core port of its width or a "
+                    f"net name, not {value}"
+                )
+        else:
+            have = ", ".join(sorted({x.name.split("[")[0] for x in view.pins if not x.is_supply}))
+            raise NetlistError(
+                f"macro {instance}: connect names {key}, which {view.cell} does not have "
+                f"(its pins: {have})"
+            )
+        for bit, net in bits.items():
+            if bit in out:
+                raise NetlistError(f"macro {instance}: pin {bit} is connected twice")
+            out[bit] = net
+    return out
 
 
 def _base(bit: str) -> str:
@@ -344,15 +396,25 @@ def bind(
     views: Mapping[str, MacroView],
     cells: Mapping[str, str],
     clocks: Iterable[str] = (),
+    top: str = "",
 ) -> Binding:
     """The nets of the chip: ``ports`` are the core's, ``views`` the macros' views by
-    cell, ``cells`` each macro instance's cell, ``clocks`` the project's clock ports."""
+    cell, ``cells`` each macro instance's cell, ``clocks`` the project's clock ports and
+    ``top`` the core's module."""
     for p in ports.values():
         if p.direction == "inout":
             raise NetlistError(
                 f"core port {p.name} is inout; ChipLeap's pads are inputs, outputs or analog"
             )
     core_nets = {bit: f"{flat(bit)}_core" for p in ports.values() for bit in p.bits()}
+    seen: dict[str, str] = {}
+    for port_bit_name, core_net in core_nets.items():
+        if core_net in seen:
+            raise NetlistError(
+                f"core port bits {seen[core_net]} and {port_bit_name} would share the net "
+                f"{core_net} and the pad port pad_{flat(port_bit_name)}; rename one of the ports"
+            )
+        seen[core_net] = port_bit_name
     drivers: dict[str, list[str]] = {}
     users: dict[str, list[str]] = {}
     io: dict[str, dict[str, str]] = {}
@@ -396,25 +458,12 @@ def bind(
     unconnected: set[str] = set()  # nets of macro pins left unconnected
     for m in config.macros:
         view = views[cells[m.instance]]
-        pins = {mp.name: mp for mp in view.pins}
-        for name in m.connect:
-            found = pins.get(name)
-            if found is None:
-                have = ", ".join(x.name for x in view.pins if not x.is_supply)
-                raise NetlistError(
-                    f"macro {m.instance}: connect names {name}, which {view.cell} does not "
-                    f"have (its pins: {have})"
-                )
-            if found.is_supply:
-                raise NetlistError(
-                    f"macro {m.instance}: {name} is a supply pin; ChipLeap connects it to "
-                    f"{'VDD' if found.kind == 'power' else 'VSS'} itself"
-                )
+        wanted = _expand_connect(m.instance, m.connect, view, ports)
         conns: dict[str, str] = {}
         for mp in view.pins:
             if mp.is_supply:
                 continue
-            given = m.connect.get(mp.name)
+            given = wanted.get(mp.name)
             if given is None:
                 if mp.direction == "input":
                     raise NetlistError(
@@ -422,6 +471,11 @@ def bind(
                     )
                 warnings.append(f"macro {m.instance}: {mp.direction} {mp.name} is not connected")
                 conns[mp.name] = f"{m.instance}_{flat(mp.name)}"
+                if conns[mp.name] in unconnected:
+                    raise NetlistError(
+                        f"macro {m.instance}: {mp.name} left open would share the net "
+                        f"{conns[mp.name]} with another open pin; rename the instance"
+                    )
                 unconnected.add(conns[mp.name])
                 continue
             bit = _core_bit(given, ports)
@@ -482,13 +536,13 @@ def bind(
             raise NetlistError(f"clock {c} must be on an input pad of the chip")
         clock_pads[c] = on_pad[bit]
     b = Binding(dict(ports), core_nets, directions, io, chip_ports, macros, clock_pads, warnings)
-    _check_names(b, config)
+    _check_names(b, config, {views[c].cell for c in cells.values()}, top)
     return b
 
 
-def _check_names(b: Binding, config: ChipConfig) -> None:
+def _check_names(b: Binding, config: ChipConfig, cells: set[str], top: str) -> None:
     """Every name the chip top declares is a Verilog identifier, no keyword, and names
-    one thing."""
+    one thing; a macro's cell is a module name of its own."""
     owners: dict[str, str] = {}
     instances = {*b.io, *(m.instance for m in config.macros), "u_core"}
     for kind, names in (
@@ -506,6 +560,11 @@ def _check_names(b: Binding, config: ChipConfig) -> None:
             owners[n] = kind
     if config.name in owners or config.name in VERILOG_KEYWORDS:
         raise NetlistError(f"chip.name {config.name} is also a name inside the chip")
+    for cell in sorted(cells):
+        if not IDENT_RE.fullmatch(cell) or cell in VERILOG_KEYWORDS:
+            raise NetlistError(f"macro cell {cell!r} cannot be a module name in Verilog")
+        if cell in (config.name, top):
+            raise NetlistError(f"macro cell {cell} has the name of the chip or of its core")
 
 
 # Files

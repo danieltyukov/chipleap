@@ -12,13 +12,14 @@ from chip_fakes import COUNTER_CHIP, fake_pdk, io_lef
 from chipleap.chip import assemble, checks, floorplan, io, netlist, pdn
 from chipleap.chip.config import ChipConfig, ChipMacro, Pad
 from chipleap.chip.floorplan import FloorplanError, Placed
-from chipleap.chip.macros import MacroPin, MacroView
 from chipleap.chip.netlist import NetlistError, Port
 from chipleap.macro.check import Report
+from chipleap.macro.layer import MacroPin, MacroView
 from chipleap.rtl.project import ProjectError, load_project
 
 CELLS = io.read_lef(io_lef())
 ROOT = Path(__file__).resolve().parents[1]
+FLOW_DIR = Path("/build/chip/flow")
 
 
 def counter_chip(root: Path, extra: str = "") -> Path:
@@ -519,10 +520,27 @@ def test_an_unplain_net_on_a_pad_is_refused():
         checks.lvs_inputs(cdl.replace(" a_core VDD\n", " a$core VDD\n"), IO_CDL, plan, CELLS, [])
 
 
+PASS_LINE = "2026-10-12 04:17:43 +0200: Memory Usage (0K) : INFO : Congratulations! Netlists match."
+
+
 def test_the_lvs_outcome_is_read_from_the_log():
-    assert checks.lvs_outcome("... Congratulations! Netlists match.") == "pass"
+    assert checks.lvs_outcome(f"start\n{PASS_LINE}\n") == "pass"
     assert checks.lvs_outcome("ERROR : Netlists don't match") == "fail"
     assert checks.lvs_outcome("") == "unknown"
+    # A failure anywhere wins over a pass.
+    assert checks.lvs_outcome(f"{PASS_LINE}\nERROR : Netlists don't match\n") == "fail"
+
+
+def test_a_name_in_the_layout_cannot_print_a_pass():
+    """A cell or net named like the deck's message, inside another log line, is no
+    pass: only the deck's own whole line is."""
+    forged = (
+        "2026-10-12 04:17:43 +0200: Memory Usage (0K) : INFO : extracting cell "
+        "x_Congratulations! Netlists match."
+    )
+    assert checks.lvs_outcome(forged) == "unknown"
+    assert checks.lvs_outcome("Congratulations! Netlists match.") == "unknown"
+    assert checks.lvs_outcome(PASS_LINE + " x") == "unknown"
 
 
 def test_drc_reports_are_counted_by_rule(tmp_path):
@@ -629,11 +647,11 @@ def test_the_plan_needs_no_tool(counter_project, tmp_path, monkeypatch):
 
 
 def flow_case():
-    from chipleap.chip import macros
+    from chipleap.macro import layer
 
     cfg, b = bind({"clk": "a", "inp": "v", "out": "c"})
     plan = floorplan.plan(cfg, CELLS, {"u1": ("cmp", 20.0, 40.0)}, b.directions)
-    p = Path("/build/chip/flow/macros/u1/views")
+    p = FLOW_DIR / "macros/u1/views"
     v = MacroView(
         "cmp",
         "analog",
@@ -648,7 +666,7 @@ def flow_case():
         ("cmp",),
         Report("x"),
     )
-    imported = macros.Imported({"cmp": v}, {"u1": "cmp"})
+    imported = layer.Imported({"cmp": v}, {"u1": "cmp"})
     return cfg, plan, b, imported
 
 
@@ -656,7 +674,7 @@ def test_the_flow_places_the_ring_and_routes_around_it():
     from chipleap.chip import flow
 
     cfg, plan, b, imported = flow_case()
-    c = flow.config(cfg, plan, b, imported, {"VERILOG_FILES": ["dir::src/core.v"]}, 10.0)
+    c = flow.config(cfg, plan, b, imported, {"VERILOG_FILES": ["dir::src/core.v"]}, 10.0, FLOW_DIR)
     assert c["DESIGN_NAME"] == "c" and c["VERILOG_FILES"] == ["dir::src/c.v", "dir::src/core.v"]
     assert c["CLOCK_NET"] == "a_core" and c["CLOCK_PORT"] is None
     assert c["DIE_AREA"] == [0, 0, *plan.die] and c["CORE_AREA"] == list(plan.core)
@@ -675,7 +693,7 @@ def test_a_value_tcl_could_read_as_syntax_is_refused():
 
     cfg, plan, b, imported = flow_case()
     with pytest.raises(PnrError, match="cannot go into a tool script"):
-        flow.config(cfg, plan, b, imported, {"VERILOG_DEFINES": ["X=$(id)"]}, 10.0)
+        flow.config(cfg, plan, b, imported, {"VERILOG_DEFINES": ["X=$(id)"]}, 10.0, FLOW_DIR)
 
 
 def test_the_standard_cell_cdl_comes_from_librelanes_pdk(tmp_path):
@@ -821,3 +839,181 @@ def test_the_reports_show_the_chip(counter_project):
     assert "## Chip" in md and "| DRC violations (IHP deck) | 2 |" in md and "| M1.a | 2 |" in md
     assert "GDS: `build/chip/c.gds`" in md
     assert "<h2>Chip</h2>" in project_html(p, [r])
+
+
+# Review findings
+
+
+def test_a_macro_bus_connects_end_to_end(tmp_path):
+    """tiny_counter's two-bit output q, imported as a package, drives a two-bit core
+    input: bit 0 to the port's least significant bit."""
+    import shutil
+
+    from chipleap.macro import layer
+    from chipleap.rtl.project import _walk, read_inside
+
+    root = tmp_path / "proj"
+    (root / "build").mkdir(parents=True)
+    pkg = root / "macros" / "tiny_counter.macro"
+    shutil.copytree(ROOT / "tests/fixtures/macro/tiny_counter.macro", pkg)
+    imported = layer.import_packages(
+        [("cnt", pkg)],
+        lambda d: [r for _, r in _walk(d, (root,))],
+        lambda p: read_inside(p, (root,)),
+        root / "build",
+        "ihp-sg13g2",
+        layer.reserved_names(None),
+    )
+    view = imported.views["tiny_counter"]
+    assert [p.name for p in view.bus("q")] == ["q[0]", "q[1]"]
+    port_map = {
+        "a": Port("a", "input", 1),
+        "d": Port("d", "input", 2),
+        "e": Port("e", "input", 1),
+        "y": Port("y", "output", 1),
+    }
+    pads = {
+        "south": (Pad("signal", "a"), Pad("vdd"), Pad("vss"), Pad("iovdd"), Pad("iovss")),
+        "east": (Pad("signal", "e"), Pad("signal", "y")),
+    }
+    m = ChipMacro("cnt", pkg, connect={"clk": "a", "rst_n": "e", "en": "e", "q": "d"})
+    cfg = ChipConfig("c", pads, (m,), 100.0, (400.0, 400.0))
+    b = netlist.bind(cfg, port_map, imported.views, imported.cells, ("a",), "core")
+    assert b.macros["cnt"]["q[0]"] == "d_0_core" and b.macros["cnt"]["q[1]"] == "d_1_core"
+    plan = floorplan.plan(cfg, CELLS, {"cnt": ("tiny_counter", 20.0, 10.0)}, b.directions)
+    v = netlist.chip_top(cfg, b, plan, "core", {})
+    assert (
+        "tiny_counter cnt (.clk(a_core), .en(e_core), .q({d_1_core, d_0_core}), .rst_n(e_core));"
+        in v
+    )
+    # One bit of a bus, and a bus of the wrong width.
+    one = ChipMacro("cnt", pkg, connect={"clk": "a", "rst_n": "e", "en": "e", "q[1]": "f"})
+    b = netlist.bind(
+        ChipConfig("c", pads, (one,), 100.0, (400.0, 400.0)),
+        {"a": port_map["a"], "e": port_map["e"], "y": port_map["y"], "f": Port("f", "input", 1)},
+        imported.views,
+        imported.cells,
+        ("a",),
+    )
+    assert b.macros["cnt"]["q[1]"] == "f_core" and b.macros["cnt"]["q[0]"] == "cnt_q_0"
+    wide = ChipMacro("cnt", pkg, connect={"clk": "a", "rst_n": "e", "en": "e", "q": "a"})
+    with pytest.raises(NetlistError, match="2 bits and core port a 1"):
+        netlist.bind(
+            ChipConfig("c", pads, (wide,), 100.0, (400.0, 400.0)),
+            port_map,
+            imported.views,
+            imported.cells,
+            ("a",),
+        )
+
+
+def test_bus_pins_are_accepted_in_the_chip_section(counter_project):
+    extra = "  macros: [{instance: m, package: rtl, connect: {'q[3]': x, q: y}}]\n"
+    p = load_project(counter_chip(counter_project, extra))
+    assert p.chip.macros[0].connect == {"q[3]": "x", "q": "y"}
+    with pytest.raises(ProjectError, match="is not a pin"):
+        load_project(
+            counter_chip(
+                counter_project, "  macros: [{instance: m, package: rtl, connect: {'q[': x}}]\n"
+            )
+        )
+
+
+def test_port_bits_that_flatten_to_one_name_are_refused():
+    port_map = {"a": Port("a", "input", 2), "a_1": Port("a_1", "input", 1)}
+    with pytest.raises(NetlistError, match="would share the net a_1_core"):
+        bind(port_map=port_map, clocks=())
+
+
+@pytest.mark.parametrize("name", ["VDD", "vss", "IOVdd"])
+def test_a_supplys_name_is_no_signal_net(name):
+    pads = {
+        "south": (Pad("signal", "a"), Pad("vdd"), Pad("vss"), Pad("iovdd"), Pad("iovss")),
+        "west": (Pad("analog", name),),
+    }
+    with pytest.raises(NetlistError, match="is a supply's name"):
+        bind(pads=pads, port_map=ports(a=("input", 1)))
+
+
+def test_a_macro_cell_named_like_the_chip_or_its_core_is_refused():
+    cfg, _ = bind({"clk": "a", "inp": "v", "out": "c"})
+    with pytest.raises(NetlistError, match="name of the chip or of its core"):
+        netlist.bind(cfg, PORTS, {"cmp": CMP}, {"u1": "cmp"}, ("a",), "cmp")
+
+
+def test_a_pitch_of_part_of_a_micrometre_is_refused(counter_project):
+    with pytest.raises(ProjectError, match="whole number of um"):
+        load_project(counter_chip(counter_project, "  pad_pitch_um: 100.5\n"))
+    with pytest.raises(FloorplanError, match="whole number of um"):
+        floorplan.plan(chip(pitch=100.5), CELLS)
+
+
+def _drc_dir(tmp_path, items: int, logs=("density", "sg13g2_maximal")):
+    d = tmp_path / "drc"
+    d.mkdir(parents=True)
+    body = "".join("<item><category>'M1.a'</category></item>" for _ in range(items))
+    (d / "chip_c_full.lyrdb").write_text(
+        f"<report-database><items>{body}</items></report-database>"
+    )
+    for t in logs:
+        (d / f"chip_c_{t}.log").write_text("ok\n")
+    return d
+
+
+def test_a_drc_run_must_finish_to_count(tmp_path):
+    clean = assemble.drc_result(_drc_dir(tmp_path / "a", 0), "c", 0, "")
+    assert clean.total == 0
+    dirty = assemble.drc_result(_drc_dir(tmp_path / "b", 2), "c", 1, "")
+    assert dirty.violations == {"M1.a": 2}
+    from chipleap.chip.run import ToolError
+
+    for case, code, items, logs in (
+        ("crash", 1, 0, ("density", "sg13g2_maximal")),  # exit 1 and an empty report
+        ("odd", 0, 3, ("density", "sg13g2_maximal")),  # exit 0 and violations
+        ("signal", -9, 0, ("density", "sg13g2_maximal")),
+        ("no-density", 0, 0, ("sg13g2_maximal",)),
+    ):
+        with pytest.raises(ToolError):
+            assemble.drc_result(_drc_dir(tmp_path / case, items, logs), "c", code, "")
+    empty = tmp_path / "none"
+    empty.mkdir()
+    with pytest.raises(ToolError, match="did not finish"):
+        assemble.drc_result(empty, "c", 0, "")
+
+
+def test_missing_metrics_are_no_pass():
+    from chipleap.verify.pnr import PnrError
+
+    good = {
+        "route__drc_errors": 0,
+        "timing__setup__ws": 1.0,
+        "timing__hold__ws": 0.1,
+        "antenna__violating__nets": 0,
+    }
+    assemble.check_metrics(good)
+    for key in good:
+        with pytest.raises(PnrError, match=key):
+            assemble.check_metrics({k: v for k, v in good.items() if k != key})
+    with pytest.raises(PnrError):
+        assemble.check_metrics({**good, "route__drc_errors": "n/a"})
+
+
+def test_antenna_violations_fail_the_chip():
+    data = {
+        "name": "c",
+        "outline_um": [-60.0, -60.0, 1460.0, 1460.0],
+        "pads": 4,
+        "macros": [],
+        "route_drc_errors": 0,
+        "antenna_nets": 2,
+        "lvs": {"result": "pass"},
+        "drc": {"violations": 0, "rules": {}},
+        "supply_hookup": {"VDD": {"east": 1}, "VSS": {"east": 1}},
+        "precheck": [],
+        "setup_slack_ns": 1.0,
+        "hold_slack_ns": 0.1,
+    }
+    ok, summary = assemble.verdict(data)
+    assert not ok and "2 nets with antenna violations" in summary
+    ok, summary = assemble.verdict({**data, "antenna_nets": 0})
+    assert ok and "0 macros" in summary

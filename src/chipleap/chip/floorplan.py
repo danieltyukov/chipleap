@@ -174,6 +174,8 @@ def plan(
     directions = directions or {}
     pad_w, depth, corner = _sizes(io)
     pitch = _nm(config.pad_pitch_um)
+    if pitch % 1000:
+        raise FloorplanError("the pad pitch must be a whole number of um")
     b = BOND_UM * 1000
     slots = {s: len(config.pads.get(s, ())) for s in SIDES}
     # Each side's span between the corners: its pads at the pitch, or what an explicit
@@ -210,6 +212,10 @@ def plan(
 
         def fill_to(stop: int, side: str = side, horizontal: bool = horizontal) -> None:
             nonlocal cursor, fill_no
+            if (stop - cursor) % 1000:
+                # The fillers come in whole micrometres; a gap left open breaks the
+                # ring's rails, which carry the supplies around the chip.
+                raise FloorplanError(f"a gap of {(stop - cursor) / 1000:g} um on the {side} side")
             for width, cell in fillers((stop - cursor) // 1000):
                 x, y = _side_xy(side, cursor, die, depth)
                 w, h = (width * 1000, depth) if horizontal else (depth, width * 1000)
