@@ -29,6 +29,7 @@ STEP_TITLES = {
     "power": "Gate-level power",
     "ir_drop": "IR drop",
     "upf": "Power intent (UPF)",
+    "chip": "Chip",
 }
 DIAG_ROWS = 100
 
@@ -187,6 +188,23 @@ def _kv(r: StepResult) -> list[tuple[str, str]]:
             ("errors", str(d["errors"])),
             ("warnings", str(d["warnings"])),
         ]
+    if r.name == "chip" and "outline_um" in d:
+        o = d["outline_um"]
+        hookup = d["supply_hookup"]
+        return [
+            ("outline", f"{(o[2] - o[0]) / 1000:.2f} x {(o[3] - o[1]) / 1000:.2f} mm"),
+            ("pads", str(d["pads"])),
+            ("macros", str(len(d["macros"]))),
+            ("LVS (IHP deck)", str(d["lvs"]["result"])),
+            ("DRC violations (IHP deck)", str(d["drc"]["violations"])),
+            ("routing DRC", str(d["route_drc_errors"])),
+            (
+                "supply joins to the ring",
+                f"VDD {sum(hookup.get('VDD', {}).values())}, VSS {sum(hookup.get('VSS', {}).values())}",
+            ),
+            ("setup slack, slow", f"{d['setup_slack_ns']:+.3f} ns"),
+            ("hold slack", f"{d['hold_slack_ns']:+.3f} ns"),
+        ]
     return []
 
 
@@ -194,6 +212,16 @@ def _tables(r: StepResult) -> list[tuple[list[str], list[list[str]]]]:
     """Detail tables of the verification-depth steps, for both report formats."""
     d = r.data
     out: list[tuple[list[str], list[list[str]]]] = []
+    if r.name == "chip" and "precheck" in d:
+        out.append(
+            (
+                ["precheck", "result", "detail"],
+                [[c["check"], "pass" if c["pass"] else "fail", c["detail"]] for c in d["precheck"]],
+            )
+        )
+        rules = d["drc"]["rules"]
+        if rules:
+            out.append((["DRC rule", "violations"], [[k, str(v)] for k, v in rules.items()]))
     if r.name == "formal":
         out.append(
             (
@@ -461,7 +489,7 @@ def project_markdown(p: Project, results: Sequence[StepResult]) -> str:
         diags = r.data.get("diagnostics") or []
         if diags:
             lines += [md_table(DIAG_HEAD, _diag_rows(diags)), ""]
-        if r.name == "pnr" and r.data.get("gds"):
+        if r.name in ("pnr", "chip") and r.data.get("gds"):
             lines += [f"GDS: `{r.data['gds']}`", ""]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -534,7 +562,7 @@ def project_html(p: Project, results: Sequence[StepResult]) -> str:
         diags = r.data.get("diagnostics") or []
         if diags:
             parts.append(_table(DIAG_HEAD, _diag_rows(diags)))
-        if r.name == "pnr" and r.data.get("gds"):
+        if r.name in ("pnr", "chip") and r.data.get("gds"):
             parts.append(f"<p>GDS: <code>{esc(r.data['gds'])}</code></p>")
         sections.append("\n".join(parts))
     return f"""<!doctype html>
