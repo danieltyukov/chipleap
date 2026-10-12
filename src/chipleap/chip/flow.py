@@ -27,8 +27,8 @@ from typing import Any
 from chipleap.chip.config import ChipConfig
 from chipleap.chip.floorplan import BOND_UM, HALO_UM, Floorplan
 from chipleap.chip.io import IO, IoCell, chip_lef, lef_path, liberty
-from chipleap.chip.macros import Imported
 from chipleap.chip.netlist import Binding
+from chipleap.macro.layer import Imported, librelane_config
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.verify.pnr import PnrError, run_librelane, signoff
@@ -73,23 +73,11 @@ def config(
     imported: Imported,
     verilog: Mapping[str, Any],
     clock_period: float,
+    flow_dir: Path,
 ) -> dict[str, Any]:
-    """The LibreLane configuration; the files it names are in the flow directory."""
-    macros: dict[str, Any] = {}
-    for m in plan.macros:
-        view = imported.views[m.cell]
-        rel = Path("macros") / _first_instance(imported, m.cell) / "views"
-        entry = macros.setdefault(
-            m.cell,
-            {
-                "gds": [f"dir::{rel / view.gds.name}"],
-                "lef": [f"dir::{rel / view.lef.name}"],
-                "lib": {"*": [f"dir::{rel / view.lib.name}"]},
-                "spice": [f"dir::{rel / view.spice.name}"],
-                "instances": {},
-            },
-        )
-        entry["instances"][m.inst] = {"location": [m.x, m.y], "orientation": m.orient}
+    """The LibreLane configuration; the files it names are in ``flow_dir``."""
+    placed = [(m.inst, m.cell, m.x, m.y, m.orient) for m in plan.macros]
+    macros, macro_cdls = librelane_config(imported.views, placed, flow_dir)
     first_clock = next(iter(binding.clocks), None)
     cfg: dict[str, Any] = {
         "meta": {
@@ -119,13 +107,7 @@ def config(
         "EXTRA_GDS": [f"dir::io/{IO}.gds"],
         "EXTRA_LIBS": ["dir::io/io_cells.lib"],
         # OpenROAD's CDL writer needs a subcircuit for every master, the macros' too.
-        "EXTRA_CDLS": [
-            f"dir::io/{IO}.cdl",
-            *(
-                f"dir::macros/{_first_instance(imported, c)}/views/{v.spice.name}"
-                for c, v in sorted(imported.views.items())
-            ),
-        ],
+        "EXTRA_CDLS": [f"dir::io/{IO}.cdl", *macro_cdls],
         "VDD_NETS": ["VDD"],
         "GND_NETS": ["VSS"],
         "PDN_CFG": "dir::pdn.tcl",
@@ -157,10 +139,6 @@ def config(
         except q.QuoteError as exc:
             raise PnrError(f"LibreLane configuration: {exc}") from exc
     return cfg
-
-
-def _first_instance(imported: Imported, cell: str) -> str:
-    return next(i for i, c in imported.cells.items() if c == cell)
 
 
 def _strings(value: Any) -> list[str]:

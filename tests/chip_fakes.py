@@ -143,3 +143,51 @@ chip:
       - {analog: vin}
       - null
 """
+
+
+SRAM = "RM_IHPSG13_1P_64x8_test"
+
+
+def sram(pdk: Path) -> str:
+    """A stand-in SRAM in ``pdk``'s sg13g2_sram library: 100 x 50 um, supply stripes on
+    Metal4 across the block, a data bus."""
+    lib = pdk / "libs.ref" / "sg13g2_sram"
+    for sub in ("lef", "gds", "lib", "cdl"):
+        (lib / sub).mkdir(parents=True, exist_ok=True)
+    pins = [
+        _pin("VDD!", "INOUT", "POWER", [[("Metal4", (10.0, 0.0, 12.0, 50.0))]]),
+        _pin("VSS!", "INOUT", "GROUND", [[("Metal4", (20.0, 0.0, 22.0, 50.0))]]),
+        *(
+            _pin(f"A_DIN[{i}]", "INPUT", "SIGNAL", [[("Metal2", (30.0 + i, 0.0, 30.2 + i, 1.0))]])
+            for i in range(8)
+        ),
+    ]
+    (lib / "lef" / f"{SRAM}.lef").write_text(
+        "\n".join([f"MACRO {SRAM}", "  CLASS BLOCK ;", "  SIZE 100 BY 50 ;", *pins, f"END {SRAM}"])
+        + "\n"
+    )
+    (lib / "gds" / f"{SRAM}.gds").write_bytes(_gds(SRAM))
+    (lib / "lib" / f"{SRAM}_typ_1p20V_25C.lib").write_text(f"library ({SRAM}) {{ }}\n")
+    (lib / "cdl" / f"{SRAM}.cdl").write_text(f".SUBCKT {SRAM} VDD! VSS!\n.ENDS\n")
+    return SRAM
+
+
+def _gds(cell: str) -> bytes:
+    import struct
+
+    def rec(rtype: int, dtype: int, body: bytes = b"") -> bytes:
+        return struct.pack(">HBB", 4 + len(body), rtype, dtype) + body
+
+    name = cell.encode() + b"\0" * (len(cell) % 2)
+    units = bytes([0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0])  # 1e-3
+    meters = bytes([0x39, 0x44, 0xB8, 0x2F, 0xA0, 0x9B, 0x5A, 0x54])  # 1e-9
+    return (
+        rec(0x00, 2, struct.pack(">h", 600))
+        + rec(0x01, 2, b"\0" * 24)
+        + rec(0x02, 6, b"lib\0")
+        + rec(0x03, 5, units + meters)
+        + rec(0x05, 2, b"\0" * 24)
+        + rec(0x06, 6, name)
+        + rec(0x07, 0)
+        + rec(0x04, 0)
+    )

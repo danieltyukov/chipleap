@@ -1,24 +1,28 @@
-"""Hardened blocks in a chip: macro/v1 packages, imported as views ChipLeap writes itself.
+"""The macro layer: a hardened block a flow places, as the views the flow reads.
 
-A package comes from someone else (aispice, another flow, a download), so nothing in it
-is trusted. Its files are copied into the build directory through ``Project.read``, so
-none is reached through a symlink out of the project; the copy is checked with
-``chipleap.macro.check_package`` against IHP SG13G2, and errors stop the chip. Then only
-the files the validated manifest names are read, and from them ChipLeap writes the
-views the flow uses:
+A block comes from one of two places, and either way the flow gets a ``MacroView``: its
+outline, its pins with their shapes, and a LEF, GDS, liberty and SPICE view in the build
+directory.
 
-- a LEF of the macro alone, rebuilt from the package's statements ChipLeap understands
-  (outline, pins with their shapes and antenna areas, obstructions), with its origin
-  moved to 0, 0;
-- the GDS with the macro's cell moved by the same offset, since KLayout's stream-out
-  places a cell by its own origin (with the LEF's ``ORIGIN 8.55 0.6`` the comparator's
-  pins and layout disagreed by that much);
-- a liberty of the pins the manifest lists, without timing arcs;
-- the SPICE subcircuits, device lines only, for LVS.
+- **A macro/v1 package** (``import_packages``): someone else's work (aispice, another
+  flow, a download), so nothing in it is trusted. Its files are copied into the build
+  directory through ``Project.read``, so none is reached through a symlink out of the
+  project; the copy is checked with ``chipleap.macro.check_package``, and errors stop
+  the flow. Then only the files the validated manifest names are read, and from them
+  ChipLeap writes the views itself: a LEF rebuilt from the statements it understands
+  with the origin at 0, 0 (KLayout's stream-out places a cell by its own origin, so a
+  LEF ``ORIGIN 8.55 0.6`` left pins and layout that far apart), the GDS with its top cell
+  moved by the same offset, a liberty of the manifest's pins without timing arcs, and
+  the SPICE subcircuits with device lines only, for LVS.
+- **A macro of the PDK** (``pdk_macro``): an SRAM of ``sg13g2_sram``, say. Its views are
+  the PDK's own, copied as they are.
 
-Every cell in the GDS and every subcircuit must carry the macro's name (``<name>`` or
-``<name>_...``): one called ``sg13g2_inv_1`` would replace the standard cell of that
-name in the chip's layout or in its LVS netlist.
+Names are where a package could do harm: the flow merges every layout and every netlist
+by cell name, so a package cell called ``sg13g2_inv_1`` would replace the standard cell.
+A package's name is lowercase, outside every name the PDK and the flow use
+(``reserved_names``) and outside every other package's namespace; each of its GDS cells
+and subcircuits is its name or its name and ``_`` and a suffix, defined once, in plain
+characters; and no cell appears in two packages.
 """
 
 from __future__ import annotations
@@ -27,11 +31,11 @@ import re
 import struct
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-from chipleap.chip.config import ChipMacro
-from chipleap.macro import check_package
-from chipleap.macro.check import Report
+from chipleap.macro.check import Report, check_package
 from chipleap.macro.limits import LIMITS
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, load_manifest
 from chipleap.rtl import builddir
@@ -88,8 +92,8 @@ class MacroImportError(ValueError):
 @dataclass(frozen=True)
 class MacroPin:
     name: str  # a bit: ``q[3]`` or ``clk``
-    direction: str  # input, output, inout (from the manifest)
-    kind: str  # signal, analog, clock, power, ground (from the manifest)
+    direction: str  # input, output, inout
+    kind: str  # signal, analog, clock, power, ground
     shapes: tuple[tuple[str, Rect], ...]  # (layer, rect) in the macro's coordinates
 
     @property
@@ -99,6 +103,11 @@ class MacroPin:
 
 @dataclass(frozen=True)
 class MacroView:
+    """A hardened block as a flow reads it. ``source`` is ``package`` or ``pdk``;
+    ``supply_hookup`` says whether its supply pins are columns reaching an edge, which a
+    PDN script can strap to the standard-cell rails (``chipleap.chip.pdn``); an SRAM's
+    supply stripes across the whole block need pdngen's macro grid instead."""
+
     cell: str
     kind: str
     width: float
@@ -110,23 +119,116 @@ class MacroView:
     spice: Path
     subckts: tuple[str, ...]  # the subcircuits of the SPICE view
     gds_cells: tuple[str, ...]
-    report: Report
+    report: Report | None = None  # macro/v1's check of a package
+    source: str = "package"
+    supply_hookup: bool = True
 
     def pin(self, name: str) -> MacroPin | None:
         return next((p for p in self.pins if p.name == name), None)
 
+    def bus(self, name: str) -> list[MacroPin]:
+        """The bits of bus ``name``, from bit 0 up; [] when it is no bus."""
+        bits = {}
+        for p in self.pins:
+            base, _, rest = p.name.partition("[")
+            if base == name and rest.endswith("]") and rest[:-1].isdigit():
+                bits[int(rest[:-1])] = p
+        return [bits[i] for i in sorted(bits)]
+
     @property
     def warnings(self) -> list[str]:
+        if self.report is None:
+            return []
         return [f.to_text() for f in self.report.findings if f.severity == "warning"]
+
+
+@dataclass(frozen=True)
+class Imported:
+    views: dict[str, MacroView]  # cell -> views
+    cells: dict[str, str]  # instance -> cell
+
+
+# Names
+
+PACKAGE_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+GDS_NAME = re.compile(rb"[A-Za-z0-9_$]{1,128}")
+# Name spaces the PDK's libraries and the flow itself use: IHP's cells (sg13g2_*, the
+# SRAMs' RM_IHPSG13_*), LibreLane's via cells (VIA_*), IHP's pcells the finishing adds,
+# and IHP's fill cells.
+RESERVED_PREFIXES = ("sg13g2", "rm_ihpsg13", "via_", "bondpad", "sealring")
+GENERATED = (
+    "bondpad",
+    "sealring",
+    "Act_FILL_CELL",
+    "GatP_FILL_CELL",
+    *(f"Met{k}_{s}_FILL_CELL" for k in range(1, 6) for s in "SM"),
+    "TM1_FILL_CELL",
+    "TM2_FILL_CELL",
+)
+NAMES_FILE_MAX = 512 << 20
+
+
+@dataclass(frozen=True)
+class Reserved:
+    """Names a package may not use, case-folded, since SPICE folds case."""
+
+    names: frozenset[str]
+    prefixes: tuple[str, ...] = RESERVED_PREFIXES
+
+    def __contains__(self, name: object) -> bool:
+        return isinstance(name, str) and name.casefold() in self.names
+
+    def check_package(self, name: str) -> None:
+        """Refuse a package name that is not plain lowercase, that is a reserved name or
+        begins one's name space, or that lies inside a reserved name space."""
+        if not PACKAGE_NAME.fullmatch(name):
+            raise MacroImportError(
+                f"package name {name[:64]!r} must be lowercase letters, digits and _, "
+                "starting with a letter"
+            )
+        if name in self or any(name.startswith(p) for p in self.prefixes):
+            raise MacroImportError(f"package name {name} is a name the PDK or ChipLeap uses")
+        inside = next((r for r in sorted(self.names) if r.startswith(name + "_")), None)
+        if inside is not None:
+            raise MacroImportError(
+                f"package name {name} would hold {inside}, a name the PDK or ChipLeap uses"
+            )
+
+    def with_names(self, more: Iterable[str]) -> Reserved:
+        return Reserved(self.names | {n.casefold() for n in more}, self.prefixes)
+
+
+def reserved_names(pdk: Path | None, extra: Iterable[str] = ()) -> Reserved:
+    """Every cell name of the PDK's libraries (each ``libs.ref/*`` library's LEF macros,
+    CDL subcircuits and GDS cells), the cells the flow generates, and ``extra`` (the
+    chip top, the core's top)."""
+    names = set(_pdk_names(str(pdk))) if pdk is not None else set()
+    names.update(n.casefold() for n in (*GENERATED, *extra))
+    return Reserved(frozenset(names))
+
+
+@lru_cache(maxsize=4)
+def _pdk_names(pdk: str) -> frozenset[str]:
+    root = Path(pdk) / "libs.ref"
+    names: set[str] = set()
+    for f in sorted(root.glob("*/lef/*.lef")) + sorted(root.glob("*/cdl/*.cdl")):
+        if f.stat().st_size > NAMES_FILE_MAX:
+            continue
+        text = f.read_text(errors="replace")
+        pattern = r"^\s*MACRO\s+(\S+)" if f.suffix == ".lef" else r"^\s*\.SUBCKT\s+(\S+)"
+        names.update(m.casefold() for m in re.findall(pattern, text, re.M | re.I))
+    for f in sorted(root.glob("*/gds/*.gds")):
+        if f.stat().st_size <= NAMES_FILE_MAX:
+            names.update(n.casefold() for n in _structure_names(f.read_bytes()))
+    return frozenset(names)
 
 
 # Copying and checking
 
-Reader = Callable[[Path], bytes]  # Project.read
-Lister = Callable[[Path], list[Path]]  # Project.files_in
 
-
-def _copy_package(read: Reader, package: Path, files: Iterable[Path], dest: Path) -> None:
+def _copy_package(
+    read: Callable[[Path], bytes], package: Path, files: Iterable[Path], dest: Path
+) -> None:
     """Copy the package's files, each read through ``read`` (``Project.read``, which
     opens a file only inside the project), into ``dest``."""
     root = package.resolve()
@@ -389,62 +491,93 @@ def rewrite_lef(
 # GDS
 
 
-def gds_cells(data: bytes) -> list[str]:
-    """The names of the structures in a GDS stream."""
-    names = []
-    for rtype, body in _records(data):
-        if rtype == 0x06:  # STRNAME
-            names.append(body.rstrip(b"\0").decode("ascii", "replace"))
-    return names
-
-
-def _records(data: bytes) -> Iterable[tuple[int, bytes]]:
+def _records(data: bytes) -> Iterable[tuple[int, int, int]]:
+    """Each record's type, and where its body starts and ends."""
     i, n = 0, len(data)
     while i + 4 <= n:
-        length, rtype = struct.unpack(">HB", data[i : i + 3])
+        length = (data[i] << 8) | data[i + 1]
+        rtype = data[i + 2]
         if length < 4 or i + length > n:
             raise MacroImportError("GDS: a record runs past the end of the file")
-        yield rtype, data[i + 4 : i + length]
+        yield rtype, i + 4, i + length
         i += length
         if rtype == 0x04:  # ENDLIB
             return
+
+
+def _name(raw: bytes) -> bytes:
+    """A STRNAME or SNAME as written: one NUL pads an odd length, nothing else."""
+    return raw[:-1] if raw.endswith(b"\0") else raw
+
+
+def _structure_names(data: bytes) -> list[str]:
+    """The structure names of a trusted GDS (the PDK's), as text."""
+    return [
+        _name(data[a:b]).decode("ascii", "replace")
+        for rtype, a, b in _records(data)
+        if rtype == 0x06
+    ]
+
+
+def gds_cells(data: bytes) -> list[str]:
+    """The structures of a package's GDS. Every name, defined or referenced, must be plain
+    (``[A-Za-z0-9_$]``), as the raw bytes say: two names that differ in bytes may not
+    print the same. A structure may be defined only once, and every reference must be to
+    a structure of the file."""
+    defined: list[bytes] = []
+    referenced: set[bytes] = set()
+    for rtype, a, b in _records(data):
+        if rtype not in (0x06, 0x12):  # STRNAME, SNAME
+            continue
+        raw = _name(data[a:b])
+        if not GDS_NAME.fullmatch(raw):
+            raise MacroImportError(
+                f"GDS: cell name {raw[:40]!r} is not letters, digits, _ and $ only"
+            )
+        if rtype == 0x06:
+            if raw in defined:
+                raise MacroImportError(f"GDS: cell {raw.decode()} is defined twice")
+            defined.append(raw)
+        else:
+            referenced.add(raw)
+    missing = sorted(referenced - set(defined))
+    if missing:
+        raise MacroImportError(
+            f"GDS: cell {missing[0].decode()} is referenced but not in the file; a package's "
+            "GDS must hold every cell it uses"
+        )
+    return [n.decode() for n in defined]
 
 
 def shift_gds(data: bytes, cell: str, dx_um: float, dy_um: float) -> bytes:
     """``data`` with every element of structure ``cell`` moved by (dx, dy) um: the
     coordinates of its boundaries, paths, texts, boxes, nodes and references."""
     out = bytearray()
-    i, n = 0, len(data)
+    target = cell.encode()
     meters_per_dbu = 0.0
     inside = False
     dx = dy = 0
-    while i + 4 <= n:
-        length, rtype = struct.unpack(">HB", data[i : i + 3])
-        if length < 4 or i + length > n:
-            raise MacroImportError("GDS: a record runs past the end of the file")
-        rec = data[i : i + length]
-        i += length
-        if rtype == 0x03 and length == 20:  # UNITS: user units, metres per database unit
-            meters_per_dbu = _real8(rec[12:20])
+    for rtype, a, b in _records(data):
+        rec = data[a - 4 : b]
+        if rtype == 0x03 and b - a == 16:  # UNITS: user units, metres per database unit
+            meters_per_dbu = _real8(data[a + 8 : b])
             if not 0 < meters_per_dbu < 1:
                 raise MacroImportError("GDS: the database unit is not a length")
             dx, dy = (round(v * 1e-6 / meters_per_dbu) for v in (dx_um, dy_um))
-        elif rtype == 0x06:  # STRNAME
-            inside = rec[4:].rstrip(b"\0").decode("ascii", "replace") == cell
+        elif rtype == 0x06:  # STRNAME, compared as raw bytes
+            inside = _name(data[a:b]) == target
         elif rtype == 0x07:  # ENDSTR
             inside = False
         elif rtype == 0x10 and inside and (dx or dy):  # XY
-            count = (length - 4) // 8
-            coords = list(struct.unpack(f">{2 * count}i", rec[4 : 4 + 8 * count]))
+            count = (b - a) // 8
+            coords = list(struct.unpack(f">{2 * count}i", data[a : a + 8 * count]))
             for k in range(0, 2 * count, 2):
                 coords[k] += dx
                 coords[k + 1] += dy
             if any(not -(2**31) <= v < 2**31 for v in coords):
                 raise MacroImportError("GDS: the shift takes a coordinate out of range")
-            rec = rec[:4] + struct.pack(f">{2 * count}i", *coords)
+            rec = rec[:4] + struct.pack(f">{2 * count}i", *coords) + rec[4 + 8 * count :]
         out += rec
-        if rtype == 0x04:  # ENDLIB
-            break
     if meters_per_dbu == 0.0:
         raise MacroImportError("GDS: no UNITS record")
     return bytes(out)
@@ -566,12 +699,16 @@ def reduce_spice(text: str, cell: str) -> tuple[str, list[str]]:
         head = words[0].lower()
         if not current:
             if head == ".subckt":
-                if len(words) < 2 or not (words[1] == cell or words[1].startswith(cell + "_")):
+                name = words[1] if len(words) > 1 else ""
+                if not re.fullmatch(re.escape(cell) + r"(_[A-Za-z0-9_]{1,64})?", name):
                     raise MacroImportError(
-                        f"SPICE line {k}: subcircuit {words[1][:40] if len(words) > 1 else ''!r} "
-                        f"must be {cell} or start with {cell}_"
+                        f"SPICE line {k}: subcircuit {name[:40]!r} must be {cell} or start "
+                        f"with {cell}_, as written"
                     )
-                current = words[1]
+                # SPICE folds case: two names that differ in case are one subcircuit.
+                if name.casefold() in {n.casefold() for n in names}:
+                    raise MacroImportError(f"SPICE line {k}: .subckt {name} is defined twice")
+                current = name
                 names.append(current)
                 out.append(_spice_line(words, k))
             # Lines outside a subcircuit (.end, .include, .param, options) stay out.
@@ -606,52 +743,74 @@ def _spice_line(words: list[str], k: int) -> str:
 
 # Import
 
-
-@dataclass(frozen=True)
-class Imported:
-    views: dict[str, MacroView]  # cell -> views
-    cells: dict[str, str]  # instance -> cell
+Reader = Callable[[Path], bytes]  # Project.read
+Lister = Callable[[Path], list[Path]]  # Project.files_in
 
 
-def import_macros(
-    macros: Iterable[ChipMacro],
+def import_packages(
+    macros: Iterable[tuple[str, Path]],
     files_in: Lister,
     read: Reader,
     work: Path,
     pdk: str,
+    reserved: Reserved,
 ) -> Imported:
-    """Copy, check and convert every package the chip's macros name. ``files_in`` and
-    ``read`` are the project's (``Project.files_in``, ``Project.read``), ``work`` the
-    chip's build directory, ``pdk`` what the packages are checked against."""
+    """Copy, check and convert every package ``macros`` names (instance, package
+    directory). ``files_in`` and ``read`` are the project's (``Project.files_in``,
+    ``Project.read``), ``work`` the build directory the views go to (under
+    ``macros/<instance>/``), ``pdk`` what the packages are checked against
+    (``ihp-sg13g2@COMMIT``), ``reserved`` the names no package may use."""
     views: dict[str, MacroView] = {}
     by_package: dict[Path, str] = {}
     cells: dict[str, str] = {}
-    for m in macros:
-        key = m.package.resolve()
+    gds_seen: dict[str, str] = {}  # GDS cell -> package
+    spice_seen: dict[str, str] = {}  # case-folded subcircuit -> package
+    for instance, package in macros:
+        key = package.resolve()
         if key in by_package:
-            cells[m.instance] = by_package[key]
+            cells[instance] = by_package[key]
             continue
         try:
-            view = _import(m, files_in, read, work, pdk)
+            view = _import(instance, package, files_in, read, work, pdk, reserved)
         except MacroImportError as exc:
-            raise MacroImportError(f"macro {m.instance} ({m.package.name}): {exc}") from None
-        if view.cell in views:
-            raise MacroImportError(
-                f"macro {m.instance}: two packages hold a cell named {view.cell}"
-            )
+            raise MacroImportError(f"macro {instance} ({package.name}): {exc}") from None
+        for other in views:
+            a, b = sorted((view.cell, other), key=len)
+            if a == b or b.startswith(a + "_"):
+                raise MacroImportError(
+                    f"macro {instance}: packages {other} and {view.cell} share a name space; "
+                    "one's cells could replace the other's"
+                )
+        for c in view.gds_cells:
+            if c in gds_seen or c in reserved:
+                raise MacroImportError(f"macro {instance}: GDS cell {c} is used elsewhere")
+            gds_seen[c] = view.cell
+        for c in view.subckts:
+            if c.casefold() in spice_seen or c in reserved:
+                raise MacroImportError(f"macro {instance}: subcircuit {c} is used elsewhere")
+            spice_seen[c.casefold()] = view.cell
         views[view.cell] = view
         by_package[key] = view.cell
-        cells[m.instance] = view.cell
+        cells[instance] = view.cell
     return Imported(views, cells)
 
 
-def _import(m: ChipMacro, files_in: Lister, read: Reader, work: Path, pdk: str) -> MacroView:
-    base = builddir.work_dir(work, "macros", m.instance, empty=True)
+def _import(
+    instance: str,
+    package: Path,
+    files_in: Lister,
+    read: Reader,
+    work: Path,
+    pdk: str,
+    reserved: Reserved,
+) -> MacroView:
+    base = builddir.work_dir(work, "macros", instance, empty=True)
     # The copy keeps the package's directory name, which macro/v1 checks.
-    copy = builddir.work_dir(base, m.package.name)
-    _copy_package(read, m.package, files_in(m.package), copy)
+    copy = builddir.work_dir(base, package.name)
+    _copy_package(read, package, files_in(package), copy)
     manifest, report = check_copy(copy, pdk)
     cell = manifest.name
+    reserved.check_package(cell)
     for d in manifest.domains:
         if abs(d.voltage - CORE_VOLTAGE) > 1e-6:
             raise MacroImportError(
@@ -695,3 +854,101 @@ def _import(m: ChipMacro, files_in: Lister, read: Reader, work: Path, pdk: str) 
         gds_cells=tuple(names),
         report=report,
     )
+
+
+# Macros of the PDK
+
+PDK_MACRO_LIBRARIES = ("sg13g2_sram",)
+_KINDS = {"POWER": "power", "GROUND": "ground", "CLOCK": "clock", "ANALOG": "analog"}
+
+
+def pdk_macro(pdk: Path, cell: str, work: Path, library: str = "sg13g2_sram") -> MacroView:
+    """A macro of the PDK (an SRAM of ``sg13g2_sram``): its LEF, GDS, typical-corner
+    liberty and CDL copied into ``work/macros/<cell>/``, its pins and outline from its
+    LEF. The PDK is trusted, so its views are used as they are."""
+    from chipleap.chip.io import read_lef  # the IO library's reader reads any LEF
+
+    if library not in PDK_MACRO_LIBRARIES:
+        raise MacroImportError(f"{library} is not a macro library ChipLeap places")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", cell):
+        raise MacroImportError(f"{cell[:64]!r} is not a cell name")
+    ref = pdk / "libs.ref" / library
+    lefs = {
+        "lef": ref / "lef" / f"{cell}.lef",
+        "gds": ref / "gds" / f"{cell}.gds",
+        "lib": ref / "lib" / f"{cell}_typ_1p20V_25C.lib",
+        "spice": ref / "cdl" / f"{cell}.cdl",
+    }
+    missing = [k for k, f in lefs.items() if not f.is_file()]
+    if missing:
+        raise MacroImportError(f"{library} has no {', '.join(missing)} view of {cell}")
+    lef_text = lefs["lef"].read_text(errors="replace")
+    found = read_lef(lef_text).get(cell)
+    if found is None:
+        raise MacroImportError(f"{lefs['lef'].name} has no MACRO {cell}")
+    dest = builddir.work_dir(work, "macros", cell, empty=True)
+    copied = {k: builddir.write_bytes(dest, f.name, f.read_bytes()) for k, f in lefs.items()}
+    pins = tuple(
+        MacroPin(
+            name,
+            {"INPUT": "input", "OUTPUT": "output"}.get(found.directions.get(name, ""), "inout"),
+            _KINDS.get(found.uses.get(name, ""), "signal"),
+            tuple(shape for port in ports for shape in port),
+        )
+        for name, ports in found.pins.items()
+    )
+    gds_names = _structure_names(lefs["gds"].read_bytes())
+    subckts = re.findall(r"^\s*\.SUBCKT\s+(\S+)", copied["spice"].read_text(), re.M | re.I)
+    return MacroView(
+        cell=cell,
+        kind="memory" if library == "sg13g2_sram" else "pdk",
+        width=found.width,
+        height=found.height,
+        pins=pins,
+        lef=copied["lef"],
+        gds=copied["gds"],
+        lib=copied["lib"],
+        spice=copied["spice"],
+        subckts=tuple(subckts),
+        gds_cells=tuple(gds_names),
+        source="pdk",
+        # Supply stripes across the whole block: pdngen's macro grid, not a strap.
+        supply_hookup=False,
+    )
+
+
+# LibreLane
+
+
+def librelane_config(
+    views: dict[str, MacroView],
+    placements: Iterable[tuple[str, str, float, float, str]],
+    flow_dir: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    """LibreLane's ``MACROS`` (each cell's views and its placed instances: instance,
+    cell, x, y, orientation in um) and the macros' entries of ``EXTRA_CDLS`` (OpenROAD's
+    CDL writer needs a subcircuit for every master). Paths are relative to the flow's
+    directory, where LibreLane's container sees them."""
+    macros: dict[str, Any] = {}
+    for inst, cell, x, y, orient in placements:
+        view = views[cell]
+        entry = macros.setdefault(
+            cell,
+            {
+                "gds": [_dir(view.gds, flow_dir)],
+                "lef": [_dir(view.lef, flow_dir)],
+                "lib": {"*": [_dir(view.lib, flow_dir)]},
+                "spice": [_dir(view.spice, flow_dir)],
+                "instances": {},
+            },
+        )
+        entry["instances"][inst] = {"location": [x, y], "orientation": orient}
+    return macros, [_dir(views[c].spice, flow_dir) for c in sorted(macros)]
+
+
+def _dir(path: Path, flow_dir: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(flow_dir.resolve())
+    except ValueError:
+        raise MacroImportError(f"{path.name} is not in the flow's directory") from None
+    return f"dir::{rel.as_posix()}"

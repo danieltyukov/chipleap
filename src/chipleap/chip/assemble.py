@@ -18,15 +18,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.chip import checks, floorplan, flow, io, macros, netlist, pdn
+from chipleap.chip import checks, floorplan, flow, io, netlist, pdn
 from chipleap.chip.checks import CheckError
 from chipleap.chip.config import ChipConfig
 from chipleap.chip.floorplan import Floorplan, FloorplanError
 from chipleap.chip.io import IoError
-from chipleap.chip.macros import MacroImportError
 from chipleap.chip.netlist import NetlistError
 from chipleap.chip.pdn import PdnError
 from chipleap.chip.run import ToolError, klayout, plain, private_dir, python_with_klayout, run
+from chipleap.macro import layer
+from chipleap.macro.layer import MacroImportError
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, parse_toml
 from chipleap.rtl import builddir
 from chipleap.rtl.pnr import verilog_config
@@ -52,8 +53,28 @@ ERRORS = (
 )
 
 
+REQUIRED_METRICS = (
+    "route__drc_errors",
+    "timing__setup__ws",
+    "timing__hold__ws",
+    "antenna__violating__nets",
+)
+
+
 class ChipError(RuntimeError):
     pass
+
+
+def check_metrics(metrics: dict[str, Any]) -> None:
+    """Refuse LibreLane metrics without the numbers the verdict reads: one missing would
+    read as zero, which is a pass."""
+    missing = [
+        k
+        for k in REQUIRED_METRICS
+        if isinstance(metrics.get(k), bool) or not isinstance(metrics.get(k), (int, float))
+    ]
+    if missing:
+        raise PnrError(f"LibreLane's metrics have no {', '.join(missing)}")
 
 
 def timeout() -> float:
@@ -112,7 +133,7 @@ class Prepared:
     flow_dir: Path
     pdk: Path
     cells: dict[str, io.IoCell]
-    imported: macros.Imported
+    imported: layer.Imported
     binding: netlist.Binding
     plan: Floorplan
     cfg: dict[str, Any]
@@ -130,9 +151,17 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     ports = netlist.core_ports(project, builddir.work_dir(work, "ports"))
     flow_dir = builddir.work_dir(work, "flow")
     verilog = verilog_config(project, flow_dir)
-    imported = macros.import_macros(chip.macros, project.files_in, project.read, flow_dir, spec)
+    reserved = layer.reserved_names(pdk, (chip.name, project.top))
+    imported = layer.import_packages(
+        [(m.instance, m.package) for m in chip.macros],
+        project.files_in,
+        project.read,
+        flow_dir,
+        spec,
+        reserved,
+    )
     clocks = {c.port: c.period_ns for c in project.clocks}
-    binding = netlist.bind(chip, ports, imported.views, imported.cells, clocks)
+    binding = netlist.bind(chip, ports, imported.views, imported.cells, clocks, project.top)
     sizes = {
         inst: (cell, imported.views[cell].width, imported.views[cell].height)
         for inst, cell in imported.cells.items()
@@ -158,7 +187,13 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     builddir.write_text(flow_dir, "pdn.tcl", pdn.script(placed))
     clk = project.fastest_clock
     cfg = flow.config(
-        chip, plan, binding, imported, verilog, clk.period_ns if clk else DEFAULT_PERIOD_NS
+        chip,
+        plan,
+        binding,
+        imported,
+        verilog,
+        clk.period_ns if clk else DEFAULT_PERIOD_NS,
+        flow_dir,
     )
     return Prepared(work, flow_dir, pdk, cells, imported, binding, plan, cfg, spec)
 
@@ -252,8 +287,9 @@ def _rel(p: Prepared, path: Path) -> str:
 
 def run_lvs(pdk: Path, out_dir: Path, view: Path, netlist_file: Path, name: str) -> str:
     """IHP's run_lvs.py on ``view`` against ``netlist_file``; its log, which says whether
-    the netlists match (``checks.lvs_outcome``)."""
-    log = _ihp_runner(
+    the netlists match (``checks.lvs_outcome``). A run that compared nothing, or whose
+    exit code disagrees with a match, is an error, never a result."""
+    code, log = _ihp_runner(
         pdk,
         "lvs",
         out_dir,
@@ -267,8 +303,9 @@ def run_lvs(pdk: Path, out_dir: Path, view: Path, netlist_file: Path, name: str)
         ],
         ("layout.lvsdb", "layout_extracted.cir", "layout.log"),
     )
-    if checks.lvs_outcome(log) == "unknown":
-        raise ToolError(f"IHP's LVS did not compare the netlists: {_last(log)}")
+    outcome = checks.lvs_outcome(log)
+    if outcome == "unknown" or (outcome == "pass" and code != 0):
+        raise ToolError(f"IHP's LVS did not compare the netlists (exit {code}): {_last(log)}")
     return log
 
 
@@ -279,10 +316,11 @@ def _ihp_runner(
     inputs: dict[str, Path],
     args: Any,
     keep: tuple[str, ...],
-) -> str:
+) -> tuple[int, str]:
     """Run IHP's run_drc.py or run_lvs.py in a private directory on copies of
-    ``inputs``; copy back the files named in ``keep`` (and every .lyrdb) and the log.
-    Returns the deck's log."""
+    ``inputs``; copy back the files named in ``keep``, every report (.lyrdb) and every
+    log. Returns the exit code and the runner's output with the logs named in ``keep``.
+    A report too large to read is an error: it would be the one with the most in it."""
     found = python_with_klayout()
     if found is None:
         raise ToolError(
@@ -314,14 +352,21 @@ def _ihp_runner(
         if run_dir.is_dir():
             for f in sorted(run_dir.iterdir()):
                 wanted = f.name in keep or f.suffix in (".lyrdb", ".log")
-                if not f.is_file() or not wanted or f.stat().st_size > checks.DB_MAX:
+                if not f.is_file() or not wanted:
                     continue
+                if f.stat().st_size > checks.DB_MAX:
+                    raise ToolError(
+                        f"IHP's {which.upper()} wrote {f.name}, larger than ChipLeap reads"
+                    )
                 builddir.write_bytes(out_dir, f.name, f.read_bytes())
                 if f.name in keep and f.suffix == ".log":
                     log += "\n" + f.read_text(errors="replace")
-        if which == "drc" and code != 0 and not list(out_dir.glob("*.lyrdb")):
-            raise ToolError(f"IHP's DRC did not run (exit {code}): {_last(tail)}")
-    return log
+    return code, log
+
+
+# The DRC tables a run must have reported: the main deck's tables, merged into one
+# database, and the decks run beside them unless switched off.
+DRC_LOGS = ("density", "sg13g2_maximal")
 
 
 def drc(p: Prepared, final: Path, name: str) -> checks.DrcResult:
@@ -330,7 +375,7 @@ def drc(p: Prepared, final: Path, name: str) -> checks.DrcResult:
     Pad.d1R and Pad.fR_* by design, as on IHP's own reference chips)."""
     drc_dir = builddir.work_dir(p.work, "drc", empty=True)
     workers = max(1, min(4, (os.cpu_count() or 2) // 4))
-    _ihp_runner(
+    code, log = _ihp_runner(
         p.pdk,
         "drc",
         drc_dir,
@@ -345,11 +390,25 @@ def drc(p: Prepared, final: Path, name: str) -> checks.DrcResult:
         ],
         (),
     )
+    return drc_result(drc_dir, name, code, log)
+
+
+def drc_result(drc_dir: Path, name: str, code: int, log: str) -> checks.DrcResult:
+    """The violations of a DRC run, after checking it ran: run_drc.py exits 0 when clean
+    and 1 with violations, and merges the tables into one report; every expected table's
+    log must be there and the code must agree with the report."""
+    report = drc_dir / f"chip_{name}_full.lyrdb"
+    missing = [t for t in DRC_LOGS if not (drc_dir / f"chip_{name}_{t}.log").is_file()]
+    if code not in (0, 1) or not report.is_file() or missing:
+        what = f"no {', '.join(missing)} table" if missing else f"exit {code}"
+        raise ToolError(f"IHP's DRC did not finish ({what}): {_last(log)}")
     result = checks.DrcResult()
-    for db in sorted(drc_dir.glob("*.lyrdb")):
-        checks.read_lyrdb(db, result)
-    if result.reports == 0:
-        raise ToolError("IHP's DRC wrote no report")
+    checks.read_lyrdb(report, result)
+    if (code == 1) != (result.total > 0):
+        raise ToolError(
+            f"IHP's DRC exited {code} with {result.total} violations in its report; one of "
+            "them is wrong"
+        )
     return result
 
 
@@ -374,6 +433,7 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
     metrics, run_dir = flow.run(p.flow_dir, p.cfg)
     outs = flow.outputs(run_dir, name)
     clk = project.fastest_clock
+    check_metrics(metrics)
     r = parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, outs["gds"])
     nofill, final = finish(p, outs["gds"], name)
     lvs_data = lvs(p, nofill, outs, name)
@@ -427,6 +487,8 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
     problems = []
     if data["route_drc_errors"]:
         problems.append(f"{data['route_drc_errors']} routing DRC errors")
+    if data["antenna_nets"]:
+        problems.append(f"{data['antenna_nets']} nets with antenna violations")
     if data["lvs"]["result"] != "pass":
         problems.append(f"LVS {data['lvs']['result']}")
     if data["drc"]["violations"]:

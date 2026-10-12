@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from chipleap.chip.floorplan import Placed
-from chipleap.chip.macros import HOOKUP_LAYERS, MacroView
+from chipleap.macro.layer import HOOKUP_LAYERS, MacroView
 from chipleap.rtl import quote as q
 from chipleap.rtl.project import IDENT_RE
 
@@ -36,6 +36,11 @@ def hookups(placed: Placed, view: MacroView) -> list[tuple[str, str, float, floa
     """Where each supply pin of a placed macro is joined to the rails: (net, layer, x, y,
     direction), x and y in um on the die at the middle of the pin's shape and the edge it
     reaches, direction ``down`` or ``up``."""
+    if not view.supply_hookup:
+        raise PdnError(
+            f"{view.cell}: its supply pins run across the block, which needs pdngen's macro "
+            "grid; ChipLeap straps only supply pins that reach an edge"
+        )
     out = []
     flipped = placed.orient in ("S", "FS")  # the macro's bottom edge is on top
     for pin in view.pins:
