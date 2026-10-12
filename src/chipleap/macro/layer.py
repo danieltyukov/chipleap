@@ -153,9 +153,9 @@ class Imported:
 PACKAGE_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 GDS_NAME = re.compile(rb"[A-Za-z0-9_$]{1,128}")
 # Name spaces the PDK's libraries and the flow itself use: IHP's cells (sg13g2_*, the
-# SRAMs' RM_IHPSG13_*), LibreLane's via cells (VIA_*), IHP's pcells the finishing adds,
-# and IHP's fill cells.
-RESERVED_PREFIXES = ("sg13g2", "rm_ihpsg13", "via_", "bondpad", "sealring")
+# SRAMs' RM_IHPSG13_*), OpenROAD's and KLayout's via cells (via1_2_..., VIA_Via1_YX),
+# IHP's pcells the finishing adds, and IHP's fill cells.
+RESERVED_PREFIXES = ("sg13g2", "rm_ihpsg13", "via", "bondpad", "sealring")
 GENERATED = (
     "bondpad",
     "sealring",
@@ -170,10 +170,13 @@ NAMES_FILE_MAX = 512 << 20
 
 @dataclass(frozen=True)
 class Reserved:
-    """Names a package may not use, case-folded, since SPICE folds case."""
+    """Names a package may not use, case-folded, since SPICE folds case. ``spaces`` are
+    names whose name spaces (the name, and the name with ``_`` and a suffix) are closed
+    to packages too: the chip's and its core's."""
 
     names: frozenset[str]
     prefixes: tuple[str, ...] = RESERVED_PREFIXES
+    spaces: tuple[str, ...] = ()
 
     def __contains__(self, name: object) -> bool:
         return isinstance(name, str) and name.casefold() in self.names
@@ -188,38 +191,45 @@ class Reserved:
             )
         if name in self or any(name.startswith(p) for p in self.prefixes):
             raise MacroImportError(f"package name {name} is a name the PDK or ChipLeap uses")
+        for space in self.spaces:
+            if name == space or name.startswith(space + "_"):
+                raise MacroImportError(
+                    f"package name {name} is in the name space of {space}, the chip's or its core's"
+                )
         inside = next((r for r in sorted(self.names) if r.startswith(name + "_")), None)
         if inside is not None:
             raise MacroImportError(
                 f"package name {name} would hold {inside}, a name the PDK or ChipLeap uses"
             )
 
-    def with_names(self, more: Iterable[str]) -> Reserved:
-        return Reserved(self.names | {n.casefold() for n in more}, self.prefixes)
 
-
-def reserved_names(pdk: Path | None, extra: Iterable[str] = ()) -> Reserved:
+def reserved_names(pdk: Path, extra: Iterable[str] = ()) -> Reserved:
     """Every cell name of the PDK's libraries (each ``libs.ref/*`` library's LEF macros,
     CDL subcircuits and GDS cells), the cells the flow generates, and ``extra`` (the
-    chip top, the core's top)."""
-    names = set(_pdk_names(str(pdk))) if pdk is not None else set()
+    chip top and the core's top), whose name spaces are closed to packages as well. A
+    library file too large to read is an error: its names would go unreserved."""
+    extra = tuple(extra)
+    names = set(_pdk_names(str(pdk)))
     names.update(n.casefold() for n in (*GENERATED, *extra))
-    return Reserved(frozenset(names))
+    return Reserved(frozenset(names), spaces=tuple(n.casefold() for n in extra))
 
 
 @lru_cache(maxsize=4)
 def _pdk_names(pdk: str) -> frozenset[str]:
     root = Path(pdk) / "libs.ref"
     names: set[str] = set()
+    if not root.is_dir():
+        raise MacroImportError(f"{pdk} has no libs.ref directory")
     for f in sorted(root.glob("*/lef/*.lef")) + sorted(root.glob("*/cdl/*.cdl")):
         if f.stat().st_size > NAMES_FILE_MAX:
-            continue
+            raise MacroImportError(f"{f.name} of the PDK is larger than ChipLeap reads")
         text = f.read_text(errors="replace")
         pattern = r"^\s*MACRO\s+(\S+)" if f.suffix == ".lef" else r"^\s*\.SUBCKT\s+(\S+)"
         names.update(m.casefold() for m in re.findall(pattern, text, re.M | re.I))
     for f in sorted(root.glob("*/gds/*.gds")):
-        if f.stat().st_size <= NAMES_FILE_MAX:
-            names.update(n.casefold() for n in _structure_names(f.read_bytes()))
+        if f.stat().st_size > NAMES_FILE_MAX:
+            raise MacroImportError(f"{f.name} of the PDK is larger than ChipLeap reads")
+        names.update(n.casefold() for n in _structure_names(f.read_bytes()))
     return frozenset(names)
 
 
@@ -491,7 +501,7 @@ def rewrite_lef(
 # GDS
 
 
-def _records(data: bytes) -> Iterable[tuple[int, int, int]]:
+def gds_records(data: bytes) -> Iterable[tuple[int, int, int]]:
     """Each record's type, and where its body starts and ends."""
     i, n = 0, len(data)
     while i + 4 <= n:
@@ -505,7 +515,7 @@ def _records(data: bytes) -> Iterable[tuple[int, int, int]]:
             return
 
 
-def _name(raw: bytes) -> bytes:
+def gds_raw_name(raw: bytes) -> bytes:
     """A STRNAME or SNAME as written: one NUL pads an odd length, nothing else."""
     return raw[:-1] if raw.endswith(b"\0") else raw
 
@@ -513,8 +523,8 @@ def _name(raw: bytes) -> bytes:
 def _structure_names(data: bytes) -> list[str]:
     """The structure names of a trusted GDS (the PDK's), as text."""
     return [
-        _name(data[a:b]).decode("ascii", "replace")
-        for rtype, a, b in _records(data)
+        gds_raw_name(data[a:b]).decode("ascii", "replace")
+        for rtype, a, b in gds_records(data)
         if rtype == 0x06
     ]
 
@@ -526,10 +536,10 @@ def gds_cells(data: bytes) -> list[str]:
     a structure of the file."""
     defined: list[bytes] = []
     referenced: set[bytes] = set()
-    for rtype, a, b in _records(data):
+    for rtype, a, b in gds_records(data):
         if rtype not in (0x06, 0x12):  # STRNAME, SNAME
             continue
-        raw = _name(data[a:b])
+        raw = gds_raw_name(data[a:b])
         if not GDS_NAME.fullmatch(raw):
             raise MacroImportError(
                 f"GDS: cell name {raw[:40]!r} is not letters, digits, _ and $ only"
@@ -557,7 +567,7 @@ def shift_gds(data: bytes, cell: str, dx_um: float, dy_um: float) -> bytes:
     meters_per_dbu = 0.0
     inside = False
     dx = dy = 0
-    for rtype, a, b in _records(data):
+    for rtype, a, b in gds_records(data):
         rec = data[a - 4 : b]
         if rtype == 0x03 and b - a == 16:  # UNITS: user units, metres per database unit
             meters_per_dbu = _real8(data[a + 8 : b])
@@ -565,7 +575,7 @@ def shift_gds(data: bytes, cell: str, dx_um: float, dy_um: float) -> bytes:
                 raise MacroImportError("GDS: the database unit is not a length")
             dx, dy = (round(v * 1e-6 / meters_per_dbu) for v in (dx_um, dy_um))
         elif rtype == 0x06:  # STRNAME, compared as raw bytes
-            inside = _name(data[a:b]) == target
+            inside = gds_raw_name(data[a:b]) == target
         elif rtype == 0x07:  # ENDSTR
             inside = False
         elif rtype == 0x10 and inside and (dx or dy):  # XY

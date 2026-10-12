@@ -862,7 +862,7 @@ def test_a_macro_bus_connects_end_to_end(tmp_path):
         lambda p: read_inside(p, (root,)),
         root / "build",
         "ihp-sg13g2",
-        layer.reserved_names(None),
+        layer.Reserved(frozenset()),
     )
     view = imported.views["tiny_counter"]
     assert [p.name for p in view.bus("q")] == ["q[0]", "q[1]"]
