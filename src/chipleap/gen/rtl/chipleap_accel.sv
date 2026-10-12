@@ -844,7 +844,11 @@ module chipleap_accel_core #(
         if (issue) begin
           abank_re_o[int'(xa / A_SLOT)] = 1'b1;
           abank_addr_o[int'(xa / A_SLOT)] = ABA'((xa % A_SLOT) / WPM);
-          for (int l = 0; l < int'(L); l++) begin
+        end
+        // The loop outside the condition: as a block of its own, sv2v gives its index a
+        // variable that only the issue cycle would set, which synthesis calls a latch.
+        for (int l = 0; l < int'(L); l++) begin
+          if (issue) begin
             wbank_re_o[int'(c_slot) * L + l] = 1'b1;
             wbank_addr_o[int'(c_slot) * L + l] = WBA'((wbit >> 5) / WPM);
           end
