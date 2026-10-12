@@ -52,6 +52,8 @@ An IHP SRAM has every signal pin on its bottom edge, along its whole width (784 
 
 ### RTL projects: the `macros` section
 
+The section is the generic part: anyone's RTL can use hard macros, and the accelerator's buffers use the same pieces. An entry names an SRAM of the PDK (`cell`) or a `macro/v1` package (`package`), with the instance, package, `at_um` and `orientation` keys a chip's `macros` have; the instance is a path, since the RTL instantiates the macro. Packages go through `chipleap.macro.layer` with the chip's reserved names, no macro cell may be a module of the RTL, and after LibreLane the merged GDS cells and subcircuits are checked with `chipleap.chip.merge`.
+
 ```yaml
 macros:
   - instance: u_mem               # the instance in the RTL; u_core/u_mem inside u_core

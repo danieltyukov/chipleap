@@ -104,9 +104,11 @@ eco:                          # changes to the routed design, applied by the eco
   - {resize: _211_, cell: sg13g2_nor2_2}
   - {buffer: _212_/Y, cell: sg13g2_buf_2}
   - {repair: setup, margin_ns: 0.5}
-macros:                       # IHP's SRAM macros the RTL instantiates (see below)
+macros:                       # hard macros the RTL instantiates (see below)
   - instance: u_core/u_mem    # the instance's path; at most 8 levels
-    cell: RM_IHPSG13_1P_1024x32_c2_bm_bist
+    cell: RM_IHPSG13_1P_1024x32_c2_bm_bist   # an SRAM of the PDK, or:
+  - instance: u_cmp
+    package: macros/strongarm.macro          # a macro/v1 package, as in chip.macros
     at_um: [40, 20]           # lower left from the core's, in um; needs pnr.die_um
     orientation: N            # N, S, FN or FS
 chip:                         # optional: the whole chip, with a pad ring and macros (chips.md)
@@ -131,14 +133,14 @@ A power domain's elements are hierarchical instance paths (`u_rx`, `u_core/u_alu
 
 The `chip` section is described in [chips.md](chips.md).
 
-### SRAM macros
+### Hard macros
 
-The `macros` section lists the SRAM macros of IHP's PDK (`sg13g2_sram`, the single-port `RM_IHPSG13_1P_*` cells) that the RTL instantiates by their cell names. Each entry gives the instance's path in the design (`u_core/u_mem`; in the flattened netlist it is `u_core.u_mem`), the cell, and optionally where its lower left goes in the core and its orientation. At most 32 macros; coordinates are on the 5 nm grid. The steps use them so:
+The `macros` section lists the hard macros the RTL instantiates by their cell names: SRAMs of IHP's PDK (`cell`: the single-port `RM_IHPSG13_1P_*` cells of `sg13g2_sram`) and `macro/v1` packages (`package`: a `.macro` directory, as a chip's `macros` name them, for example a block from aispice). Each entry gives the instance's path in the design (`u_core/u_mem`; in the flattened netlist it is `u_core.u_mem`), the cell or the package, and optionally where its lower left goes in the core and its orientation. At most 32 macros; coordinates are on the 5 nm grid. A package is held to a chip's name rules: its name may not enter the PDK's, the flow's or the top's name space, and no macro cell may also be a module of the RTL (a model of the macro among the sources, black boxes included, is refused, since the flow would bind the instance to it). The steps use them so:
 
-- `lint` and `synth` read a black-box module with the macro's ports, written from the cell's name, so they work without the PDK. Synthesis keeps each macro as an instance and reports the macros' area from the PDK's LEF beside the standard cells' when the PDK is installed.
-- `sim` and `coverage` add the PDK's own model of each macro, behavioural under `FUNCTIONAL` (which ChipLeap defines), copied from the PDK ChipLeap uses into the step's directory. Without the PDK the step fails and names the variable to set (`CHIPLEAP_IHP_PDK`).
-- `pnr` copies the macros' LEF, GDS, CDL and liberty at every corner beside the run, so timing at the slow corner includes the macros' own arcs and LVS checks them as boxes with their pins. Without `pnr.die_um`, ChipLeap sizes the die from the macros and the standard cells' area (from a synthesis) at `pnr.utilisation`, and places the macros in a row along the top of the core (pins down) and a mirrored row along the bottom (pins up), the logic between them; with `pnr.die_um`, every macro needs its `at_um`. The power grid is LibreLane's, with a macro grid over each SRAM: Metal5 straps across its Metal4 supply stripes and TopMetal1 stripes over them, joined to the core's TopMetal2 stripes. So each macro must lie under a whole VDD and VSS pair of those stripes (every 75.6 um, 10 um inside its top and bottom edges); a placement that is not is refused with where the macro could go. The first 40 um of the core from its left edge stay free of macros, for a column of rows that keeps the core's power grid across the whole core.
-- `formal`, `cdc`, `equiv`, `gls`, `eco`, `dft`, `power`, `ir_drop`, `upf`, `chip` and the commercial tools do not model a macro yet: on a project with macros they skip and name the macros.
+- `lint` and `synth` read a black-box module with the macro's ports, written from the SRAM's name or the package's manifest, so they work without the PDK. Synthesis keeps each macro as an instance and reports the macros' area (the SRAMs' from the PDK's LEF, when it is installed) beside the standard cells'.
+- `sim` and `coverage` add the PDK's own model of each SRAM, behavioural under `FUNCTIONAL` (which ChipLeap defines), and each package's Verilog model, copied into the step's directory. Without the PDK a project with SRAMs fails the step and names the variable to set (`CHIPLEAP_IHP_PDK`).
+- `pnr` copies the SRAMs' LEF, GDS, CDL and liberty at every corner beside the run, so timing at the slow corner includes the macros' own arcs and LVS checks them as boxes with their pins; a package goes through the macro layer as a chip's does (copied, checked against the PDK, converted), and its supply pins are strapped to the standard-cell rails as in a chip. After LibreLane has run, the GDS cells and subcircuits it merged are checked for names defined twice, as a chip's are. Without `pnr.die_um`, ChipLeap sizes the die from the macros and the standard cells' area (from a synthesis) at `pnr.utilisation`, and places the macros in a row along the top of the core (pins down) and a mirrored row along the bottom (pins up), the logic between them; with `pnr.die_um`, every macro needs its `at_um`. The power grid is LibreLane's, with a macro grid over each SRAM: Metal5 straps across its Metal4 supply stripes and TopMetal1 stripes over them, joined to the core's TopMetal2 stripes. So each macro must lie under a whole VDD and VSS pair of those stripes (every 75.6 um, 10 um inside its top and bottom edges); a placement that is not is refused with where the macro could go. The first 40 um of the core from its left edge stay free of macros, for a column of rows that keeps the core's power grid across the whole core.
+- `formal`, `cdc`, `equiv`, `gls`, `eco`, `dft`, `power`, `ir_drop`, `upf`, `chip` and the commercial tools do not model a macro yet: on a project with macros they skip and name the macros, here and in the assistant's tools.
 
 `examples/sram` is a 1 KiB scratchpad in one `RM_IHPSG13_1P_256x32_c2_bm_bist` with byte enables, with cocotb tests against a dictionary of words.
 
