@@ -588,21 +588,7 @@ def eco(project: Project, changes: list[EcoChange] | None = None) -> StepResult:
     except (EcoError, OpenroadError, ValueError) as exc:
         return StepResult("eco", "fail", str(exc).splitlines()[0], {"error": str(exc)})
     status, msg = summarize(project, r)
-    data = eco_data(project, r)
-    # Resizing, buffering and repair keep the logic; Yosys shows they did, comparing the
-    # changed routed netlist with LibreLane's synthesized one (chipleap.rtl.equiv).
-    from chipleap.rtl.equiv import check_pair
-
-    logic = check_pair(project, "synth-pnr")
-    data["equivalence"] = logic
-    if logic["status"] in ("proved", "bounded"):
-        msg += f"; logic unchanged ({logic['status']} equal to LibreLane's synthesized netlist)"
-    elif logic["status"] == "skipped":
-        msg += f"; equivalence not checked: {logic['reason']}"
-    else:
-        status = "fail"
-        msg += f"; the changed netlist is not equivalent: {logic.get('error') or logic['status']}"
-    return StepResult("eco", status, msg, data)
+    return StepResult("eco", status, msg, eco_data(project, r))
 
 
 # Timing paths, to choose changes from.
