@@ -448,7 +448,7 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
     )
     head = (
         f"{data['name']}: {w / 1000:.2f} x {h / 1000:.2f} mm, {data['pads']} pads, "
-        f"{len(data['macros'])} macros"
+        f"{len(data['macros'])} macro{'' if len(data['macros']) == 1 else 's'}"
     )
     if problems:
         return False, f"{head}; " + "; ".join(problems)
