@@ -134,7 +134,7 @@ The accelerator model is the same tile schedule the RTL runs, so it is checked a
 
 - **Cycles:** equal to simulation without memory stalls, within a few percent with random stalls, on Verilator, Xcelium, VCS and Questa alike.
 - **Area:** logic area within 3 % on average of synthesis on IHP SG13G2, across 12 configurations.
-- **Clock:** the model allows what the routed accelerator meets at the slow corner: 100 MHz with one port, less with more ports or a wider GEMV engine.
+- **Clock:** the model allows what the routed accelerator meets at the slow corner: 100 MHz with up to four ports, less with eight or more, and less for a GEMV engine with four or more lanes or more than eight columns.
 
 The other nodes are scaled from published figures and say so. [docs/model.md](docs/model.md) lists every number and its source; [docs/verification.md](docs/verification.md) explains each check.
 

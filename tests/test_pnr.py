@@ -19,6 +19,14 @@ def test_config_sets_parameters_and_clock():
     assert cfg["DEFAULT_CORNER"].startswith("nom_slow") and cfg["RUN_POST_GRT_RESIZER_TIMING"]
 
 
+def test_many_ports_get_room_to_route():
+    def util(ports):
+        return pnr.config(Accel("gemv", 1, 8, 8, ports=ports), 100.0)["FP_CORE_UTIL"]
+
+    assert util(1) == util(8) == 45
+    assert util(16) == 35
+
+
 def test_metrics_take_the_worst_corner():
     metrics = {
         "design__die__area": 640000.0,

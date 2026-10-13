@@ -122,9 +122,12 @@ def test_ihp_clock_above_the_accelerators_timing_is_a_violation(smol):
         il_banks=4,
         ext_mem="octal-psram",
         ext_channels=2,
-        accel=Accel("gemv", 2, 8, 8, ports=4, abuf_kib=2, wbuf_kib=2),
+        accel=Accel("gemv", 1, 8, 8, ports=8, abuf_kib=2, wbuf_kib=2),
     )
     ev = evaluate(smol, fast)
     assert any("closes timing" in v for v in ev.violations)
-    slow = evaluate(smol, fast.with_(freq_mhz=50))
+    slow = evaluate(smol, fast.with_(freq_mhz=75))
     assert not any("closes timing" in v for v in slow.violations)
+    # With four ports the routed 2 x 8 engine meets 100 MHz at the slow corner.
+    four = evaluate(smol, fast.with_(accel=Accel("gemv", 2, 8, 8, ports=4, abuf_kib=2, wbuf_kib=2)))
+    assert not any("closes timing" in v for v in four.violations)

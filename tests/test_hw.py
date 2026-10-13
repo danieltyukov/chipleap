@@ -48,8 +48,8 @@ def test_accel_area_grows_with_the_array():
         small = accel_logic_kge(df, 2, 8, 1)
         assert accel_logic_kge(df, 4, 8, 1) > small
         assert accel_logic_kge(df, 2, 8, 2) > small
-    # Synthesized on SG13G2 for the 5 ns target: a 1 x 8 GEMV engine with one port is 39.4 kGE.
-    assert abs(accel_logic_kge("gemv", 1, 8, 1) - 39.4) / 39.4 < 0.03
+    # Synthesized on SG13G2 for the 5 ns target: a 1 x 8 GEMV engine with one port is 37.1 kGE.
+    assert abs(accel_logic_kge("gemv", 1, 8, 1) - 37.1) / 37.1 < 0.03
 
 
 def test_memory_availability():
@@ -85,13 +85,20 @@ def test_design_roundtrip():
         Design.from_dict({**d.to_dict(), "colour": "red"})
 
 
-def test_accel_clock_limit_follows_ports_and_width():
+def test_accel_clock_limit_follows_ports_lanes_and_width():
     from chipleap.hw.tech import accel_signoff_mhz, get_tech
 
-    one, two, four = (accel_signoff_mhz("gemv", 8, p) for p in (1, 2, 4))
-    assert one >= two > four
+    one, two, four, eight = (accel_signoff_mhz("gemv", 8, p) for p in (1, 2, 4, 8))
+    assert one >= two > four > eight
     assert accel_signoff_mhz("gemv", 16, 1) < accel_signoff_mhz("gemv", 8, 1)
+    assert accel_signoff_mhz("gemv", 8, 2, rows=4) < accel_signoff_mhz("gemv", 8, 2, rows=2)
     ihp, g28 = get_tech("ihp-sg13g2"), get_tech("generic-28nm")
-    assert ihp.clock_limit_mhz("gemv", 8, 4) < ihp.max_freq_mhz
+    # Routed at the slow corner: a GEMV 2 x 8 engine with four ports met 100 MHz, a 1 x 8
+    # engine with eight met 89.5 MHz and with sixteen 88.9 MHz, and a 4 x 8 engine with two
+    # 97.4 MHz.
+    assert ihp.clock_limit_mhz("gemv", 8, 4, rows=2) == ihp.max_freq_mhz
+    assert ihp.clock_limit_mhz("gemv", 8, 8) == pytest.approx(89.5, abs=0.1)
+    assert ihp.clock_limit_mhz("gemv", 8, 16) <= 88.9
+    assert ihp.clock_limit_mhz("gemv", 8, 2, rows=4) == pytest.approx(97.4, abs=0.1)
     # Only the node the timing was measured on is capped by it.
-    assert g28.clock_limit_mhz("gemv", 8, 4) == g28.max_freq_mhz
+    assert g28.clock_limit_mhz("gemv", 8, 8) == g28.max_freq_mhz

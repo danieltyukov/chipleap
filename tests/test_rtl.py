@@ -20,6 +20,9 @@ ACCELS = [
     Accel("ws", 2, 8, 4, ports=1, abuf_kib=1, wbuf_kib=1, double_buffer=False),
     Accel("os", 4, 4, 8, ports=2, abuf_kib=2, wbuf_kib=2),
     Accel("os", 8, 2, 4, ports=4, abuf_kib=1, wbuf_kib=1),
+    # More ports than words in many rows: each port steps across several rows at a time.
+    Accel("gemv", 2, 8, 4, ports=8, abuf_kib=1, wbuf_kib=1),
+    Accel("os", 4, 4, 8, ports=16, abuf_kib=1, wbuf_kib=1, double_buffer=False),
 ]
 
 

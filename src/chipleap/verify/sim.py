@@ -198,6 +198,8 @@ def predicted_cycles(accel: Accel, case: Case) -> float:
         y=4 * g,
         lat_on=case.latency,
         lat_ext=case.latency,
+        grant=g,
+        ports=accel.ports,
     )
     return simulate_job(accel, case.m, case.k, case.n, case.fmt, bw, 1.0)
 

@@ -445,7 +445,7 @@ def evaluate(
         )
     elif design.accel and tech.accel_timing:
         a = design.accel
-        limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports)
+        limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows)
         if design.freq_mhz > limit + 1e-9:
             violations.add(
                 f"the {a.dataflow} {a.rows}x{a.cols} accelerator with {a.ports} port"

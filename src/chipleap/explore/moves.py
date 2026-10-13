@@ -45,7 +45,11 @@ def _freq_limit(spec: Spec, tech: str, accel: Accel | None = None) -> float:
     """The fastest clock allowed: the node's, the accelerator's measured timing where the
     node has it, and the spec's."""
     t = TECHNOLOGIES[tech]
-    limit = t.clock_limit_mhz(accel.dataflow, accel.cols, accel.ports) if accel else t.max_freq_mhz
+    limit = (
+        t.clock_limit_mhz(accel.dataflow, accel.cols, accel.ports, accel.rows)
+        if accel
+        else t.max_freq_mhz
+    )
     return min(limit, spec.max_freq_mhz) if spec.max_freq_mhz else limit
 
 
