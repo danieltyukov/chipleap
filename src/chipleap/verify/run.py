@@ -178,6 +178,7 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         )
     a = design.accel
     model_cell = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports) * 1000 * ihp.ge_um2
+    model_buffers = (ihp.sram_mm2(a.abuf_kib) + ihp.sram_mm2(a.wbuf_kib)) * 1e6
     data = {
         "clock_mhz": clock,
         "die_um2": round(r.die_um2),
@@ -195,9 +196,23 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         "antenna_nets": r.antenna_nets,
         "power_mw": round(r.power_mw, 3),
         "model_cell_um2": round(model_cell),
-        "buffer_words": pnr.PNR_WORDS,
+        "buffers": r.buffers,
+        "buffer_words": rtl_params(a).abuf_words if r.macros else pnr.PNR_WORDS,
         "gds": str(r.gds) if r.gds else None,
     }
+    # The block as it is in silicon, standard cells and macros, against the model's logic
+    # and buffers.
+    measured = r.cell_um2 + r.macro_um2
+    modelled = model_cell + model_buffers
+    if r.macros:
+        data |= {
+            "macros": [{"instance": i, "cell": c} for i, c in r.macros],
+            "macro_um2": round(r.macro_um2),
+            "model_buffer_um2": round(model_buffers),
+            "measured_um2": round(measured),
+            "model_um2": round(modelled),
+            "model_area_error": round((modelled - measured) / measured, 4),
+        }
     # Signed off where the model's clock limit for the node is measured: setup at the slow
     # corner (1.08 V, 125 C), hold at every corner. The typical corner is reported beside it.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
@@ -210,6 +225,14 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         f"{'met' if met else 'missed'} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
         f"and about {r.fmax_mhz:.0f} MHz at the typical one); {checks}"
     )
+    if r.macros:
+        msg += (
+            f"; buffers in {r.buffers.removeprefix('SRAM macros: ')}: cells and macros "
+            f"{measured / 1e6:.3f} mm2, the model {modelled / 1e6:.3f} mm2 "
+            f"({(modelled - measured) / measured * 100:+.0f}%)"
+        )
+    elif r.buffers:
+        msg += f"; {r.buffers}"
     return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)
 
 

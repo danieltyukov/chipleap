@@ -27,9 +27,17 @@
 //   0x34 INFO    R   {ROWS[31:24], COLS[23:16], WBITS[15:12], PORTS[11:4], DATAFLOW[1:0]}
 //   0x38 IRQ_EN  RW  bit 0
 //
+// With SRAM_BUF the buffers are single-port SRAM banks outside the core (gemv with one
+// read port only): the activation buffer a bank per slot, the weight buffer a bank per
+// slot and lane, each word COLS bytes. The core presents a bank's address in the cycle it
+// would read the flop array, and the bank's word, a cycle later, takes the place of the
+// operand registers, so the schedule is the same cycle for cycle. chipleap_accel below
+// is the core with its buffers inside; ChipLeap's layout top puts the macros beside it.
+//
 // SPDX-License-Identifier: MIT
 
-module chipleap_accel #(
+/* verilator lint_off DECLFILENAME */  // the core, then chipleap_accel at the end of the file
+module chipleap_accel_core #(
     parameter int unsigned DATAFLOW = 0,  // 0 gemv, 1 weight stationary, 2 output stationary
     parameter int unsigned ROWS = 8,
     parameter int unsigned COLS = 8,
@@ -39,7 +47,16 @@ module chipleap_accel #(
     parameter int unsigned WBUF_WORDS = 1024,
     parameter int unsigned DOUBLE_BUF = 1,
     parameter int unsigned ACC_ROWS = 8,
-    parameter int unsigned MAX_OUTSTANDING = 4
+    parameter int unsigned MAX_OUTSTANDING = 4,
+    parameter int unsigned SRAM_BUF = 0,
+    // The banks' shape, from the parameters above; not set on their own.
+    parameter int unsigned BANK_BITS = 32 * (COLS >= 4 ? COLS / 4 : 1),
+    parameter int unsigned NAB = DOUBLE_BUF != 0 ? 2 : 1,
+    parameter int unsigned NWB = NAB * ROWS,
+    parameter int unsigned ABA = ABUF_WORDS / NAB / (BANK_BITS / 32) > 1 ?
+                                 $clog2(ABUF_WORDS / NAB / (BANK_BITS / 32)) : 1,
+    parameter int unsigned WBA = WBUF_WORDS / NWB / (BANK_BITS / 32) > 1 ?
+                                 $clog2(WBUF_WORDS / NWB / (BANK_BITS / 32)) : 1
 ) (
     input logic clk_i,
     input logic rst_ni,
@@ -69,8 +86,24 @@ module chipleap_accel #(
     output logic [ 3:0] wr_be_o,
     input  logic        wr_rvalid_i,
 
+    // SRAM banks (SRAM_BUF): a read, a write, the word address, and the data and bit mask
+    // every write shares; the word read comes back a cycle later.
+    output logic [NAB-1:0]            abank_re_o,
+    output logic [NAB-1:0]            abank_we_o,
+    output logic [NAB-1:0][ABA-1:0]   abank_addr_o,
+    output logic [NWB-1:0]            wbank_re_o,
+    output logic [NWB-1:0]            wbank_we_o,
+    output logic [NWB-1:0][WBA-1:0]   wbank_addr_o,
+    output logic [BANK_BITS-1:0]      bank_wdata_o,
+    output logic [BANK_BITS-1:0]      bank_wmask_o,
+    /* verilator lint_off UNUSEDSIGNAL */  // without SRAM_BUF
+    input  logic [NAB-1:0][BANK_BITS-1:0] abank_rdata_i,
+    input  logic [NWB-1:0][BANK_BITS-1:0] wbank_rdata_i,
+    /* verilator lint_on UNUSEDSIGNAL */
+
     output logic irq_o
 );
+  /* verilator lint_on DECLFILENAME */
 
   localparam int unsigned TN = (DATAFLOW == 0) ? ROWS : COLS;
   localparam int unsigned TM_MAX = (DATAFLOW == 2) ? ROWS : ACC_ROWS;
@@ -84,6 +117,9 @@ module chipleap_accel #(
   localparam int unsigned AWA = $clog2(ABUF_WORDS);
   localparam int unsigned AWW = $clog2(WBUF_WORDS);
   localparam int unsigned AW = AWA > AWW ? AWA : AWW;
+  localparam bit SB = SRAM_BUF != 0;
+  localparam int unsigned WPM = BANK_BITS / 32;  // buffer words in a bank word
+  localparam int unsigned W_ROW = W_SLOT / ROWS;  // buffer words of a lane's bank
 
   // ---------------------------------------------------------------------------
   // Registers
@@ -187,10 +223,14 @@ module chipleap_accel #(
   endfunction
 
   // ---------------------------------------------------------------------------
-  // Buffers
+  // Buffers (flop arrays without SRAM_BUF; the banks outside it with)
   // ---------------------------------------------------------------------------
+  /* verilator lint_off UNDRIVEN */  // with SRAM_BUF
+  /* verilator lint_off UNUSEDSIGNAL */
   logic [31:0] abuf[ABUF_WORDS];
   logic [31:0] wbuf[WBUF_WORDS];
+  /* verilator lint_on UNUSEDSIGNAL */
+  /* verilator lint_on UNDRIVEN */
 
   // ---------------------------------------------------------------------------
   // DMA: 2-D copy from memory into a buffer over all read ports
@@ -407,14 +447,24 @@ module chipleap_accel #(
     end
   end
 
-  // Buffer writes from read responses.
-  always_ff @(posedge clk_i) begin
-    for (int p = 0; p < PORTS; p++) begin
-      if (rd_rvalid_i[p]) begin
-        if (dma_tow_q) wbuf[AWW'(fifo[p*MAX_OUTSTANDING+int'(fifo_rp[p])])] <= rd_rdata_i[p];
-        else abuf[AWA'(fifo[p*MAX_OUTSTANDING+int'(fifo_rp[p])])] <= rd_rdata_i[p];
+  // Buffer writes from read responses; with SRAM_BUF the gemv core sends them to the banks.
+  if (!SB) begin : g_buf_write
+    always_ff @(posedge clk_i) begin
+      for (int p = 0; p < PORTS; p++) begin
+        if (rd_rvalid_i[p]) begin
+          if (dma_tow_q) wbuf[AWW'(fifo[p*MAX_OUTSTANDING+int'(fifo_rp[p])])] <= rd_rdata_i[p];
+          else abuf[AWA'(fifo[p*MAX_OUTSTANDING+int'(fifo_rp[p])])] <= rd_rdata_i[p];
+        end
       end
     end
+    assign abank_re_o = '0;
+    assign abank_we_o = '0;
+    assign abank_addr_o = '0;
+    assign wbank_re_o = '0;
+    assign wbank_we_o = '0;
+    assign wbank_addr_o = '0;
+    assign bank_wdata_o = '0;
+    assign bank_wmask_o = '0;
   end
 
   // ---------------------------------------------------------------------------
@@ -509,7 +559,8 @@ module chipleap_accel #(
       dma_src_off = w_bytes(l_k0);
       dma_src_stride = w_row_bytes;
       dma_dst = AW'(32'(l_slot) * W_SLOT);
-      dma_dst_stride = AW'(w_words(cfg_tk));
+      // In banks, each weight row of the tile has its lane's bank: W_ROW words apart.
+      dma_dst_stride = AW'(SB ? 32'(W_ROW) : w_words(cfg_tk));
     end else if (ls == L_PUSH) begin
       desc_set[l_slot] = 1'b1;
       desc_new.tm = l_tm;
@@ -764,40 +815,198 @@ module chipleap_accel #(
     // address arithmetic or barrel shifter sits in the datapath.
     localparam int unsigned XW = V >= 4 ? V / 4 : 1;  // words holding V int8 activations
     localparam int unsigned WW = V >= 4 ? V / 4 : 1;  // words holding V weights at int8
-    logic [31:0] xk;  // K offset of the chunk within the X row
-    logic [XW*32-1:0] xwords;
-    logic signed [7:0] xv[V];
-    logic [31:0] wbit;  // bit offset of the chunk within each weight row
+    wire issue = running && issuing;  // a chunk's operands are registered this cycle
+    logic signed [7:0] xv[V];  // the chunk's operands, unpacked
     logic signed [7:0] wv[L][V];
     logic signed [31:0] dot[L];
 
-    always_comb begin
-      xk = a_koff + gkc * V;
-      for (int j = 0; j < int'(XW); j++) xwords[32*j+:32] = abuf[AWA'(g_rowbase + (xk >> 2) + 32'(j))];
-      for (int v = 0; v < int'(V); v++) begin
-        // With V of four or more the chunk starts on a word boundary; smaller chunks sit
-        // inside one word at a byte offset.
-        if (V >= 4) xv[v] = xwords[8*v+:8];
-        else xv[v] = xwords[8*(int'(xk[1:0])+v)+:8];
+    if (!SB) begin : g_flop
+      logic [31:0] xk;  // K offset of the chunk within the X row
+      logic [XW*32-1:0] xwords;
+      logic [31:0] wbit;  // bit offset of the chunk within each weight row
+
+      always_comb begin
+        xk = a_koff + gkc * V;
+        for (int j = 0; j < int'(XW); j++) xwords[32*j+:32] = abuf[AWA'(g_rowbase + (xk >> 2) + 32'(j))];
+        for (int v = 0; v < int'(V); v++) begin
+          // With V of four or more the chunk starts on a word boundary; smaller chunks sit
+          // inside one word at a byte offset.
+          if (V >= 4) xv[v] = xwords[8*v+:8];
+          else xv[v] = xwords[8*(int'(xk[1:0])+v)+:8];
+        end
+      end
+
+      always_comb begin
+        wbit = (gkc * V) << (3 - fmt_shift);
+        for (int l = 0; l < int'(L); l++) begin
+          logic [WW*32-1:0] words;
+          logic [WW*32-1:0] chunk;
+          for (int j = 0; j < int'(WW); j++)
+            words[32*j+:32] = wbuf[AWW'(w_base + 32'(l) * w_stride + (wbit >> 5) + 32'(j))];
+          // Chunks narrower than a word start inside it; shift them down to bit 0.
+          chunk = words >> wbit[4:0];
+          for (int v = 0; v < int'(V); v++) begin
+            unique case (fmt_shift)
+              2'd1: wv[l][v] = 8'(signed'(chunk[4*v+:4]));
+              2'd2: wv[l][v] = 8'(signed'(chunk[2*v+:2]));
+              default: wv[l][v] = chunk[8*v+:8];
+            endcase
+          end
+        end
+      end
+    end else begin : g_bank
+      // A chunk is COLS bytes at most, at a position aligned to its size (the K
+      // alignment), so it is one word of a bank: the X chunk a word of the activation
+      // bank its address falls in, each lane's weight chunk a word of that lane's bank at
+      // the chunk's offset in the row, sliced from the bit its format puts it at.
+      //
+      // A bank answers a cycle after its address, and an SRAM macro's clock to output
+      // is half the clock period at the slow corner, so each chunk is read a cycle ahead:
+      // at core_start for the tile's first chunk, and in each issue cycle for the next.
+      // Its word is out of the bank in the cycle that issues it, which registers it in
+      // xq and wq as the flop buffers' read is, and the schedule stays the same.
+      //
+      // Where the next chunk is read is kept in registers, a cycle ahead of its read: the
+      // row's next chunk is the last one read plus a chunk, the next row's first is this
+      // row's first plus the row stride. Between an issue and the banks' enables and
+      // addresses there are then only compares and a select; worked out in the issue
+      // cycle, the next chunk's address put two 32-bit adders there, and the routed
+      // design missed its clock at the slow corner on that path.
+      localparam int unsigned SBI = NAB > 1 ? $clog2(NAB) : 1;
+      localparam int unsigned WSI = $clog2(BANK_BITS);
+      logic pf;  // a chunk is read this cycle
+      logic pf_row;  // the chunk read is the first of its row
+      logic [31:0] xa, wbit;  // its activation word, and its first bit in each weight row
+      logic [31:0] nx_xa_q, nx_wbit_q;  // the next chunk of the row
+      logic [31:0] row_xa_q;  // the first chunk of the next row
+      logic [31:0] kc_end_q, m_end_q;  // gkc of a row's last chunk, gm of the tile's last row
+      wire [31:0] wstep = 32'(V) << (3 - fmt_shift);  // a chunk's bits in a weight row
+      logic [31:0] bw_dst;  // where the DMA's word goes, as a buffer address
+      logic [SBI-1:0] xb_q;  // the activation bank read, and the slot of the weight banks
+      logic cs_q;
+      logic [WSI-1:0] wsel_q;  // the weight chunk's first bit in the bank word
+
+      always_comb begin
+        pf = 1'b0;
+        pf_row = 1'b0;
+        xa = nx_xa_q;
+        wbit = nx_wbit_q;
+        if (core_start) begin
+          pf = 1'b1;
+          pf_row = 1'b1;
+          xa = a_base + (a_koff >> 2);
+          wbit = '0;
+        end else if (issue) begin
+          // The chunk after this one, as the issue below steps gm and gkc; none after the
+          // tile's last.
+          if (gkc != kc_end_q) begin
+            pf = 1'b1;
+          end else if (gm != m_end_q) begin
+            pf = 1'b1;
+            pf_row = 1'b1;
+            xa = row_xa_q;
+            wbit = '0;
+          end
+        end
+      end
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          nx_xa_q <= '0;
+          nx_wbit_q <= '0;
+          row_xa_q <= '0;
+          kc_end_q <= '0;
+          m_end_q <= '0;
+        end else begin
+          if (core_start) begin
+            kc_end_q <= cd.tk / V - 1;
+            m_end_q <= cd.tm - 1;
+          end
+          // Each next address is summed for every way the read can go and chosen
+          // after the adders, so the row-end compares that choose it are not in series
+          // with an adder. A chunk is V bytes at a word boundary: V / 4 words on.
+          if (pf) begin
+            if (core_start) nx_xa_q <= a_base + (a_koff >> 2) + 32'(XW);
+            else if (pf_row) nx_xa_q <= row_xa_q + 32'(XW);
+            else nx_xa_q <= nx_xa_q + 32'(XW);
+            nx_wbit_q <= pf_row ? wstep : nx_wbit_q + wstep;
+          end
+          if (core_start) row_xa_q <= a_base + (a_koff >> 2) + a_stride;
+          else if (pf_row) row_xa_q <= row_xa_q + a_stride;
+        end
+      end
+
+      always_comb begin
+        bw_dst = 32'(fifo[int'(fifo_rp[0])]);
+        abank_re_o = '0;
+        abank_we_o = '0;
+        abank_addr_o = '0;
+        wbank_re_o = '0;
+        wbank_we_o = '0;
+        wbank_addr_o = '0;
+        bank_wdata_o = {WPM{rd_rdata_i[0]}};
+        bank_wmask_o = BANK_BITS'({32{1'b1}}) << (32 * int'(bw_dst % WPM));
+        if (pf) begin
+          abank_re_o[int'(xa / A_SLOT)] = 1'b1;
+          abank_addr_o[int'(xa / A_SLOT)] = ABA'((xa % A_SLOT) / WPM);
+        end
+        // The loop outside the condition: as a block of its own, sv2v gives its index a
+        // variable that only the read cycle would set, which synthesis calls a latch.
+        for (int l = 0; l < int'(L); l++) begin
+          if (pf) begin
+            wbank_re_o[int'(c_slot) * L + l] = 1'b1;
+            wbank_addr_o[int'(c_slot) * L + l] = WBA'((wbit >> 5) / WPM);
+          end
+        end
+        if (rd_rvalid_i[0]) begin
+          if (dma_tow_q) begin
+            wbank_we_o[int'(bw_dst / W_SLOT) * L + int'(bw_dst % W_SLOT / W_ROW)] = 1'b1;
+            wbank_addr_o[int'(bw_dst / W_SLOT) * L + int'(bw_dst % W_SLOT / W_ROW)] =
+                WBA'(bw_dst % W_ROW / WPM);
+          end else begin
+            abank_we_o[int'(bw_dst / A_SLOT)] = 1'b1;
+            abank_addr_o[int'(bw_dst / A_SLOT)] = ABA'(bw_dst % A_SLOT / WPM);
+          end
+        end
+      end
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          xb_q <= '0;
+          cs_q <= 1'b0;
+          wsel_q <= '0;
+        end else if (pf) begin
+          xb_q <= SBI'(xa / A_SLOT);
+          cs_q <= c_slot;
+          wsel_q <= WSI'(wbit % BANK_BITS);
+        end
+      end
+
+      always_comb begin
+        logic [BANK_BITS-1:0] xw;
+        xw = abank_rdata_i[int'(xb_q)];
+        for (int v = 0; v < int'(V); v++) xv[v] = xw[8*v+:8];
+        for (int l = 0; l < int'(L); l++) begin
+          logic [BANK_BITS-1:0] chunk;
+          chunk = wbank_rdata_i[int'(cs_q) * L + l] >> wsel_q;
+          for (int v = 0; v < int'(V); v++) begin
+            unique case (fmt_shift)
+              2'd1: wv[l][v] = 8'(signed'(chunk[4*v+:4]));
+              2'd2: wv[l][v] = 8'(signed'(chunk[2*v+:2]));
+              default: wv[l][v] = chunk[8*v+:8];
+            endcase
+          end
+        end
       end
     end
 
-    always_comb begin
-      wbit = (gkc * V) << (3 - fmt_shift);
-      for (int l = 0; l < int'(L); l++) begin
-        logic [WW*32-1:0] words;
-        logic [WW*32-1:0] chunk;
-        for (int j = 0; j < int'(WW); j++)
-          words[32*j+:32] = wbuf[AWW'(w_base + 32'(l) * w_stride + (wbit >> 5) + 32'(j))];
-        // Chunks narrower than a word start inside it; shift them down to bit 0.
-        chunk = words >> wbit[4:0];
-        for (int v = 0; v < int'(V); v++) begin
-          unique case (fmt_shift)
-            2'd1: wv[l][v] = 8'(signed'(chunk[4*v+:4]));
-            2'd2: wv[l][v] = 8'(signed'(chunk[2*v+:2]));
-            default: wv[l][v] = chunk[8*v+:8];
-          endcase
-        end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        for (int v = 0; v < int'(V); v++) xq[v] <= '0;
+        for (int l = 0; l < int'(L); l++) for (int v = 0; v < int'(V); v++) wq[l][v] <= '0;
+      end else if (issue) begin
+        xq <= xv;
+        wq <= wv;
       end
     end
 
@@ -844,8 +1053,6 @@ module chipleap_accel #(
         ofirst_q <= 1'b0;
         olast_q <= 1'b0;
         om_q <= '0;
-        for (int v = 0; v < int'(V); v++) xq[v] <= '0;
-        for (int l = 0; l < int'(L); l++) for (int v = 0; v < int'(V); v++) wq[l][v] <= '0;
         pv_q <= 1'b0;
         pfirst_q <= 1'b0;
         plast_q <= 1'b0;
@@ -873,8 +1080,6 @@ module chipleap_accel #(
             ofirst_q <= (gkc == 0);
             olast_q <= (gkc + 1 == nchunks);
             om_q <= gm[$clog2(ACC_ROWS)-1:0];
-            xq <= xv;
-            wq <= wv;
             if (gkc + 1 == nchunks) begin
               gkc <= '0;
               if (gm + 1 == cd.tm) issuing <= 1'b0;
@@ -1206,4 +1411,91 @@ module chipleap_accel #(
   logic unused;
   assign unused = ^reg_wstrb_i ^ ^reg_addr_i[31:8] ^ ^reg_addr_i[1:0];
 
+endmodule
+
+// The accelerator with its buffers inside, as X-HEEP, the AXI wrapper and every test bench
+// use it.
+module chipleap_accel #(
+    parameter int unsigned DATAFLOW = 0,
+    parameter int unsigned ROWS = 8,
+    parameter int unsigned COLS = 8,
+    parameter int unsigned WBITS = 8,
+    parameter int unsigned PORTS = 2,
+    parameter int unsigned ABUF_WORDS = 2048,
+    parameter int unsigned WBUF_WORDS = 1024,
+    parameter int unsigned DOUBLE_BUF = 1,
+    parameter int unsigned ACC_ROWS = 8,
+    parameter int unsigned MAX_OUTSTANDING = 4
+) (
+    input logic clk_i,
+    input logic rst_ni,
+    input  logic        reg_valid_i,
+    input  logic        reg_write_i,
+    input  logic [31:0] reg_addr_i,
+    input  logic [31:0] reg_wdata_i,
+    input  logic [ 3:0] reg_wstrb_i,
+    output logic [31:0] reg_rdata_o,
+    output logic        reg_error_o,
+    output logic        reg_ready_o,
+    output logic [PORTS-1:0]       rd_req_o,
+    input  logic [PORTS-1:0]       rd_gnt_i,
+    output logic [PORTS-1:0][31:0] rd_addr_o,
+    input  logic [PORTS-1:0]       rd_rvalid_i,
+    input  logic [PORTS-1:0][31:0] rd_rdata_i,
+    output logic        wr_req_o,
+    input  logic        wr_gnt_i,
+    output logic [31:0] wr_addr_o,
+    output logic [31:0] wr_wdata_o,
+    output logic [ 3:0] wr_be_o,
+    input  logic        wr_rvalid_i,
+    output logic irq_o
+);
+  /* verilator lint_off PINCONNECTEMPTY */  // the banks, unused with the buffers inside
+  chipleap_accel_core #(
+      .DATAFLOW(DATAFLOW),
+      .ROWS(ROWS),
+      .COLS(COLS),
+      .WBITS(WBITS),
+      .PORTS(PORTS),
+      .ABUF_WORDS(ABUF_WORDS),
+      .WBUF_WORDS(WBUF_WORDS),
+      .DOUBLE_BUF(DOUBLE_BUF),
+      .ACC_ROWS(ACC_ROWS),
+      .MAX_OUTSTANDING(MAX_OUTSTANDING),
+      .SRAM_BUF(0)
+  ) u_core (
+      .clk_i,
+      .rst_ni,
+      .reg_valid_i,
+      .reg_write_i,
+      .reg_addr_i,
+      .reg_wdata_i,
+      .reg_wstrb_i,
+      .reg_rdata_o,
+      .reg_error_o,
+      .reg_ready_o,
+      .rd_req_o,
+      .rd_gnt_i,
+      .rd_addr_o,
+      .rd_rvalid_i,
+      .rd_rdata_i,
+      .wr_req_o,
+      .wr_gnt_i,
+      .wr_addr_o,
+      .wr_wdata_o,
+      .wr_be_o,
+      .wr_rvalid_i,
+      .abank_re_o(),
+      .abank_we_o(),
+      .abank_addr_o(),
+      .wbank_re_o(),
+      .wbank_we_o(),
+      .wbank_addr_o(),
+      .bank_wdata_o(),
+      .bank_wmask_o(),
+      .abank_rdata_i('0),
+      .wbank_rdata_i('0),
+      .irq_o
+  );
+  /* verilator lint_on PINCONNECTEMPTY */
 endmodule

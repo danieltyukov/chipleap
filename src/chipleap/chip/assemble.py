@@ -18,11 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.chip import checks, floorplan, flow, io, merge, netlist, pdn
+from chipleap.chip import checks, floorplan, flow, io, iotiming, merge, netlist, pdn
 from chipleap.chip.checks import CheckError
 from chipleap.chip.config import ChipConfig
 from chipleap.chip.floorplan import Floorplan, FloorplanError
 from chipleap.chip.io import IoError
+from chipleap.chip.iotiming import IoTimingError
 from chipleap.chip.merge import MergeError
 from chipleap.chip.netlist import NetlistError
 from chipleap.chip.pdn import PdnError
@@ -30,18 +31,21 @@ from chipleap.chip.run import ToolError, klayout, plain, private_dir, python_wit
 from chipleap.macro import layer
 from chipleap.macro.layer import MacroImportError
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, parse_toml
-from chipleap.rtl import builddir
+from chipleap.rtl import builddir, macros
+from chipleap.rtl.openroad import OpenroadError
 from chipleap.rtl.pnr import verilog_config
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS
 from chipleap.verify.pnr import PnrError, parse
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import librelane, yosys
+from chipleap.verify.tools import librelane, openroad, yosys
 
 SCRIPTS = Path(__file__).resolve().parent / "klayout"
 BOND_SIZE = "70u"  # IHP's bondpad pcell, square
 SEAL_EDGE_UM = 25  # the seal ring pcell's edge box on each side, outside its w and l
 ERRORS = (
+    IoTimingError,
+    OpenroadError,
     MacroImportError,
     MergeError,
     NetlistError,
@@ -142,6 +146,25 @@ class Prepared:
     pdk_spec: str
 
 
+def import_macros(project: Project, pdk: Path, spec: str, flow_dir: Path) -> layer.Imported:
+    """The chip's macro packages, copied, checked against ``spec`` with the libraries of
+    ``pdk`` and converted. Without the libraries the step stops (MacroImportError): a
+    package's standard cells could not be shown to be the PDK's own. After LibreLane
+    runs, ``chipleap.chip.merge`` compares them again with the standard cells it
+    merged, under its own PDK_ROOT."""
+    chip = _cfg(project)
+    libs = layer.pdk_libs(pdk)
+    return layer.import_packages(
+        [(m.instance, m.package) for m in chip.macros],
+        project.files_in,
+        project.read,
+        flow_dir,
+        spec,
+        layer.reserved_names(pdk, (chip.name, project.top)),
+        libs=libs,
+    )
+
+
 def prepare(project: Project, pdk: Path) -> Prepared:
     """Everything before LibreLane runs: the ports, the macros, the nets, the floorplan
     and the files of the flow."""
@@ -150,19 +173,11 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     cells = io.read_lef(io.lef_path(pdk).read_text())
     commit = io.pdk_commit(pdk)
     spec = f"ihp-sg13g2@{commit}" if commit else "ihp-sg13g2"
+    flow_dir = builddir.work_dir(work, "flow")
+    imported = import_macros(project, pdk, spec, flow_dir)
     ports_dir = builddir.work_dir(work, "ports")
     ports = netlist.core_ports(project, ports_dir)
-    flow_dir = builddir.work_dir(work, "flow")
     verilog = verilog_config(project, flow_dir)
-    reserved = layer.reserved_names(pdk, (chip.name, project.top))
-    imported = layer.import_packages(
-        [(m.instance, m.package) for m in chip.macros],
-        project.files_in,
-        project.read,
-        flow_dir,
-        spec,
-        reserved,
-    )
     clocks = {c.port: c.period_ns for c in project.clocks}
     binding = netlist.bind(chip, ports, imported.views, imported.cells, clocks, project.top)
     sizes = {
@@ -172,12 +187,11 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     plan = floorplan.plan(chip, cells, sizes, binding.directions)
     if any(not c.cell for c in plan.ring):
         raise NetlistError("a pad has no IO cell")
-    merge.check_modules(
-        netlist.core_modules(ports_dir),
-        chip.name,
-        sorted({c.cell for c in plan.ring}),
-        imported.views,
-    )
+    try:
+        core = macros.rtl_modules(project, builddir.work_dir(work, "modules"))
+    except macros.MacroStepError as exc:
+        raise NetlistError(str(exc)) from None
+    merge.check_modules(core, imported.views, chip.name, sorted({c.cell for c in plan.ring}))
     flow.write_io(flow_dir, pdk, cells, sorted({c.cell for c in plan.ring}))
     pad = cells[io.PAD_CELLS["in"]]
     if f"dir::src/{chip.name}.v" in verilog.get("VERILOG_FILES", []):
@@ -193,7 +207,7 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     )
     builddir.write_text(flow_dir, "macro_placement.cfg", netlist.placement(plan))
     placed = {m.inst: (m, imported.views[m.cell]) for m in plan.macros}
-    builddir.write_text(flow_dir, "pdn.tcl", pdn.script(placed))
+    builddir.write_text(flow_dir, "pdn.tcl", pdn.script(placed, plan.core[1]))
     clk = project.fastest_clock
     cfg = flow.config(
         chip,
@@ -446,6 +460,18 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
     clk = project.fastest_clock
     check_metrics(metrics)
     r = parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, outs["gds"])
+    io_timing = iotiming.run(
+        p.work,
+        run_dir,
+        p.pdk,
+        name,
+        p.binding,
+        {s.cell.inst: s.cell.cell for s in p.plan.pads if s.pad.kind == "signal"},
+        {c.port: c.period_ns for c in project.clocks},
+        chip.io,
+        [(v.lef, v.lib) for v in p.imported.views.values()],
+        p.flow_dir / "io" / f"{io.IO}_chip.lef",
+    )
     nofill, final = finish(p, outs["gds"], name)
     lvs_data = lvs(p, nofill, outs, name)
     drc_result = drc(p, final, name)
@@ -455,7 +481,7 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
     builddir.write_text(p.work, f"{name}.bondmap.csv", csv_text)
     builddir.write_text(p.work, f"{name}.bondmap.json", checks.dump(rows))
     data: dict[str, Any] = {
-        "tool": "LibreLane, KLayout and IHP's DRC and LVS decks",
+        "tool": "LibreLane, OpenSTA, KLayout and IHP's DRC and LVS decks",
         "name": name,
         "pdk": p.pdk_spec,
         "die_um": list(p.plan.die),
@@ -476,8 +502,11 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
         "merged_names": merged,
         "route_drc_errors": r.drc_errors,
         "antenna_nets": r.antenna_nets,
+        # LibreLane's, at the core's side of the pads
         "setup_slack_ns": round(r.setup_slack_ns, 3),
         "hold_slack_ns": round(r.hold_slack_ns, 3),
+        # ChipLeap's, at the chip's ports through the pads
+        "io_timing": io_timing.to_dict(),
         "cells": r.cells,
         "lvs": lvs_data,
         "drc": {
@@ -516,6 +545,16 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
         problems.append(
             f"timing missed (setup {data['setup_slack_ns']:g} ns, hold {data['hold_slack_ns']:g} ns)"
         )
+    io_t = data.get("io_timing")
+    if io_t is not None:
+        for c in io_t["corners"]:
+            for check in ("setup", "hold"):
+                v = c[f"{check}_slack_ns"]
+                if v is not None and v < 0:
+                    problems.append(
+                        f"{check} missed at the ports at the {c['corner']} corner ({v:g} ns)"
+                    )
+        problems += [f"not timed: {u}" for u in io_t["untimed_pads"]]
     w, h = (
         data["outline_um"][2] - data["outline_um"][0],
         data["outline_um"][3] - data["outline_um"][1],
@@ -526,9 +565,14 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
     )
     if problems:
         return False, f"{head}; " + "; ".join(problems)
+    timing = ""
+    if io_t is not None:
+        slow = next((c for c in io_t["corners"] if c["corner"] == "slow"), None)
+        if slow is not None and slow["setup_slack_ns"] is not None:
+            timing = f", timing met through the pads ({slow['setup_slack_ns']:+.3f} ns at the slow corner)"
     return True, (
         f"{head}; LVS clean on IHP's deck, DRC clean on IHP's deck (density included, "
-        "recommended rules not checked), supplies reach the ring, precheck passed"
+        f"recommended rules not checked), supplies reach the ring, precheck passed{timing}"
     )
 
 
@@ -542,7 +586,12 @@ def chip(project: Project) -> StepResult:
     pdk = io.pdk_dir()
     if pdk is None:
         return StepResult("chip", "skipped", missing_pdk())
-    for label, tool in (("Yosys", yosys()), ("LibreLane", librelane()), ("KLayout", klayout())):
+    for label, tool in (
+        ("Yosys", yosys()),
+        ("LibreLane", librelane()),
+        ("KLayout", klayout()),
+        ("OpenROAD", openroad()),
+    ):
         if not tool.found:
             return StepResult("chip", "skipped", tool.missing(label))
     if python_with_klayout() is None:

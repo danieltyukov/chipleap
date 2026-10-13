@@ -16,9 +16,11 @@ import json
 import os
 import random
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from chipleap.gen import banks
 from chipleap.gen.rtl import (
     accel_sv,
     axi_sv,
@@ -28,6 +30,7 @@ from chipleap.gen.rtl import (
     testbench_cpp,
 )
 from chipleap.hw.design import Accel
+from chipleap.macro.sram import Sram, model
 from chipleap.model.accel import Bandwidth, k_align, plan_tiles, simulate_job
 from chipleap.verify.tools import clean_env, verilator
 
@@ -77,15 +80,31 @@ def cache_dir() -> Path:
 
 
 def build(
-    accel: Accel, workdir: Path | None = None, jobs: int = 0, platform: str = "xheep"
+    accel: Accel,
+    workdir: Path | None = None,
+    jobs: int = 0,
+    platform: str = "xheep",
+    srams: Sequence[Sram] | None = None,
 ) -> Path:
-    """Build the Verilator model for ``accel`` (cached by parameters) and return the binary."""
+    """Build the Verilator model for ``accel`` (cached by parameters) and return the binary.
+    With ``srams``, the buffers are banks of those SRAM macros (``chipleap.gen.banks``),
+    each simulated by ChipLeap's model of its ports."""
     tool = verilator()
     if not tool.found:
         raise SimError("Verilator is not installed; see docs/verification.md")
     p = rtl_params(accel)
     axi = platform == "standalone"
     top = "chipleap_accel_axi" if axi else "chipleap_accel"
+    params = p.verilator_args()
+    macro_rtl: dict[str, str] = {}
+    if srams is not None:
+        if axi:
+            raise SimError("SRAM banks are simulated on X-HEEP's interfaces only")
+        plan = banks.plan(accel, srams)
+        macro_rtl[f"{banks.TOP}.v"] = banks.top_sv(plan)
+        macro_rtl |= {f"{s.cell}.v": model(s) for s in plan.cells()}
+        # The generated top fixes the parameters; the class keeps the test bench's name.
+        top, params = banks.TOP, ["--prefix", "Vchipleap_accel"]
     tb_name, tb_text = (
         ("tb_chipleap_axi.cpp", testbench_axi_cpp())
         if axi
@@ -98,10 +117,11 @@ def build(
     rtl = {"chipleap_accel.sv": accel_sv()}
     if axi:
         rtl["chipleap_accel_axi.sv"] = axi_sv()
-    sources = "".join(rtl.values()) + tb_text + header + " ".join(p.verilator_args())
+    rtl |= macro_rtl
+    sources = "".join(rtl.values()) + tb_text + header + " ".join(params)
     digest = hashlib.sha256(sources.encode()).hexdigest()[:16]
     root = workdir or (cache_dir() / f"sim-{digest}")
-    binary = root / "obj_dir" / f"V{top}"
+    binary = root / "obj_dir" / ("Vchipleap_accel" if macro_rtl else f"V{top}")
     if binary.exists():
         return binary
     root.mkdir(parents=True, exist_ok=True)
@@ -125,7 +145,7 @@ def build(
         "-Wno-style",
         "--top-module",
         top,
-        *p.verilator_args(),
+        *params,
         "-CFLAGS",
         f"-O2 -I{root}",
         *rtl,
@@ -190,8 +210,9 @@ def run(
     binary: Path | None = None,
     timeout: float = 600,
     platform: str = "xheep",
+    srams: Sequence[Sram] | None = None,
 ) -> list[CaseResult]:
-    exe = binary or build(accel, platform=platform)
+    exe = binary or build(accel, platform=platform, srams=srams)
     stdin = "\n".join(c.line() for c in cases) + "\n"
     try:
         out = subprocess.run(

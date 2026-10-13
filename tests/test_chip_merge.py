@@ -38,8 +38,9 @@ def view(cell: str) -> MacroView:
 
 
 def test_a_macro_named_like_a_module_of_the_core_is_refused():
-    modules = merge.yosys_modules("3 modules:\n  $paramod\\fifo\\DEPTH=4\n  top\n  \\esc\n")
-    assert modules == ["fifo", "top", "esc"]
+    listed = "top\ntop/w\n$paramod\\fifo\\DEPTH=4\nfifo/q\n\\esc\nodd/name\nodd/name/w\n"
+    modules = merge.listed_modules(listed)
+    assert modules == ["top", "fifo", "esc"]
     # Left unchecked, the chip top instantiates fifo for the macro, and the core's RTL
     # defines a module fifo: synthesis binds the instance to the RTL, not the macro.
     pads = {"south": (Pad("signal", "a"), Pad("vdd"), Pad("vss"), Pad("iovdd"), Pad("iovss"))}
@@ -52,8 +53,19 @@ def test_a_macro_named_like_a_module_of_the_core_is_refused():
     plan = floorplan.plan(cfg, io.read_lef(io_lef()), {"m": ("fifo", 20.0, 40.0)}, b.directions)
     assert "  fifo m (.a(a_core));" in chip_top(cfg, b, plan, "top", {})
     with pytest.raises(MergeError, match="module fifo is defined by macro fifo"):
-        merge.check_modules(modules, "c", ["sg13g2_IOPadIn"], {"fifo": view("fifo")})
-    merge.check_modules(modules, "c", ["sg13g2_IOPadIn"], {"strongarm": view("strongarm")})
+        merge.check_modules(modules, {"fifo": view("fifo")}, "c", ["sg13g2_IOPadIn"])
+    merge.check_modules(modules, {"strongarm": view("strongarm")}, "c", ["sg13g2_IOPadIn"])
+    # Without a chip top or IO cells, as an RTL project with macros checks its modules.
+    with pytest.raises(MergeError, match="module fifo is defined by macro fifo"):
+        merge.check_modules(modules, ["fifo"])
+    merge.check_modules(modules, ["strongarm"])
+
+
+def test_a_module_list_too_long_is_refused(monkeypatch):
+    monkeypatch.setattr(merge, "MODULES_MAX", 3)
+    assert merge.listed_modules("a\nb\nc\n") == ["a", "b", "c"]
+    with pytest.raises(MergeError, match="more than 3 modules"):
+        merge.listed_modules("a\nb\nc\nd\n")
 
 
 # Layout and netlist
@@ -178,11 +190,11 @@ def test_a_pdk_library_too_large_to_read_is_an_error(tmp_path, monkeypatch):
     pdk = fake_pdk(tmp_path)
     # Read whole, the IO library's LEF reserves its cells.
     assert "sg13g2_IOPadIn" in layer.reserved_names(pdk)
-    layer._pdk_names.cache_clear()
+    layer._pdk_libs.cache_clear()
     monkeypatch.setattr(layer, "NAMES_FILE_MAX", 100)
     with pytest.raises(MacroImportError, match="larger than ChipLeap reads"):
         layer.reserved_names(pdk)
-    layer._pdk_names.cache_clear()
+    layer._pdk_libs.cache_clear()
     with pytest.raises(MacroImportError, match=r"no libs\.ref"):
         layer.reserved_names(tmp_path / "nowhere")
 
@@ -219,6 +231,7 @@ def test_a_package_is_always_a_package(tmp_path):
         root / "build",
         "ihp-sg13g2",
         layer.Reserved(frozenset()),
+        libs=layer.PdkLibs(),
     ).views["strongarm"]
     assert v.source == "package" and v.supply_hookup and v.report is not None
     from chipleap.chip.config import ChipMacro as M

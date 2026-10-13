@@ -5,21 +5,29 @@ routing and timing repair, KLayout with IHP's rule deck for design-rule checks, 
 for layout versus schematic, and OpenSTA for timing at the design's clock. The result is a GDS that
 passes the checks a foundry shuttle asks for.
 
-As in synthesis, the activation and weight buffers are SRAM macros in silicon. Placing
-them as flip-flop arrays would measure the wrong thing, so the layout holds the
-accelerator's logic with 16-word buffers; the macros' area comes from their liberty files.
+The activation and weight buffers are SRAM macros in silicon. When the build can have
+them without a change to its schedule (``chipleap.gen.banks``) and the IHP PDK ChipLeap
+uses is installed, the layout has them: IHP's own macros at the design's buffer sizes, in
+rows above and below the logic (``chipleap.macro.place``), each with its halo and the
+macro power grid (``chipleap.macro.grid``), timed at every corner from their liberty and
+checked by LVS as boxes with their pins. Otherwise the layout holds the accelerator's
+logic with 16-word flop buffers, and the result says why.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from chipleap.chip import io
+from chipleap.gen import banks
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
+from chipleap.hw.tech import accel_logic_kge, get_tech
+from chipleap.macro import grid, place, sram
 from chipleap.verify import launch
 from chipleap.verify.synth import _sv2v
 from chipleap.verify.tools import librelane
@@ -48,6 +56,9 @@ class PnrResult:
     power_mw: float
     gds: Path | None
     metrics: dict[str, Any] = field(default_factory=dict)
+    macros: tuple[tuple[str, str], ...] = ()  # (instance, cell) of each SRAM macro placed
+    macro_um2: float = 0.0
+    buffers: str = ""  # what the buffers are in the layout, and why when they are flops
 
     @property
     def clean(self) -> bool:
@@ -198,7 +209,50 @@ def run_librelane(
     return json.loads(metrics_file.read_text()), gds
 
 
-def place_and_route(accel: Accel, clock_mhz: float, workdir: Path) -> PnrResult:
+def sram_config(
+    accel: Accel,
+    clock_mhz: float,
+    plan: place.Floorplan,
+    macros: dict[str, Any],
+) -> dict[str, Any]:
+    """The LibreLane configuration for ``accel`` with its buffers in SRAM macros: the
+    generated top, the floorplan ChipLeap sized, the macros and their power grid."""
+    return {
+        "DESIGN_NAME": banks.TOP,
+        "VERILOG_FILES": ["dir::src/chipleap_accel.v", f"dir::src/{banks.TOP}.v"],
+        "CLOCK_PORT": "clk_i",
+        "CLOCK_PERIOD": round(1000.0 / clock_mhz, 3),
+        "FP_SIZING": "absolute",
+        "DIE_AREA": [0, 0, *plan.die],
+        "CORE_AREA": list(plan.core),
+        "PL_TARGET_DENSITY_PCT": 55,
+        "MACROS": macros,
+        "PDN_CFG": "dir::pdn.tcl",
+        "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
+        "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
+        **signoff(),
+    }
+
+
+def model_cell_um2(accel: Accel) -> float:
+    """The model's standard-cell area for the accelerator's logic on SG13G2."""
+    ihp = get_tech("ihp-sg13g2")
+    return accel_logic_kge(accel.dataflow, accel.rows, accel.cols, accel.ports) * 1000 * ihp.ge_um2
+
+
+def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
+    """Why the layout of ``accel`` keeps flop buffers, or None when it takes macros."""
+    reason = banks.unsupported(accel)
+    if reason is None and pdk is None:
+        reason = f"no IHP PDK with its SRAM macros ({io.PDK_ENV})"
+    if reason is None and pdk is not None and not sram.catalog(pdk):
+        reason = f"the PDK at {pdk} has no single-port SRAM macros"
+    return reason
+
+
+def place_and_route(
+    accel: Accel, clock_mhz: float, workdir: Path, pdk: Path | None = None
+) -> PnrResult:
     if not librelane().found:
         raise PnrError("LibreLane is not installed")
     workdir.mkdir(parents=True, exist_ok=True)
@@ -206,8 +260,54 @@ def place_and_route(accel: Accel, clock_mhz: float, workdir: Path) -> PnrResult:
     src.mkdir(exist_ok=True)
     (src / "chipleap_accel.sv").write_text(accel_sv())
     _sv2v(src / "chipleap_accel.sv", src / "chipleap_accel.v")
-    metrics, gds = run_librelane(workdir, config(accel, clock_mhz))
-    return parse(metrics, clock_mhz, gds)
+    pdk = pdk or io.pdk_dir()
+    reason = sram_reason(accel, pdk)
+    if reason is not None or pdk is None:
+        metrics, gds = run_librelane(workdir, config(accel, clock_mhz))
+        result = parse(metrics, clock_mhz, gds)
+        return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
+    cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
+    metrics, gds = run_librelane(workdir, cfg)
+    from chipleap.rtl.pnr import check_merged
+
+    check_merged(workdir / "runs" / "chipleap", workdir, banks.TOP)
+    result = parse(metrics, clock_mhz, gds)
+    counts: dict[str, int] = {}
+    for _, cell in plan.instances():
+        counts[cell] = counts.get(cell, 0) + 1
+    return replace(
+        result,
+        macros=tuple(plan.instances()),
+        macro_um2=plan.area_um2,
+        buffers="SRAM macros: " + ", ".join(f"{n} x {c}" for c, n in sorted(counts.items())),
+    )
+
+
+def sram_flow(
+    accel: Accel, clock_mhz: float, workdir: Path, pdk: Path
+) -> tuple[dict[str, Any], banks.Banks]:
+    """The files of a macro-backed run in ``workdir`` (the generated top, the macros'
+    views, the power grid) and its LibreLane configuration; the RTL is in ``src``."""
+    plan = banks.plan(accel, sram.catalog(pdk))
+    views = {s.cell: sram.views(pdk, s.cell, workdir) for s in plan.cells()}
+    cells = dict(plan.instances())
+    fp = place.rows(
+        [
+            place.Macro(inst, views[cell].view.width, views[cell].view.height)
+            for inst, cell in plan.instances()
+        ],
+        model_cell_um2(accel),
+    )
+    (workdir / "src" / f"{banks.TOP}.v").write_text(banks.top_sv(plan))
+    placements = [
+        grid.Placement(p.instance, views[cells[p.instance]].view, p.x, p.y, p.orient)
+        for p in fp.macros
+    ]
+    (workdir / "pdn.tcl").write_text(grid.core_script(placements, fp.core[1]))
+    macros, _ = sram.librelane_macros(
+        views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
+    )
+    return sram_config(accel, clock_mhz, fp, macros), plan
 
 
 def _timed_out(exc: launch.TimedOut, log: Path) -> str:

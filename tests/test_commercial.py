@@ -339,6 +339,10 @@ def test_parameters_are_written_into_the_rtl():
     sv = csynth.specialize(accel_sv(), csynth.run_params(ACCEL, 8))
     assert "parameter int unsigned ROWS = 1" in sv
     assert "parameter int unsigned ABUF_WORDS = 8" in sv
+    # The top, chipleap_accel, hands its own values to the core: both carry them.
+    top = sv[sv.index("module chipleap_accel #(") :]
+    assert "parameter int unsigned ROWS = 1" in top and "ABUF_WORDS = 8" in top
+    assert "parameter int unsigned ROWS = 8" not in sv
     with pytest.raises(csynth.SynthError, match="NOPE"):
         csynth.specialize(accel_sv(), {"NOPE": 1})
 

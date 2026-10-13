@@ -43,12 +43,32 @@ class ChipMacro:
 
 
 @dataclass(frozen=True)
+class IoBudget:
+    """The world outside the pads, for timing at the chip's ports. ``None`` delays are
+    a fraction of the first clock's period (``DEFAULT_IO_DELAY_PCT``)."""
+
+    input_delay_ns: float | None = (
+        None  # after the clock edge at the clock pad, data reaches an input pad
+    )
+    output_delay_ns: float | None = None  # before the next clock edge, an output must be at its pad
+    output_load_pf: float = 5.0  # what each output pad drives: bond wire, package pin, board trace
+    input_transition_ns: float = 1.0  # the edge rate of the signals arriving at the input pads
+
+
+DEFAULT_IO_DELAY_PCT = 20.0  # LibreLane's IO_DELAY_CONSTRAINT, for the core alone
+IO_DELAY_MAX_NS = 1000.0
+IO_LOAD_MAX_PF = 100.0
+IO_TRANSITION_MAX_NS = 10.0
+
+
+@dataclass(frozen=True)
 class ChipConfig:
     name: str
     pads: dict[str, tuple[Pad, ...]]  # side -> pads in increasing x (south, north) or y
     macros: tuple[ChipMacro, ...] = ()
     pad_pitch_um: float = 100.0
     core_um: tuple[float, float] | None = None
+    io: IoBudget = field(default_factory=IoBudget)
 
     def all_pads(self) -> list[tuple[str, int, Pad]]:
         return [(side, i, p) for side in SIDES for i, p in enumerate(self.pads.get(side, ()))]

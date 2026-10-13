@@ -191,3 +191,43 @@ def _gds(cell: str) -> bytes:
         + rec(0x07, 0)
         + rec(0x04, 0)
     )
+
+
+def sram_1p(
+    pdk: Path, words: int, bits: int, size: tuple[float, float], bm: bool = True, mux: int = 2
+) -> str:
+    """A stand-in for one of IHP's 1P macros, named as the PDK names them, with every view
+    and every port of the real one (BIST and bit mask with ``bm``)."""
+    from chipleap.macro.sram import CORNERS, Sram, ports
+
+    cell = f"RM_IHPSG13_1P_{words}x{bits}_c{mux}" + ("_bm_bist" if bm else "")
+    lib = pdk / "libs.ref" / "sg13g2_sram"
+    for sub in ("lef", "gds", "lib", "cdl", "verilog"):
+        (lib / sub).mkdir(parents=True, exist_ok=True)
+    w, h = size
+    pins = [
+        _pin("VDD!", "INOUT", "POWER", [[("Metal4", (10.0, 0.0, 12.81, 38.8))]]),
+        _pin("VDDARRAY!", "INOUT", "POWER", [[("Metal4", (20.0, 38.8, 22.81, h))]]),
+        _pin("VSS!", "INOUT", "GROUND", [[("Metal4", (30.0, 0.0, 32.81, h))]]),
+    ]
+    x = 40.0
+    for name, direction, width in ports(Sram(cell, words, bits, w, h, bm)):
+        for bit in range(max(width, 1)):
+            pin = f"{name}[{bit}]" if width else name
+            rect = ("Metal2", (x, 0.0, x + 0.2, 1.0))
+            pins.append(_pin(pin, direction.upper(), "SIGNAL", [[rect]]))
+            x += 0.5
+    (lib / "lef" / f"{cell}.lef").write_text(
+        "\n".join(
+            [f"MACRO {cell}", "  CLASS BLOCK ;", f"  SIZE {w} BY {h} ;", *pins, f"END {cell}"]
+        )
+        + "\n"
+    )
+    (lib / "gds" / f"{cell}.gds").write_bytes(_gds(cell))
+    for corner in CORNERS.values():
+        (lib / "lib" / f"{cell}_{corner}.lib").write_text(f"library ({cell}_{corner}) {{ }}\n")
+    (lib / "cdl" / f"{cell}.cdl").write_text(f".SUBCKT {cell} A_CLK VDD! VSS!\n.ENDS\n")
+    (lib / "verilog" / f"{cell}.v").write_text(f"module {cell} ();\nendmodule\n")
+    core = "RM_IHPSG13_1P_core_behavioral" + ("_bm_bist" if bm else "")
+    (lib / "verilog" / f"{core}.v").write_text(f"module {core} ();\nendmodule\n")
+    return cell

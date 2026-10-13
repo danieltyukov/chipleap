@@ -1,0 +1,66 @@
+CHIPLEAP-WORST setup 0.9706
+CHIPLEAP-WORST hold 0.5974
+CHIPLEAP-PATHS begin pad_to_core max
+Startpoint: pad_rst_ni (input port clocked by clk_i)
+Endpoint: _274_ (recovery check against rising-edge clock clk_i)
+Path Group: asynchronous
+Path Type: max
+
+    Delay      Time   Description
+-------------------------------------------------------------
+   0.0000    0.0000   clock clk_i (rise edge)
+   0.0000    0.0000   clock network delay (propagated)
+   2.0000    2.0000 ^ input external delay
+   0.0000    2.0000 ^ pad_rst_ni (inout)
+   0.0002    2.0002 ^ pad_south_6/pad (sg13g2_IOPadIn)
+   0.4361    2.4363 ^ pad_south_6/p2c (sg13g2_IOPadIn)
+   0.2609    2.6972 ^ _274_/RESET_B (sg13g2_dfrbpq_1)
+             2.6972   data arrival time
+
+  10.0000   10.0000   clock clk_i (rise edge)
+   0.7523   10.7523   clock network delay (propagated)
+  -0.2500   10.5023   clock uncertainty
+   0.0000   10.5023   clock reconvergence pessimism
+            10.5023 ^ _274_/CLK (sg13g2_dfrbpq_1)
+  -0.5203    9.9821   library recovery time
+             9.9821   data required time
+-------------------------------------------------------------
+             9.9821   data required time
+            -2.6972   data arrival time
+-------------------------------------------------------------
+             7.2848   slack (MET)
+
+CHIPLEAP-PATHS end pad_to_core max
+CHIPLEAP-PATHS begin core_to_pad max
+Startpoint: _262_ (rising edge-triggered flip-flop clocked by clk_i)
+Endpoint: pad_rx_data_o_7 (output port clocked by clk_i)
+Path Group: clk_i
+Path Type: max
+
+    Delay      Time   Description
+-------------------------------------------------------------
+   0.0000    0.0000   clock clk_i (rise edge)
+   0.7701    0.7701   clock network delay (propagated)
+   0.0000    0.7701 ^ _262_/CLK (sg13g2_dfrbpq_2)
+   0.4801    1.2503 ^ _262_/Q (sg13g2_dfrbpq_2)
+   0.0181    1.2684 ^ pad_west_0/c2p (sg13g2_IOPadOut4mA)
+   5.4083    6.6767 ^ pad_west_0/pad (sg13g2_IOPadOut4mA)
+   0.1028    6.7794 ^ pad_rx_data_o_7 (inout)
+             6.7794   data arrival time
+
+  10.0000   10.0000   clock clk_i (rise edge)
+   0.0000   10.0000   clock network delay (propagated)
+  -0.2500    9.7500   clock uncertainty
+   0.0000    9.7500   clock reconvergence pessimism
+  -2.0000    7.7500   output external delay
+             7.7500   data required time
+-------------------------------------------------------------
+             7.7500   data required time
+            -6.7794   data arrival time
+-------------------------------------------------------------
+             0.9706   slack (MET)
+
+CHIPLEAP-PATHS end core_to_pad max
+CHIPLEAP-PATHS begin pad_to_pad max
+No paths found.
+CHIPLEAP-PATHS end pad_to_pad max

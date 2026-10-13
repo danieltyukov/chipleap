@@ -12,7 +12,9 @@ defined twice, unless both definitions come from the same PDK file or are identi
 Three merges are checked: the Verilog modules (the core's own, the macros', the IO
 cells' and the chip top) before LibreLane runs, and after it the GDS structures and the
 SPICE subcircuits (case folded, as SPICE reads them), with the cells the stream-out
-itself makes (the chip top and its vias) counted as a source of their own.
+itself makes (the chip top and its vias) counted as a source of their own. An RTL
+project with macros (``chipleap.rtl.macros``) goes through the same checks, its top in
+the chip top's place and without IO cells.
 """
 
 from __future__ import annotations
@@ -25,7 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.macro.layer import GDS_NAME, MacroView, gds_raw_name, gds_records
+from chipleap.macro.gds import GdsError, structure_identities
+from chipleap.macro.layer import GDS_NAME
 
 FILE_MAX = 1 << 30
 MODULES_MAX = 100_000
@@ -72,25 +75,21 @@ def _read(path: Path) -> bytes:
 
 
 def gds_names(data: bytes) -> dict[str, str]:
-    """Each structure of a GDS stream with a digest of its records (its name and
-    elements, not the dates in its header). A name that is not plain is an error."""
+    """Each structure of a GDS stream with its identity (its records and the file's
+    units, not the dates in its header), as macro/v1 defines identical structures
+    (``chipleap.macro.gds.structure_identities``). A name that is not plain is an error,
+    and so is one defined twice, differently, in one file."""
     out: dict[str, str] = {}
-    current = ""
-    h = hashlib.sha256()
-    for rtype, a, b in gds_records(data):
-        if rtype == 0x06:  # STRNAME
-            raw = gds_raw_name(data[a:b])
+    try:
+        for raw, digest in structure_identities(data):
             if not GDS_NAME.fullmatch(raw):
                 raise MergeError(f"GDS cell name {raw[:40]!r} is not plain")
             current = raw.decode()
-            h = hashlib.sha256()
-        if current:
-            h.update(data[a - 4 : b])
-        if rtype == 0x07 and current:  # ENDSTR
-            if current in out and out[current] != h.hexdigest():
+            if current in out and out[current] != digest:
                 raise MergeError(f"GDS cell {current} is defined twice in one file")
-            out[current] = h.hexdigest()
-            current = ""
+            out[current] = digest
+    except GdsError as exc:
+        raise MergeError(f"GDS: {exc}") from None
     return out
 
 
@@ -118,29 +117,43 @@ def spice_source(label: str, path: Path) -> Source:
 # Verilog, before LibreLane
 
 
-def yosys_modules(text: str) -> list[str]:
-    """Module names from Yosys's ``ls``, as the source declares them: a parameterised
-    copy (``$paramod\\uart_tx\\W=4``) is its module."""
-    names = []
-    for line in text.splitlines()[1 : MODULES_MAX + 1]:
+# The Yosys command that lists every module of the sources it has read, black boxes and
+# empty modules (which read_verilog makes black boxes) included, and every member of
+# each as ``module/member``. It runs before ``hierarchy``, which removes the modules the
+# top does not instantiate: one of those named like a macro would still replace the
+# macro's black box where LibreLane reads both.
+LIST_MODULES = "select -list =*"
+
+
+def listed_modules(text: str) -> list[str]:
+    """Module names from ``LIST_MODULES``, as the source declares them. A member's line
+    has a slash; a module whose name has one is left out, and could not be named like a
+    macro, whose cell name is a plain identifier."""
+    names: list[str] = []
+    for line in text.splitlines():
         name = line.strip()
         if name.startswith("$paramod\\"):
             name = name.split("\\")[1]
         name = name.lstrip("\\")
-        if name and not name.startswith("$"):
+        if name and "/" not in name and not name.startswith("$"):
             names.append(name)
+            if len(names) > MODULES_MAX:
+                raise MergeError(f"the RTL has more than {MODULES_MAX} modules")
     return names
 
 
 def check_modules(
-    core: Iterable[str], chip_name: str, io_cells: Iterable[str], views: Mapping[str, MacroView]
+    core: Iterable[str],
+    views: Iterable[str],
+    chip_name: str = "",
+    io_cells: Iterable[str] = (),
 ) -> None:
-    """The chip top's modules: the core's, the chip's own, the IO cells' and each
-    macro's. A macro named like a module of the core would be bound to the core's RTL
-    instead of the macro, silently."""
+    """The modules of the design LibreLane synthesizes: the core's RTL, each macro's
+    (``views``, by cell), and for a chip the chip top and the IO cells. A macro named
+    like a module of the RTL would be bound to the RTL instead of the macro, silently."""
     sources = [
         Source("the core's RTL", dict.fromkeys(dict.fromkeys(core), "")),
-        Source("the chip top", {chip_name: ""}),
+        *([Source("the chip top", {chip_name: ""})] if chip_name else []),
         Source("the IO library", dict.fromkeys(io_cells, "")),
         *(Source(f"macro {cell}", {cell: ""}) for cell in views),
     ]

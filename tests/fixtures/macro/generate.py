@@ -11,7 +11,8 @@ both validators report for each case.
 
 Everything here is synthetic: rectangles on documented IHP SG13G2 layer numbers
 (from the PDK's layer table), hand-written LEF, liberty, Verilog and SPICE, invented
-spec values and evidence that says no check was run. No PDK file is copied.
+spec values and evidence that says no check was run. No PDK file is copied: the
+stand-in PDK under pdk/ holds one made-up cell under the name of an IHP standard cell.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import shutil
 import struct
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 PDK_COMMIT = "22f2a25f1734796de3debbbf29cf697cbbc54081"
@@ -80,11 +82,16 @@ def _str(s: str) -> bytes:
 
 
 DATE = _i16(2026, 10, 11, 0, 0, 0) * 2
+# The stand-in PDK's library was written on another day: the dates in BGNSTR are not
+# compared when a package's copy of a PDK cell is.
+PDK_DATE = _i16(2025, 3, 4, 5, 6, 7) * 2
 
 
 class Cell:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, date: bytes = DATE, strclass: int | None = None) -> None:
         self.name = name
+        self.date = date
+        self.strclass = strclass
         self.body = b""
 
     def rect(self, layer: tuple[int, int], x0: int, y0: int, x1: int, y1: int) -> Cell:
@@ -143,19 +150,21 @@ class Cell:
 
     def encode(self) -> bytes:
         return (
-            _rec(0x05, 0x02, DATE)
+            _rec(0x05, 0x02, self.date)
             + _rec(0x06, 0x06, _str(self.name))
+            + (b"" if self.strclass is None else _rec(0x34, 0x01, struct.pack(">H", self.strclass)))
             + self.body
             + _rec(0x07, 0x00)
         )
 
 
-def gds(lib: str, cells: list[Cell]) -> bytes:
+def gds(lib: str, cells: list[Cell], dbu_m: float = 1e-9) -> bytes:
+    """A library of ``cells``; a database unit is ``dbu_m`` metres."""
     out = (
         _rec(0x00, 0x02, _i16(600))
         + _rec(0x01, 0x02, DATE)
         + _rec(0x02, 0x06, _str(lib))
-        + _rec(0x03, 0x05, _real8(1e-3) + _real8(1e-9))
+        + _rec(0x03, 0x05, _real8(dbu_m * 1e6) + _real8(dbu_m))
     )
     for c in cells:
         out += c.encode()
@@ -462,10 +471,38 @@ measured = {{ tt = 20.1e-6, ss = 18.7e-6, ff = 22.4e-6 }}
 # The digital macro: a 2-bit counter with enable and active-low reset, 20 x 10 um.
 
 
-def counter_gds(top: str = "tiny_counter", hierarchy: str = "") -> bytes:
+def std_inv(date: bytes = DATE, poly_x: int = 430, strclass: int | None = None) -> Cell:
+    """A made-up cell under the name of IHP's inverter, as a hardened block holds the
+    standard cells it uses; the stand-in PDK holds the same one, written on PDK_DATE."""
+    inv = Cell("sg13g2_inv_1", date, strclass)
+    inv.rect(ACTIV, 100, 300, 860, 3480).rect(GATPOLY, poly_x, 100, poly_x + 130, 3680)
+    return inv.rect(METAL1, 0, -240, 960, 240).rect(METAL1, 0, 3540, 960, 4020)
+
+
+def std_buf(date: bytes = DATE) -> Cell:
+    """A made-up buffer that places the inverter twice: a standard cell is the PDK's own
+    only when the cells it places are too."""
+    buf = Cell("sg13g2_buf_1", date).sref("sg13g2_inv_1", 0, 0).sref("sg13g2_inv_1", 960, 0)
+    return buf.rect(METAL1, 0, -240, 1920, 240).rect(METAL1, 0, 3540, 1920, 4020)
+
+
+def io_corner(date: bytes = DATE) -> Cell:
+    """A made-up cell under the name of IHP's IO corner: a cell of the PDK, but not a
+    standard cell, so no package may hold it."""
+    return Cell("sg13g2_Corner", date).rect(METAL1, 0, 0, 1000, 1000)
+
+
+def counter_gds(
+    top: str = "tiny_counter",
+    hierarchy: str = "",
+    tap_name: str = "tiny_counter_tap",
+    std: tuple[Cell, ...] = (),
+    dbu_m: float = 1e-9,
+) -> bytes:
     """The counter's layout; ``hierarchy`` adds references the validators must refuse
-    or measure without visiting every instance."""
-    tap = Cell("tiny_counter_tap")
+    or measure without visiting every instance, and ``std`` cells of the PDK it holds,
+    the last of which it places."""
+    tap = Cell(tap_name)
     tap.rect(ACTIV, 0, 0, 300, 300)
     cell = Cell(top)
     cell.rect(PR_BOUNDARY, 0, 0, 20000, 10000)
@@ -474,7 +511,7 @@ def counter_gds(top: str = "tiny_counter", hierarchy: str = "") -> bytes:
     cell.text(METAL1_TEXT, 10000, 9700, "VDD").text(METAL1_TEXT, 10000, 300, "VSS")
     # A routed net with flush ends that stop on the boundary.
     cell.path(METAL1, 200, 0, 0, 5000, 4000, 5000, 4000, 8000)
-    cell.aref("tiny_counter_tap", 4, 2, 6000, 1000, 2000, 1000)
+    cell.aref(tap_name, 4, 2, 6000, 1000, 2000, 1000)
     for name, x0, y0 in (
         ("clk", 0, 2000),
         ("rst_n", 0, 3500),
@@ -486,6 +523,9 @@ def counter_gds(top: str = "tiny_counter", hierarchy: str = "") -> bytes:
         cell.rect(METAL2_PIN, x0, y0, x0 + 400, y0 + 800)
         cell.text(METAL2_TEXT, x0 + 200, y0 + 400, name)
     cells = [tap, cell]
+    if std:
+        cell.sref(std[-1].name, 15000, 3000)
+        cells[:0] = std
     if hierarchy == "self-reference":
         cell.sref("tiny_counter_loop", 1000, 1000)
         loop = Cell("tiny_counter_loop").rect(METAL1, 0, 0, 100, 100)
@@ -507,7 +547,7 @@ def counter_gds(top: str = "tiny_counter", hierarchy: str = "") -> bytes:
             Cell(f"tiny_counter_d{i}").sref(f"tiny_counter_d{i + 1}", 0, 0) for i in range(64)
         ]
         cells.append(Cell("tiny_counter_d64").rect(METAL1, 0, 0, 100, 100))
-    return gds("tiny_counter", cells)
+    return gds("tiny_counter", cells, dbu_m)
 
 
 def counter_toml(width_um: str = "20.0") -> str:
@@ -744,6 +784,39 @@ Xx1 d1 q[1] c0 VDD VSS sg13g2_xor2_1
 .ENDS tiny_counter
 """
 
+# The stand-in PDK's inverter as a subcircuit: LVS takes it from the PDK's CDL.
+INV_SUBCKT = """.SUBCKT sg13g2_inv_1 A Y VDD VSS
+MN0 Y A VSS VSS sg13_lv_nmos w=0.74u l=0.13u
+MP0 Y A VDD VDD sg13_lv_pmos w=1.12u l=0.13u
+.ENDS sg13g2_inv_1
+"""
+
+
+def pdk_libs() -> Files:
+    """A stand-in for the libraries of IHP SG13G2 (``libs.ref``) that validators read
+    with the PDK's libraries: one standard-cell library holding the made-up inverter as
+    a GDS cell, a LEF macro and a CDL subcircuit."""
+    lib = "ihp-sg13g2/libs.ref/sg13g2_stdcell"
+    lef = "VERSION 5.8 ;\n" + "".join(
+        f"MACRO {name}\n  CLASS CORE ;\n  SIZE {w} BY 3.78 ;\nEND {name}\n"
+        for name, w in (("sg13g2_inv_1", "0.96"), ("sg13g2_buf_1", "1.92"))
+    )
+    cdl = (
+        "* Stand-in for IHP SG13G2's standard cells. Synthetic test fixture.\n"
+        + INV_SUBCKT
+        + ".SUBCKT sg13g2_buf_1 A X VDD VSS\nX0 A n VDD VSS sg13g2_inv_1\n"
+        "X1 n X VDD VSS sg13g2_inv_1\n.ENDS sg13g2_buf_1\n"
+    )
+    io = "ihp-sg13g2/libs.ref/sg13g2_io"
+    return {
+        f"{lib}/gds/sg13g2_stdcell.gds": gds(
+            "sg13g2_stdcell", [std_inv(PDK_DATE), std_buf(PDK_DATE)]
+        ),
+        f"{lib}/lef/sg13g2_stdcell.lef": (lef + "END LIBRARY\n").encode(),
+        f"{lib}/cdl/sg13g2_stdcell.cdl": cdl.encode(),
+        f"{io}/gds/sg13g2_io.gds": gds("sg13g2_io", [io_corner(PDK_DATE)]),
+    }
+
 
 # Evidence
 
@@ -864,6 +937,11 @@ def _cut(files: Files, name: str, marker: str) -> Files:
     return files
 
 
+def _with_gds(files: Files, **layout: Any) -> Files:
+    """The counter with another layout (``counter_gds``'s arguments) and new evidence."""
+    return with_evidence({**files, "tiny_counter.gds": counter_gds(**layout)}, "tiny_counter")
+
+
 def _counter_layout(hierarchy: str) -> Callable[[Files], Files]:
     return lambda f: with_evidence(
         {**f, "tiny_counter.gds": counter_gds(hierarchy=hierarchy)}, "tiny_counter"
@@ -940,6 +1018,45 @@ VARIANTS: list[tuple[str, Callable[[], Files], str, Callable[[Files], Files]]] =
         lambda f: {**f, "tiny_counter.v": counter_v(en_dir="output").encode()},
     ),
     (
+        # Both sides of an ifdef declare en: Yosys defines SYNTHESIS and reads an output.
+        "verilog-ifdef-port",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.v",
+            "    input en,\n",
+            "`ifdef SYNTHESIS\n    output en,\n`else\n    input en,\n`endif\n",
+        ),
+    ),
+    (
+        # A second cell of the macro's name: OpenSTA keeps the last one, where en is an
+        # output.
+        "liberty-duplicate-cell",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.lib",
+            "\n}\n",
+            "\n  cell (tiny_counter) {\n    pin (en) {\n      direction : output ;\n    }\n  }\n}\n",
+        ),
+    ),
+    (
+        # A macro written in lower case before the real one: OpenROAD reads LEF keywords
+        # in any case and keeps the first macro of a name.
+        "lef-duplicate-macro",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.lef",
+            "MACRO tiny_counter\n",
+            "macro tiny_counter\n  class BLOCK ;\n  size 30 by 10 ;\nend tiny_counter\n"
+            "MACRO tiny_counter\n",
+        ),
+    ),
+    (
         "bus-width",
         counter,
         "tiny_counter.macro",
@@ -972,6 +1089,85 @@ VARIANTS: list[tuple[str, Callable[[], Files], str, Callable[[Files], Files]]] =
                 f, "lvs", ["tiny_counter.gds", "tiny_counter.spice"], status="fail"
             ),
         },
+    ),
+    (
+        # Cells named in IHP SG13G2's own name spaces: a tap cell called like a standard
+        # cell, and a subcircuit whose name only differs in case.
+        "pdk-cell-name",
+        counter,
+        "tiny_counter.macro",
+        lambda f: with_evidence(
+            {
+                **f,
+                "tiny_counter.gds": counter_gds(tap_name="sg13g2_tap"),
+                "tiny_counter.spice": (
+                    COUNTER_SPICE + ".SUBCKT Sg13g2_Dly a y\n.ENDS Sg13g2_Dly\n"
+                ).encode(),
+            },
+            "tiny_counter",
+        ),
+    ),
+    (
+        # A hardened block holds the standard cells it uses under their own names. This
+        # one is identical to the PDK's but for the date in BGNSTR: with the PDK's
+        # libraries it passes, without them it is a warning.
+        "std-cell-identical",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _with_gds(f, std=(std_inv(), std_buf())),
+    ),
+    (
+        # The inverter with its gate moved: it would replace the PDK's in the chip.
+        "std-cell-modified",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _with_gds(f, std=(std_inv(poly_x=480),)),
+    ),
+    (
+        # The buffer as the PDK's, placing a changed inverter: the buffer is the PDK's own
+        # only if the inverter is too.
+        "std-cell-child",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _with_gds(f, std=(std_inv(poly_x=480), std_buf())),
+    ),
+    (
+        # The inverter's records as the PDK's, in a file whose database unit is 0.5 nm:
+        # the same numbers are another layout.
+        "std-cell-units",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _with_gds(f, std=(std_inv(),), dbu_m=0.5e-9),
+    ),
+    (
+        # The inverter with a STRCLASS record the PDK's does not have.
+        "std-cell-strclass",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _with_gds(f, std=(std_inv(strclass=1),)),
+    ),
+    (
+        # The inverter defined twice, both times as the PDK's.
+        "std-cell-twice",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _with_gds(f, std=(std_inv(), std_inv())),
+    ),
+    (
+        # A copy of an IO cell of the PDK's: identical, but only standard cells may be.
+        "std-cell-other-library",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _with_gds(f, std=(io_corner(),)),
+    ),
+    (
+        # A netlist that defines a standard cell instead of only instantiating it.
+        "spice-pdk-subckt",
+        counter,
+        "tiny_counter.macro",
+        lambda f: with_evidence(
+            {**f, "tiny_counter.spice": (COUNTER_SPICE + INV_SUBCKT).encode()}, "tiny_counter"
+        ),
     ),
     (
         "power-pin-as-signal",
@@ -1121,9 +1317,10 @@ def write(dest: Path, files: Files) -> None:
 
 
 def main() -> None:
-    for d in ("tiny_ota.macro", "tiny_counter.macro", "broken", "gds"):
+    for d in ("tiny_ota.macro", "tiny_counter.macro", "broken", "gds", "pdk"):
         shutil.rmtree(HERE / d, ignore_errors=True)
     write(HERE / "gds", reader_tests())
+    write(HERE / "pdk", pdk_libs())
     write(HERE / "tiny_ota.macro", ota())
     write(HERE / "tiny_counter.macro", counter())
     for case, base, dirname, change in VARIANTS:

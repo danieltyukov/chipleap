@@ -202,10 +202,43 @@ def _kv(r: StepResult) -> list[tuple[str, str]]:
                 "supply joins to the ring",
                 f"VDD {sum(hookup.get('VDD', {}).values())}, VSS {sum(hookup.get('VSS', {}).values())}",
             ),
-            ("setup slack, slow", f"{d['setup_slack_ns']:+.3f} ns"),
-            ("hold slack", f"{d['hold_slack_ns']:+.3f} ns"),
+            ("setup slack, slow, core side of the pads", f"{d['setup_slack_ns']:+.3f} ns"),
+            ("hold slack, core side of the pads", f"{d['hold_slack_ns']:+.3f} ns"),
+            *_io_kv(d.get("io_timing"), len(d["macros"])),
         ]
     return []
+
+
+def _slack(v: Any) -> str:
+    return "not constrained" if v is None else f"{v:+.3f} ns"
+
+
+def _io_kv(io: Any, macros: int) -> list[tuple[str, str]]:
+    if not io:
+        return []
+    by = {c["corner"]: c for c in io["corners"]}
+    b = io["budget"]
+    out = []
+    if b:
+        out.append(
+            (
+                "budget at the ports",
+                f"input delay {b['input_delay_ns']:g} ns, output delay {b['output_delay_ns']:g} ns, "
+                f"load {b['output_load_pf']:g} pF, input edge {b['input_transition_ns']:g} ns",
+            )
+        )
+    if "slow" in by:
+        out.append(("setup slack, slow, at the ports", _slack(by["slow"]["setup_slack_ns"])))
+    holds = [c["hold_slack_ns"] for c in io["corners"] if c["hold_slack_ns"] is not None]
+    if holds:
+        out.append(("hold slack, worst corner, at the ports", f"{min(holds):+.3f} ns"))
+    if io["untimed_pads"]:
+        out.append(("pads not timed", "; ".join(io["untimed_pads"])))
+    if io.get("warnings"):
+        out.append(("timing at the ports, warnings", "; ".join(io["warnings"])))
+    if macros:
+        out.append(("paths through macros", "not timed: a macro's liberty has no arcs"))
+    return out
 
 
 def _tables(r: StepResult) -> list[tuple[list[str], list[list[str]]]]:
@@ -222,6 +255,33 @@ def _tables(r: StepResult) -> list[tuple[list[str], list[list[str]]]]:
         rules = d["drc"]["rules"]
         if rules:
             out.append((["DRC rule", "violations"], [[k, str(v)] for k, v in rules.items()]))
+        io = d.get("io_timing")
+        if io:
+            out.append(
+                (
+                    ["corner", "setup slack at the ports", "hold slack at the ports"],
+                    [
+                        [c["corner"], _slack(c["setup_slack_ns"]), _slack(c["hold_slack_ns"])]
+                        for c in io["corners"]
+                    ],
+                )
+            )
+            rows = []
+            for key, paths in io["paths"].items():
+                for path in paths[:1]:
+                    rows.append(
+                        [
+                            key.replace("_", " "),
+                            path["startpoint"],
+                            path["endpoint"],
+                            f"{path['slack_ns']:+.3f} ns",
+                            f"{path['pad_delay_ns']:.3f} ns",
+                        ]
+                    )
+            if rows:
+                out.append(
+                    (["worst path, slow corner", "from", "to", "slack", "in the pads"], rows)
+                )
     if r.name == "formal":
         out.append(
             (

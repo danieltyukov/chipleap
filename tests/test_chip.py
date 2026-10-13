@@ -13,7 +13,7 @@ from chipleap.chip import assemble, checks, floorplan, io, netlist, pdn
 from chipleap.chip.config import ChipConfig, ChipMacro, Pad
 from chipleap.chip.floorplan import FloorplanError, Placed
 from chipleap.chip.netlist import NetlistError, Port
-from chipleap.macro.check import Report
+from chipleap.macro.check import PdkLibs, Report
 from chipleap.macro.layer import MacroPin, MacroView
 from chipleap.rtl.project import ProjectError, load_project
 
@@ -738,7 +738,7 @@ def chip_tools(monkeypatch, tmp_path):
 
     found = Tool("stand-in", "/bin/true", "1", "tests")
     monkeypatch.setenv(io.PDK_ENV, str(fake_pdk(tmp_path / "pdk")))
-    for name in ("yosys", "librelane", "klayout"):
+    for name in ("yosys", "librelane", "klayout", "openroad"):
         monkeypatch.setattr(assemble, name, lambda: found)
     monkeypatch.setattr(assemble, "python_with_klayout", lambda: ("/bin/true", "/nonexistent"))
     return run
@@ -844,6 +844,37 @@ def test_the_reports_show_the_chip(counter_project):
 # Review findings
 
 
+def test_the_chip_step_imports_packages_with_the_pdks_libraries(counter_project, tmp_path):
+    """A hardened block's standard cells pass the chip's import only when the PDK's
+    libraries show them to be the PDK's own; a PDK whose libraries cannot be read stops
+    the step before any package is read."""
+    import shutil
+
+    from chipleap.macro import layer
+    from chipleap.rtl import builddir
+
+    fixtures = ROOT / "tests" / "fixtures" / "macro"
+    pdk = tmp_path / "pdk" / "ihp-sg13g2"
+    shutil.copytree(fixtures / "pdk" / "ihp-sg13g2", pdk)
+    pkg = counter_project / "macros" / "tiny_counter.macro"
+    shutil.copytree(fixtures / "broken" / "std-cell-identical" / "tiny_counter.macro", pkg)
+    extra = "  macros: [{instance: cnt, package: macros/tiny_counter.macro}]\n"
+    p = load_project(counter_chip(counter_project, extra))
+    flow = builddir.work_dir(p.work_dir("chip", empty=True), "flow")
+    imported = assemble.import_macros(p, pdk, "ihp-sg13g2", flow)
+    assert imported.views["tiny_counter"].pdk_cells == ("sg13g2_inv_1", "sg13g2_buf_1")
+    shutil.rmtree(pkg)
+    shutil.copytree(fixtures / "broken" / "std-cell-modified" / "tiny_counter.macro", pkg)
+    with pytest.raises(layer.MacroImportError, match="differs from the cell of that name"):
+        assemble.import_macros(p, pdk, "ihp-sg13g2", flow)
+    shutil.rmtree(pdk / "libs.ref")
+    layer._pdk_libs.cache_clear()
+    shutil.rmtree(flow)
+    with pytest.raises(layer.MacroImportError, match=r"no libs\.ref"):
+        assemble.import_macros(p, pdk, "ihp-sg13g2", flow)
+    assert not (flow / "macros").exists()
+
+
 def test_a_macro_bus_connects_end_to_end(tmp_path):
     """tiny_counter's two-bit output q, imported as a package, drives a two-bit core
     input: bit 0 to the port's least significant bit."""
@@ -863,6 +894,7 @@ def test_a_macro_bus_connects_end_to_end(tmp_path):
         root / "build",
         "ihp-sg13g2",
         layer.Reserved(frozenset()),
+        libs=PdkLibs(),
     )
     view = imported.views["tiny_counter"]
     assert [p.name for p in view.bus("q")] == ["q[0]", "q[1]"]

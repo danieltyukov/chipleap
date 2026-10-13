@@ -2,7 +2,7 @@
   "artifacts": [
     {
       "path": "strongarm.specs.toml",
-      "sha256": "252f501b28924f0134214a9f8880118f6615da635750d767cd429b5f85a84f7b"
+      "sha256": "78cd3c470c3efdb782d33e3a2ef8b49ee5cf693a1d21ad4bdd1220cd78f7b6ab"
     }
   ],
   "data": {
@@ -18,7 +18,7 @@
   "inputs": [
     {
       "path": "strongarm.pex.spice",
-      "sha256": "8b20022635394f6c4f04e0e153fc9fc520910fbe27418ac1a02614e0c4235767"
+      "sha256": "695a7288d7cb8a588324e07891b78104b08af815ad71429c9f918f2a675c8ca1"
     }
   ],
   "operation": "sim",

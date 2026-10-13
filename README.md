@@ -59,13 +59,48 @@ Point ChipLeap at a directory of Verilog or SystemVerilog with cocotb tests:
 ```sh
 chipleap project init path/to/rtl       # writes project.yaml: top, sources, clock, reset, tests
 chipleap verify path/to/rtl             # lint, simulation, coverage, formal, CDC, synthesis, equivalence
-chipleap verify path/to/rtl --steps all # and place and route to a GDS, then the tests on the routed netlist,
-                                        # then the whole chip with its pad ring and macros
+chipleap verify path/to/rtl --steps all # and every step after it, down to the whole chip
 ```
 
-Lint runs Verilator and slang, simulation runs the cocotb tests on Icarus or Verilator, coverage reports line, branch and toggle coverage, SymbiYosys proves the design's own assertions, a structural checker finds unsynchronized clock and reset domain crossings, synthesis maps to the IHP SG13G2 cells, equivalence shows the netlist implements the RTL, LibreLane routes it with the same slow-corner signoff as the accelerators, and the tests run again on the routed netlist with its SDF delays. With `--steps all` it also inserts scan chains with OpenROAD and generates stuck-at patterns with Fault, which it simulates through the chains; measures power from the activity of your own tests on the gate-level netlist and IR drop on the routed power grid; places UPF power domains with OpenROAD; and applies ECO changes to the routed design and signs it off again without placing it again. Failing tests come back by name, every problem with its file and line, and a failing property or netlist with its counterexample, which is also what an assistant gets through MCP to fix the RTL in a loop. [examples/uart](examples/uart) is a UART that routes to a clean GDS; [docs/projects.md](docs/projects.md) describes the project file.
+Each step names what it found: a failing test with its file and line, a failing property or netlist with its counterexample, an unsafe crossing with the path between its registers. An assistant gets the same through MCP and can fix the RTL in a loop. [docs/projects.md](docs/projects.md) describes the project file and every step.
 
-With a `chip` section the project becomes a whole chip: the core, hardened blocks from [macro packages](docs/macro-package.md) (an analog comparator from aispice, say) and a pad ring of IHP's IO cells, routed by LibreLane, with bond pads, seal ring and fill, LVS clean on IHP's deck down to the macros' transistors, DRC clean on the whole die, and a bond map ([docs/chips.md](docs/chips.md)). The UART example is one: 33 pads on a 1.5 mm die, with a comparator on its receive line.
+## The full digital flow
+
+These are the steps ChipLeap runs on a project today, with what each reported for [examples/uart](examples/uart), a UART written by hand with cocotb tests and a Python reference model, at 100 MHz on IHP SG13G2. Every tool in the table is open source, and each step skips itself, with the reason, when its tool is missing; simulation, synthesis and place and route also run on Cadence, Synopsys and Siemens tools ([guide](docs/commercial-tools.md)).
+
+| Step | Tools | The UART on this release |
+|---|---|---|
+| Project | `project.yaml`: top, sources, parameters, clocks, resets, tests, golden model | 3 SystemVerilog files, 5 cocotb tests, a Python model |
+| Lint | Verilator `-Wall`, slang `-Wextra` | no warnings |
+| Simulation | cocotb 2 on Icarus or Verilator, against the golden model | 5 of 5 tests pass |
+| Coverage | Verilator line, branch and toggle coverage, with the points never reached | line 83.3 % (two `default:` arms no state reaches), branch 100 %, toggle 100 % |
+| Formal | SymbiYosys on the design's own assertions | the transmitter's line in every state, proved for every cycle with `abc pdr` |
+| Clock and reset crossings | ChipLeap's structural checker on the netlist Yosys elaborates | the receive line through a two-flop synchronizer, accepted; one warning, the reset released asynchronously |
+| Synthesis | Yosys and ABC on IHP's standard cells | 221 cells, 51 flip-flops, 0.0041 mm², critical path 1.01 ns |
+| Equivalence | Yosys (or EQY): RTL against synthesis, synthesis against the routed netlist | 74 of 75 points proved and the last equal for 40 cycles; all 969 routed points proved |
+| Place and route | LibreLane (OpenROAD, KLayout), signed off at the slow corner | 352 cells on a 0.0105 mm² core, 100 MHz met at 125 C (about 264 MHz), DRC, LVS and antenna clean |
+| Gate-level simulation | the cocotb tests on the routed netlist with SDF delays, Icarus 13 | 5 of 5 tests pass |
+| Design for test | OpenROAD scan insertion, Fault with Quaigh for ATPG | 3 chains of 17 flip-flops, 99.2 % stuck-at coverage with 39 patterns, which pass through the scan and the routed netlists |
+| Power | OpenROAD with the activity of the project's own tests | 0.345 mW at the typical corner (0.947 mW vectorless) |
+| IR drop | OpenROAD PDNSim on the routed power grid | 0.52 mV at worst |
+| Power intent | UPF read and placed by OpenROAD | the receiver in a domain of its own, 13 signals between the two |
+| ECO | OpenROAD edits on the routed design, then LibreLane's signoff again | a gate resized and the UART signed off again in about a minute and a half |
+| Macros | `macro/v1` packages, checked and rewritten before use | aispice's StrongARM comparator, 20.93 x 45 um, its transistors in LVS |
+| Chip assembly | LibreLane with IHP's pad ring, then bond pads, seal ring and fill in KLayout | 33 pads on a 1.52 x 1.52 mm die |
+| Timing at the ports | OpenSTA through IHP's IO cells at every corner | +0.971 ns of setup slack at the slow corner (+6.302 ns at the core's side of the pads) |
+| Signoff | IHP's DRC deck on the whole die (density included), its LVS deck down to the macros' transistors, antenna | 0 DRC violations, LVS match, 0 antenna violations |
+
+```sh
+chipleap verify examples/uart               # lint to equivalence, in about half a minute
+chipleap verify examples/uart --steps all   # and place and route, gate level, DFT, power, IR drop, UPF and the chip
+```
+
+<p align="center">
+  <img src="docs/img/uart-chip.jpg" alt="The UART chip's layout drawn from its GDS: 33 bond pads and IHP's IO cells around a 400 um core, with aispice's comparator in the core's upper left, inside the seal ring" width="560">
+  <br><sub>The UART as a chip, drawn from its GDS before fill: 33 pads, IHP's IO ring, the core with aispice's comparator in its upper left, and the seal ring.</sub>
+</p>
+
+With a `chip` section the project becomes a whole chip ([docs/chips.md](docs/chips.md)): the core, hardened blocks from [macro packages](docs/macro-package.md) and a pad ring of IHP's IO cells, routed by LibreLane, with bond pads, seal ring and fill, timed at its own ports through the pads, checked with IHP's DRC and LVS decks, and a bond map for the package. The UART chip's comparator takes its inputs from two analog pads and drives the receive line. It builds and checks in about a quarter of an hour.
 
 ## Ask your AI assistant
 
@@ -103,9 +138,11 @@ The accelerator model is the same tile schedule the RTL runs, so it is checked a
 
 The other nodes are scaled from published figures and say so. [docs/model.md](docs/model.md) lists every number and its source; [docs/verification.md](docs/verification.md) explains each check.
 
-## Analog blocks from aispice
+## Analog and mixed-signal: aispice
 
-Mixed-signal chips need blocks from both sides. ChipLeap and its analog counterpart, [aispice](https://github.com/danieltyukov/aispice), hand hardened blocks to each other as macro packages: GDS, LEF, liberty, a Verilog model, a SPICE netlist, measured specs and DRC and LVS evidence, described by one `macro.toml`. Both tools check a package with the same rules before placing it:
+ChipLeap covers the digital side. Its analog counterpart, [aispice](https://github.com/danieltyukov/aispice), designs and sizes analog blocks on the same PDK: IC templates proven at every corner, layouts drawn by generators and checked with IHP's DRC and LVS decks, specs measured before and after extraction. It exports a block as a macro package, and assembles analog-on-top chips that place ChipLeap's digital blocks the same way.
+
+The two tools hand hardened blocks to each other as macro packages: GDS, LEF, liberty, a Verilog model, a SPICE netlist, measured specs and DRC and LVS evidence, described by one `macro.toml`. Both check a package with the same rules before placing it:
 
 ```sh
 chipleap macro check tiny_ota.macro --pdk ihp-sg13g2
@@ -118,6 +155,7 @@ chipleap macro check tiny_ota.macro --pdk ihp-sg13g2
 | Guide | What it covers |
 |---|---|
 | [Spec format](docs/spec.md) | Workloads, targets, constraints and what the explorer may change |
+| [Chips](docs/chips.md) | The pad ring, macros, timing at the ports, signoff and the bond map |
 | [Your own RTL](docs/projects.md) | The project file, and lint, simulation, coverage, formal, CDC, synthesis, equivalence, place and route, gate-level simulation, DFT, power, IR drop, UPF and ECO on your design |
 | [The model](docs/model.md) | Timing, energy and area, with sources |
 | [Verification](docs/verification.md) | Simulation, synthesis, place and route, the steps after it, X-HEEP checks |
