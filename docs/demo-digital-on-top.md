@@ -2,7 +2,7 @@
 
 This walks [examples/uart](../examples/uart) from its RTL to a chip GDS on IHP SG13G2: a UART written by hand, with cocotb tests and a Python reference model, at the core of a 1.52 x 1.52 mm chip with 33 pads of IHP's `sg13g2_io` library. In the core next to the UART sits a StrongARM comparator from [aispice](https://github.com/danieltyukov/aispice), handed over as a [macro package](macro-package.md). Its inputs come from two analog pads and its output drives the UART's receive line. The chip is signed off with IHP's own DRC deck on the whole die and its LVS deck down to the transistors of the standard cells and the comparator.
 
-Every number below is from ChipLeap `main` at `3183e23` (13 Oct 2026). First, one run of `chipleap verify examples/uart --steps all`: every step passed, in 43 minutes on a laptop. Then the chip step alone (13 minutes), after aispice exported the comparator's package again with its mirror-symmetric layout. Only open tools ran: Verilator, slang, Icarus, cocotb, SymbiYosys, Yosys, OpenROAD, LibreLane, KLayout, Magic, Netgen and Fault.
+Every number below is from `chipleap verify examples/uart --steps all` on ChipLeap `main` at `d26974f` (14 Oct 2026), with the comparator's package exported by aispice `master` at `5db63e1`. Every step passed. From an empty build folder the whole run takes about 43 minutes on a laptop. Only open tools ran: Verilator, slang, Icarus, cocotb, SymbiYosys, Yosys, OpenROAD, LibreLane, KLayout, Magic, Netgen and Fault.
 
 aispice's [analog-on-top demo](https://github.com/danieltyukov/aispice/tree/master/examples/analog_on_top) is the other way round: analog blocks and a hardened digital block in a pad ring that aispice assembles.
 
@@ -152,6 +152,21 @@ The budget at the ports is 2 ns input and output delay, a 5 pF load and a 1 ns i
   <img src="img/uart-chip.jpg" alt="The UART chip drawn from its GDS: 33 bond pads and IHP's IO cells around a 400 um core, with aispice's comparator in the core's upper left, inside the seal ring" width="560">
   <br><sub>The chip from its GDS before fill: the core with aispice's comparator in its upper left, IHP's IO ring, 33 bond pads and the seal ring.</sub>
 </p>
+
+## The SRAM variant
+
+[examples/memchip](../examples/memchip) is the same flow with a hard macro inside the core instead of next to it. A 256-byte memory core wraps one of IHP's SRAM macros (`RM_IHPSG13_1P_256x8_c3_bm_bist`), inside a ring of 37 pads.
+
+```sh
+chipleap verify examples/memchip --steps chip
+```
+
+The run recorded in [#18](https://github.com/danieltyukov/chipleap/pull/18) passed in 17 minutes:
+
+- the die is 1.62 mm with the seal ring;
+- LVS is clean on IHP's deck, with the SRAM compared as a box;
+- DRC is clean on IHP's deck, with the SRAM's 256 off-grid pin markers reported apart;
+- timing is met through the pads, +6.51 ns at the slow corner.
 
 ## Reproduce it
 
