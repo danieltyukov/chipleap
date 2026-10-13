@@ -268,11 +268,10 @@ def test_equivalence_compares_what_goes_into_a_macro_and_shares_what_comes_out(t
 
 
 def _gls_ready() -> bool:
+    from chipleap.chip import io
     from chipleap.rtl.gls import icarus_major
     from chipleap.rtl.sim import cocotb_python
     from chipleap.verify.tools import iverilog
-
-    from chipleap.chip import io
 
     return (
         icarus_major(iverilog()) >= 13
