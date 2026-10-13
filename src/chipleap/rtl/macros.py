@@ -14,10 +14,13 @@ see them so:
   chip's) and the macros placed where the project says, or in rows above and below the
   logic.
 
-The steps that read the design or its gate netlist in ways that do not model a macro
-yet (formal, CDC, equivalence, gate-level simulation, ECO, scan insertion, power, IR
-drop, UPF, the chip, and the commercial tools) do not run on a project with macros; each
-says so, rather than check a design it cannot read.
+The steps after them treat a macro as a box with its ports: formal makes it a cut point,
+CDC a state element of the clock its port samples on, equivalence turns its pins into
+compared outputs and shared inputs, gate-level simulation runs the PDK's model, scan
+insertion and ATPG leave it off the chains and out of the test, power and IR drop read
+its liberty and LEF, UPF places it in its domain, and an ECO passes its views on. The
+chip and the commercial tools do not model a macro yet; they say so, rather than check
+a design they cannot read.
 """
 
 from __future__ import annotations
@@ -45,18 +48,7 @@ from chipleap.rtl.project import Project, RtlMacro
 from chipleap.verify.tools import yosys
 
 # Steps that do not model a macro yet.
-UNSUPPORTED = (
-    "formal",
-    "cdc",
-    "equiv",
-    "gls",
-    "eco",
-    "dft",
-    "power",
-    "ir_drop",
-    "upf",
-    "chip",
-)
+UNSUPPORTED = ("chip",)
 OPEN_TOOLS = ("", "auto", "icarus", "verilator", "yosys", "librelane")
 MANIFEST_MAX = 1 << 20
 # Yosys lists every wire and cell too, so a large design's list is long.

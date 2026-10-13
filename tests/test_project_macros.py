@@ -249,14 +249,18 @@ def test_a_die_of_the_projects_own_places_each_macro_where_it_says(
 
 
 @pytest.mark.parametrize(
-    "step", ["formal", "cdc", "equiv", "gls", "dft", "power", "ir_drop", "chip"]
+    "step", ["formal", "cdc", "equiv", "gls", "eco", "dft", "power", "ir_drop", "upf"]
 )
-def test_steps_without_a_macro_model_say_so(sram_project, step):
+def test_the_steps_after_synthesis_model_the_macros(sram_project, step):
+    assert macros.unsupported(load_project(sram_project), step) is None
+
+
+def test_the_chip_does_not_model_them_yet(sram_project):
     from chipleap.rtl.verify import run_step
 
-    r = run_step(load_project(sram_project), step)
+    r = run_step(load_project(sram_project), "chip")
     assert r.status == "skipped"
-    assert r.summary.startswith(f"{step} does not model hard macros yet") and "u_mem" in r.summary
+    assert r.summary.startswith("chip does not model hard macros yet") and "u_mem" in r.summary
 
 
 def test_commercial_tools_say_so_too(sram_project):
@@ -280,13 +284,9 @@ def test_the_example_simulates_with_the_pdks_model(sram_project):
 
 def test_the_assistants_tools_say_so_too(sram_project):
     from chipleap import mcp_server
-    from chipleap.mcp_server import ToolError
 
-    out = mcp_server.prove_rtl(str(sram_project))
+    out = mcp_server.assemble_chip(str(sram_project))
     assert out["status"] == "skipped" and "does not model hard macros" in out["summary"]
-    assert mcp_server.cdc_rtl(str(sram_project))["status"] == "skipped"
-    with pytest.raises(ToolError, match="does not model hard macros"):
-        mcp_server.eco_rtl(str(sram_project), ["repair:setup"])
 
 
 # A macro/v1 package beside an SRAM, named as a chip's macros are
