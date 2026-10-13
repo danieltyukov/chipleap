@@ -41,6 +41,12 @@ def test_the_uart_chip_is_drc_and_lvs_clean(built):
     assert all(c["pass"] for c in d["precheck"])
     assert sum(d["supply_hookup"]["VDD"].values()) and sum(d["supply_hookup"]["VSS"].values())
     assert (root / "build/chip/uart_chip.gds").is_file()
+    # Timed at its ports through IHP's pads, at every corner.
+    io = d["io_timing"]
+    assert io["met"] and not io["untimed_pads"]
+    assert {c["corner"] for c in io["corners"]} == {"typ", "slow", "fast"}
+    out = io["paths"]["core_to_pad_setup"][0]
+    assert out["endpoint"].startswith("pad_") and out["pad_delay_ns"] > 1.0
     rows = json.loads((root / "build/chip/uart_chip.bondmap.json").read_text())
     assert len(rows) == 33 and rows[0]["net"] == "ain_m"
 

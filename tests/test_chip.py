@@ -738,7 +738,7 @@ def chip_tools(monkeypatch, tmp_path):
 
     found = Tool("stand-in", "/bin/true", "1", "tests")
     monkeypatch.setenv(io.PDK_ENV, str(fake_pdk(tmp_path / "pdk")))
-    for name in ("yosys", "librelane", "klayout"):
+    for name in ("yosys", "librelane", "klayout", "openroad"):
         monkeypatch.setattr(assemble, name, lambda: found)
     monkeypatch.setattr(assemble, "python_with_klayout", lambda: ("/bin/true", "/nonexistent"))
     return run
