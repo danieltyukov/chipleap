@@ -1,6 +1,6 @@
 # The UART chip's macros
 
-`strongarm.macro` is a StrongARM latched comparator as a `macro/v1` package ([docs/macro-package.md](../../../docs/macro-package.md)), laid out, extracted, simulated and checked by aispice 0.2.0 from its `feat/macro-export` branch (aispice pull request 43) on IHP SG13G2 at PDK commit `22f2a25`. The chip section in `../project.yaml` puts its inputs on two analog pads and its output on the UART's receive line ([docs/chips.md](../../../docs/chips.md)).
+`strongarm.macro` is a StrongARM latched comparator as a `macro/v1` package ([docs/macro-package.md](../../../docs/macro-package.md)), laid out, extracted, simulated and checked by aispice 0.2.0, built from its `master` branch at commit `43e25f7` (after pull request 43, which added macro export), on IHP SG13G2 at PDK commit `22f2a25`. The chip section in `../project.yaml` puts its inputs on two analog pads and its output on the UART's receive line ([docs/chips.md](../../../docs/chips.md)).
 
 It was made from this netlist with `aispice layout generate comparator.cir --template comparator`, then `aispice macro export comparator.cir --layout comparator.gds --name strongarm --pins '{"clk": {"kind": "clock"}, "outp": {"kind": "signal"}, "outn": {"kind": "signal"}}'`:
 
@@ -27,4 +27,4 @@ CN outn 0 5f
 .end
 ```
 
-with the specs `decision = value_at(V(outp,outn), 2.9n) >= 0.8` and `outn_low = value_at(V(outn), 2.9n) <= 0.3`. When that branch is merged, export it again the same way and replace the package; `chipleap macro check strongarm.macro --pdk ihp-sg13g2` must pass.
+with the specs `decision = value_at(V(outp,outn), 2.9n) >= 0.8` and `outn_low = value_at(V(outn), 2.9n) <= 0.3`. To make it again, run the same two commands in an aispice project whose PDK is a git checkout of IHP-Open-PDK (aispice records its commit in the package) and replace the folder; `chipleap macro check strongarm.macro --pdk ihp-sg13g2` must pass. Exports of the same netlist differ only in the GDS's date records, the order of the extracted capacitors and the last digits of the simulated values.
