@@ -321,13 +321,24 @@ def lvs(p: Prepared, nofill: Path, outs: dict[str, Path], name: str) -> dict[str
     """IHP's LVS deck on the chip without its IO cells."""
     lvs_dir = builddir.work_dir(p.work, "lvs", empty=True)
     io_cdl = (p.flow_dir / "io" / f"{io.IO}.cdl").read_text()
+    # IHP's SRAMs are compared as boxes, as the IO cells are: IHP's LVS deck does not
+    # match IHP's own SRAM at transistor level (the dummy delay cell's metal resistor),
+    # so what is checked is every net that reaches each of their pins.
+    abstract = abstract_macros(p)
     extra = [flow.std_cell_cdl(outs["resolved"]).read_text()]
-    extra += [v.spice.read_text() for v in p.imported.views.values()]
-    inputs = checks.lvs_inputs(outs["cdl"].read_text(), io_cdl, p.plan, p.cells, extra)
+    extra += [
+        v.spice.read_text()
+        for v in p.imported.views.values()
+        if v.cell not in {a.placed.cell for a in abstract.values()}
+    ]
+    inputs = checks.lvs_inputs(outs["cdl"].read_text(), io_cdl, p.plan, p.cells, extra, abstract)
     netlist_file = builddir.write_text(lvs_dir, f"{name}_lvs.cdl", inputs.netlist)
     view = lvs_dir / f"{name}_lvs.gds"
+    cells = [a.placed.cell for a in abstract.values()]
     plan_file = builddir.write_text(
-        lvs_dir, "lvs_view.json", checks.dump(checks.lvs_plan(p.plan, name, inputs, nofill, view))
+        lvs_dir,
+        "lvs_view.json",
+        checks.dump(checks.lvs_plan(p.plan, name, inputs, nofill, view, cells)),
     )
     run_script("lvs_view.py", plan_file, lvs_dir, [nofill.parent], "lvs_view.log")
     log = run_lvs(p.pdk, lvs_dir, view, netlist_file, name)
@@ -338,7 +349,24 @@ def lvs(p: Prepared, nofill: Path, outs: dict[str, Path], name: str) -> dict[str
         "instances": inputs.instances,
         "view": _rel(p, view),
         "netlist": _rel(p, netlist_file),
+        **({"macros_as_boxes": sorted(abstract)} if abstract else {}),
     }
+
+
+def abstract_macros(p: Prepared) -> dict[str, checks.Abstract]:
+    """The macros the chip's LVS compares as boxes: the PDK's own (IHP's SRAMs), by
+    instance."""
+    out: dict[str, checks.Abstract] = {}
+    for m in p.plan.every_macro():
+        view = p.imported.views[m.cell]
+        if view.source != "pdk":
+            continue
+        ports = checks.subckt_ports(view.spice.read_text(errors="replace")).get(view.cell)
+        if not ports:
+            raise CheckError(f"{view.cell}'s netlist has no subcircuit {view.cell}")
+        pins = {pin.name: list(pin.shapes) for pin in view.pins}
+        out[m.inst] = checks.Abstract(m, pins, (view.width, view.height), ports)
+    return out
 
 
 def _rel(p: Prepared, path: Path) -> str:
@@ -453,10 +481,13 @@ def drc(p: Prepared, final: Path, name: str) -> checks.DrcResult:
         ],
         (),
     )
-    return drc_result(drc_dir, name, code, log)
+    pdk_cells = {v.cell for v in p.imported.views.values() if v.source == "pdk"}
+    return drc_result(drc_dir, name, code, log, frozenset(pdk_cells))
 
 
-def drc_result(drc_dir: Path, name: str, code: int, log: str) -> checks.DrcResult:
+def drc_result(
+    drc_dir: Path, name: str, code: int, log: str, pdk_cells: frozenset[str] = frozenset()
+) -> checks.DrcResult:
     """The violations of a DRC run, after checking it ran: run_drc.py exits 0 when clean
     and 1 with violations, and merges the tables into one report; every expected table's
     log must be there and the code must agree with the report."""
@@ -466,8 +497,8 @@ def drc_result(drc_dir: Path, name: str, code: int, log: str) -> checks.DrcResul
         what = f"no {', '.join(missing)} table" if missing else f"exit {code}"
         raise ToolError(f"IHP's DRC did not finish ({what}): {_last(log)}")
     result = checks.DrcResult()
-    checks.read_lyrdb(report, result)
-    if (code == 1) != (result.total > 0):
+    checks.read_lyrdb(report, result, pdk_cells)
+    if (code == 1) != (result.total + sum(result.in_pdk_macros.values()) > 0):
         raise ToolError(
             f"IHP's DRC exited {code} with {result.total} violations in its report; one of "
             "them is wrong"
@@ -553,6 +584,11 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
             "violations": drc_result.total,
             "rules": dict(sorted(drc_result.violations.items())),
             "recommended_rules": "not checked",
+            **(
+                {"pin_markers_in_pdk_macros": dict(sorted(drc_result.in_pdk_macros.items()))}
+                if drc_result.in_pdk_macros
+                else {}
+            ),
         },
         "supply_hookup": hookup,
         "precheck": pre,
@@ -610,9 +646,16 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
         slow = next((c for c in io_t["corners"] if c["corner"] == "slow"), None)
         if slow is not None and slow["setup_slack_ns"] is not None:
             timing = f", timing met through the pads ({slow['setup_slack_ns']:+.3f} ns at the slow corner)"
+    boxes = data["lvs"].get("macros_as_boxes", [])
+    lvs = "LVS clean on IHP's deck"
+    if boxes:
+        lvs += f" ({', '.join(boxes)} compared as {'boxes' if len(boxes) > 1 else 'a box'})"
+    markers = sum(data["drc"].get("pin_markers_in_pdk_macros", {}).values())
+    pdk = f"; {markers} pin markers off the grid inside the PDK's own macros" if markers else ""
     return True, (
-        f"{head}; LVS clean on IHP's deck, DRC clean on IHP's deck (density included, "
-        f"recommended rules not checked), supplies reach the ring, precheck passed{timing}"
+        f"{head}; {lvs}, DRC clean on IHP's deck (density included, "
+        f"recommended rules not checked{pdk}), supplies reach the ring, precheck "
+        f"passed{timing}"
     )
 
 

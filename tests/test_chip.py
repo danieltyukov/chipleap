@@ -607,6 +607,60 @@ def test_drc_reports_are_counted_by_rule(tmp_path):
     assert r.violations == {"M1.a": 2, "Pad.d1R": 1} and r.total == 3
 
 
+def test_off_grid_pin_markers_inside_the_pdks_macros_are_counted_apart(tmp_path):
+    """IHP's SRAMs draw Metal1 pin markers off the 5 nm grid; only that rule, only
+    inside a PDK macro's cell, is counted apart. The same rule elsewhere, or any other
+    rule inside the macro, still counts."""
+    db = tmp_path / "a.lyrdb"
+    db.write_text(
+        "<report-database><items>"
+        "<item><category>metal1_pin_Offgrid</category><cell>RM_X</cell></item>"
+        "<item><category>metal1_pin_Offgrid</category><cell>RM_X</cell></item>"
+        "<item><category>metal1_pin_Offgrid</category><cell>chip</cell></item>"
+        "<item><category>M1.a</category><cell>RM_X</cell></item>"
+        "<item><category>metal1_drw_Offgrid</category><cell>RM_X</cell></item>"
+        "</items></report-database>"
+    )
+    r = checks.DrcResult()
+    checks.read_lyrdb(db, r, frozenset({"RM_X"}))
+    assert r.in_pdk_macros == {"metal1_pin_Offgrid": 2}
+    assert r.violations == {"metal1_pin_Offgrid": 1, "M1.a": 1, "metal1_drw_Offgrid": 1}
+    plain = checks.DrcResult()
+    checks.read_lyrdb(db, plain)
+    assert plain.total == 5 and not plain.in_pdk_macros
+
+
+def test_a_macro_compared_as_a_box_leaves_the_netlist_and_keeps_its_pins():
+    """IHP's SRAM leaves the LVS netlist, as the IO cells do; each pin a net reaches
+    becomes metal labelled with that net, placed and turned as the macro is."""
+    plan, cdl = lvs_case()
+    cdl = cdl.replace(
+        "Xu1 net1 v VDD VSS cmp\n",
+        "Xu1 net1 v VDD VSS cmp\nXu_core.u_mem net1 _unconnected_1 VDD VSS ram\n",
+    )
+    placed = Placed("u_core.u_mem", "ram", 300.0, 300.0, "FS", 100.0, 60.0)
+    pins = {
+        "A_ADDR[0]": [("Metal2", (10.0, 0.0, 10.2, 1.0))],
+        "A_DOUT[0]": [("Metal2", (20.0, 0.0, 20.2, 1.0))],
+        "VDD!": [("Metal4", (30.0, 0.0, 32.8, 60.0))],
+        "VSS!": [("Metal4", (40.0, 0.0, 42.8, 60.0))],
+    }
+    box = checks.Abstract(placed, pins, (100.0, 60.0), ["A_ADDR<0>", "A_DOUT<0>", "VDD!", "VSS!"])
+    got = checks.lvs_inputs(cdl, IO_CDL, plan, CELLS, [], {"u_core.u_mem": box})
+    assert "u_core.u_mem" not in got.netlist and "ram" not in got.netlist
+    labels = {(p["net"], tuple(p["rects"][0][1])) for p in got.pins}
+    # A_ADDR[0] at (10, 0) of a macro mirrored top to bottom (FS) at (300, 300).
+    assert ("net1", (310.0, 359.0, 310.2, 360.0)) in labels
+    assert {p["net"] for p in got.pins} >= {"net1", "VDD", "VSS"}
+    # An output nothing reads has nothing to compare: it gets no label and no port.
+    assert "_unconnected_1" not in got.ports and "net1" in got.ports
+    view = checks.lvs_plan(plan, "c", got, Path("/in.gds"), Path("/out.gds"), ["ram"])
+    assert view["drop_prefixes"][-1] == "ram"
+    with pytest.raises(checks.CheckError, match="no shape for its pin"):
+        small = checks.Abstract(placed, {}, (100.0, 60.0), box.ports)
+        checks.lvs_inputs(cdl, IO_CDL, plan, CELLS, [], {"u_core.u_mem": small})
+
+
 def test_supply_hookup_counts_top_vias_on_the_ring_rails():
     plan = floorplan.plan(chip(), CELLS)
     w = round(plan.die[0] * 1000)
