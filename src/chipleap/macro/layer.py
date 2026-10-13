@@ -22,14 +22,17 @@ by cell name, so a package cell called ``sg13g2_inv_1`` would replace the standa
 A package's name is lowercase, outside every name the PDK and the flow use
 (``reserved_names``) and outside every other package's namespace; each of its GDS cells
 and subcircuits is its name or its name and ``_`` and a suffix, defined once, in plain
-characters; and no cell appears in two packages.
+characters; and no cell appears in two packages. The one exception is a standard cell
+of the PDK's own, which a hardened digital block holds under its own name: macro/v1's
+``pdk.cell_name``, checked with the PDK's libraries, shows it identical to the PDK's,
+and ``chipleap.chip.merge`` compares it again with the file LibreLane merges.
 """
 
 from __future__ import annotations
 
 import re
 import struct
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Container, Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -121,6 +124,8 @@ class MacroView:
     subckts: tuple[str, ...]  # the subcircuits of the SPICE view
     gds_cells: tuple[str, ...]
     report: Report | None = None  # macro/v1's check of a package
+    # The PDK's own standard cells among gds_cells, as macro/v1's check showed them.
+    pdk_cells: tuple[str, ...] = ()
     source: str = "package"
     supply_hookup: bool = True
 
@@ -295,10 +300,10 @@ def _copy_package(
         builddir.write_bytes(dest, rel, read(real))
 
 
-def check_copy(copy: Path, pdk: str) -> tuple[Manifest, Report]:
-    """Check a package's copy against ``pdk`` (``ihp-sg13g2`` or ``ihp-sg13g2@COMMIT``);
-    its manifest, or MacroImportError with the first errors."""
-    report = check_package(copy, pdk=pdk)
+def check_copy(copy: Path, pdk: str, libs: PdkLibs) -> tuple[Manifest, Report]:
+    """Check a package's copy against ``pdk`` (``ihp-sg13g2`` or ``ihp-sg13g2@COMMIT``)
+    and its libraries; its manifest, or MacroImportError with the first errors."""
+    report = check_package(copy, pdk=pdk, pdk_libs=libs)
     if not report.passed:
         errors = [f.to_text() for f in report.findings if f.severity == "error"]
         more = f" and {len(errors) - 3} more" if len(errors) > 3 else ""
@@ -628,10 +633,12 @@ def shift_gds(data: bytes, cell: str, dx_um: float, dy_um: float) -> bytes:
     return bytes(out)
 
 
-def check_gds_cells(names: list[str], cell: str) -> None:
+def check_gds_cells(names: list[str], cell: str, std: Container[str] = ()) -> None:
     """Every cell of a macro's GDS carries its name, so none can replace a cell of the
-    chip (a standard cell, an IO cell, the chip top) when the layouts are merged."""
-    bad = [n for n in names if not (n == cell or n.startswith(cell + "_"))]
+    chip (a standard cell, an IO cell, the chip top) when the layouts are merged. The
+    exception is ``std``, the standard cells macro/v1's ``pdk.cell_name`` showed to be
+    the PDK's own: merged with the chip's, they are the same cells."""
+    bad = [n for n in names if not (n == cell or n.startswith(cell + "_") or n in std)]
     if bad:
         raise MacroImportError(
             f"GDS cell {bad[0][:40]!r} must be {cell} or start with {cell}_, so it cannot "
@@ -799,12 +806,16 @@ def import_packages(
     work: Path,
     pdk: str,
     reserved: Reserved,
+    *,
+    libs: PdkLibs,
 ) -> Imported:
     """Copy, check and convert every package ``macros`` names (instance, package
     directory). ``files_in`` and ``read`` are the project's (``Project.files_in``,
     ``Project.read``), ``work`` the build directory the views go to (under
     ``macros/<instance>/``), ``pdk`` what the packages are checked against
-    (``ihp-sg13g2@COMMIT``), ``reserved`` the names no package may use."""
+    (``ihp-sg13g2@COMMIT``), ``reserved`` the names no package may use, ``libs`` the
+    PDK's libraries (``pdk_libs``): a package may hold the PDK's own standard cells,
+    identical in every package and to the chip's, and nothing else of the PDK's."""
     views: dict[str, MacroView] = {}
     by_package: dict[Path, str] = {}
     cells: dict[str, str] = {}
@@ -816,7 +827,7 @@ def import_packages(
             cells[instance] = by_package[key]
             continue
         try:
-            view = _import(instance, package, files_in, read, work, pdk, reserved)
+            view = _import(instance, package, files_in, read, work, pdk, reserved, libs)
         except MacroImportError as exc:
             raise MacroImportError(f"macro {instance} ({package.name}): {exc}") from None
         for other in views:
@@ -827,6 +838,8 @@ def import_packages(
                     "one's cells could replace the other's"
                 )
         for c in view.gds_cells:
+            if c in view.pdk_cells:
+                continue
             if c in gds_seen or c in reserved:
                 raise MacroImportError(f"macro {instance}: GDS cell {c} is used elsewhere")
             gds_seen[c] = view.cell
@@ -848,12 +861,13 @@ def _import(
     work: Path,
     pdk: str,
     reserved: Reserved,
+    libs: PdkLibs,
 ) -> MacroView:
     base = builddir.work_dir(work, "macros", instance, empty=True)
     # The copy keeps the package's directory name, which macro/v1 checks.
     copy = builddir.work_dir(base, package.name)
     _copy_package(read, package, files_in(package), copy)
-    manifest, report = check_copy(copy, pdk)
+    manifest, report = check_copy(copy, pdk, libs)
     cell = manifest.name
     reserved.check_package(cell)
     for d in manifest.domains:
@@ -867,7 +881,10 @@ def _import(
     )
     gds_data = (copy / manifest.file("gds")).read_bytes()
     names = gds_cells(gds_data)
-    check_gds_cells(names, cell)
+    # The check passed with the libraries, so a cell named exactly like a standard cell
+    # is the PDK's own: anything else of the PDK's name space is a pdk.cell_name error.
+    std = tuple(n for n in names if n != cell and n in libs.std_cells)
+    check_gds_cells(names, cell, std)
     spice_text, subckts = reduce_spice(
         (copy / manifest.file("spice")).read_text(encoding="ascii", errors="replace"), cell
     )
@@ -897,6 +914,7 @@ def _import(
         spice=spice,
         subckts=tuple(subckts),
         gds_cells=tuple(names),
+        pdk_cells=std,
         report=report,
     )
 

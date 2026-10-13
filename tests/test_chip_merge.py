@@ -219,6 +219,7 @@ def test_a_package_is_always_a_package(tmp_path):
         root / "build",
         "ihp-sg13g2",
         layer.Reserved(frozenset()),
+        libs=layer.PdkLibs(),
     ).views["strongarm"]
     assert v.source == "package" and v.supply_hookup and v.report is not None
     from chipleap.chip.config import ChipMacro as M
