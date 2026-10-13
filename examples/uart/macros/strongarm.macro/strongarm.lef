@@ -5,15 +5,15 @@ VERSION 5.7 ;
 MACRO strongarm
   CLASS BLOCK ;
   FOREIGN strongarm ;
-  ORIGIN 8.550 0.600 ;
-  SIZE 20.930 BY 45.000 ;
+  ORIGIN 10.950 0.600 ;
+  SIZE 29.100 BY 40.800 ;
   PIN clk
     DIRECTION INPUT ;
     USE CLOCK ;
     ANTENNAGATEAREA 1.040000 ;
     PORT
       LAYER Metal4 ;
-        RECT -1.350 -0.600 -1.050 7.090 ;
+        RECT -6.150 -0.600 -5.850 7.090 ;
     END
   END clk
   PIN inm
@@ -22,7 +22,7 @@ MACRO strongarm
     ANTENNAGATEAREA 0.520000 ;
     PORT
       LAYER Metal4 ;
-        RECT -2.550 -0.600 -2.250 17.230 ;
+        RECT 14.250 -0.600 14.550 16.030 ;
     END
   END inm
   PIN inp
@@ -31,7 +31,7 @@ MACRO strongarm
     ANTENNAGATEAREA 0.520000 ;
     PORT
       LAYER Metal4 ;
-        RECT -3.750 -0.600 -3.450 16.630 ;
+        RECT -7.350 -0.600 -7.050 16.030 ;
     END
   END inp
   PIN outn
@@ -41,7 +41,7 @@ MACRO strongarm
     ANTENNADIFFAREA 0.950000 ;
     PORT
       LAYER Metal4 ;
-        RECT -4.950 -0.600 -4.650 20.330 ;
+        RECT -8.550 -0.600 -8.250 17.930 ;
     END
   END outn
   PIN outp
@@ -51,7 +51,7 @@ MACRO strongarm
     ANTENNADIFFAREA 0.950000 ;
     PORT
       LAYER Metal4 ;
-        RECT -6.150 -0.600 -5.850 19.130 ;
+        RECT 15.450 -0.600 15.750 17.930 ;
     END
   END outp
   PIN vdd
@@ -59,7 +59,7 @@ MACRO strongarm
     USE POWER ;
     PORT
       LAYER Metal4 ;
-        RECT -7.350 -0.600 -7.050 28.270 ;
+        RECT -9.750 -0.600 -9.450 26.470 ;
     END
   END vdd
   PIN vss
@@ -67,35 +67,33 @@ MACRO strongarm
     USE GROUND ;
     PORT
       LAYER Metal4 ;
-        RECT -8.550 -0.600 -8.250 0.050 ;
+        RECT -10.950 -0.600 -10.650 0.050 ;
     END
   END vss
   OBS
       LAYER GatPoly ;
-        RECT 0.000 1.400 7.280 43.000 ;
+        RECT 0.000 1.400 7.200 38.800 ;
       LAYER Metal1 ;
-        RECT 0.000 1.400 7.280 43.000 ;
+        RECT 0.000 1.400 7.200 38.800 ;
       LAYER Metal2 ;
-        RECT 0.050 0.005 7.230 44.395 ;
+        RECT 0.050 0.005 7.150 40.195 ;
       LAYER Metal3 ;
-        RECT -8.545 0.000 12.375 44.400 ;
+        RECT -10.945 0.000 18.145 40.200 ;
       LAYER Metal4 ;
-        RECT -8.550 28.480 12.380 44.395 ;
-        RECT -8.550 0.260 -7.560 28.480 ;
-        RECT -8.550 0.250 -8.250 0.260 ;
-        RECT -8.550 0.050 -8.500 0.250 ;
-        RECT -8.040 0.005 -7.560 0.260 ;
-        RECT -6.840 20.540 12.380 28.480 ;
-        RECT -6.840 19.340 -5.160 20.540 ;
-        RECT -6.840 0.005 -6.360 19.340 ;
-        RECT -5.640 0.005 -5.160 19.340 ;
-        RECT -4.440 17.440 12.380 20.540 ;
-        RECT -4.440 16.840 -2.760 17.440 ;
-        RECT -4.440 0.005 -3.960 16.840 ;
-        RECT -3.240 0.005 -2.760 16.840 ;
-        RECT -2.040 7.300 12.380 17.440 ;
-        RECT -2.040 0.005 -1.560 7.300 ;
-        RECT -0.840 0.005 12.380 7.300 ;
+        RECT -10.950 26.680 18.150 40.195 ;
+        RECT -10.950 0.260 -9.960 26.680 ;
+        RECT -10.950 0.250 -10.650 0.260 ;
+        RECT -10.950 0.050 -10.900 0.250 ;
+        RECT -10.440 -0.600 -9.960 0.260 ;
+        RECT -9.240 18.140 18.150 26.680 ;
+        RECT -9.240 -0.600 -8.760 18.140 ;
+        RECT -8.040 16.240 15.240 18.140 ;
+        RECT -8.040 -0.600 -7.560 16.240 ;
+        RECT -6.840 7.300 14.040 16.240 ;
+        RECT -6.840 -0.600 -6.360 7.300 ;
+        RECT -5.640 -0.600 14.040 7.300 ;
+        RECT 14.760 -0.600 15.240 16.240 ;
+        RECT 15.960 -0.600 18.150 18.140 ;
   END
 END strongarm
 END LIBRARY
