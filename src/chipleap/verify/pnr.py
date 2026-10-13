@@ -59,6 +59,7 @@ class PnrResult:
     macros: tuple[tuple[str, str], ...] = ()  # (instance, cell) of each SRAM macro placed
     macro_um2: float = 0.0
     buffers: str = ""  # what the buffers are in the layout, and why when they are flops
+    synth_cell_um2: float = 0.0  # LibreLane's synthesis, before placement's repairs
 
     @property
     def clean(self) -> bool:
@@ -278,7 +279,9 @@ def place_and_route(
     from chipleap.rtl.pnr import check_merged
 
     check_merged(workdir / "runs" / "chipleap", workdir, banks.TOP)
-    result = parse(metrics, clock_mhz, gds)
+    result = replace(
+        parse(metrics, clock_mhz, gds), synth_cell_um2=synth_area(workdir / "runs" / "chipleap")
+    )
     counts: dict[str, int] = {}
     for _, cell in plan.instances():
         counts[cell] = counts.get(cell, 0) + 1
@@ -315,6 +318,20 @@ def sram_flow(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )
     return sram_config(accel, clock_mhz, fp, macros), plan
+
+
+def synth_area(run: Path) -> float:
+    """The standard-cell area of LibreLane's synthesis in ``run`` (0 when the run has
+    none): what the model's logic estimate is checked against, before placement and
+    timing repair add to it."""
+    found = sorted(run.glob("*-yosys-synthesis/state_out.json"))
+    if not found:
+        return 0.0
+    try:
+        metrics = json.loads(found[-1].read_text()).get("metrics", {})
+    except (OSError, ValueError, AttributeError):
+        return 0.0
+    return _num(metrics, "design__instance__area") if isinstance(metrics, dict) else 0.0
 
 
 def _timed_out(exc: launch.TimedOut, log: Path) -> str:

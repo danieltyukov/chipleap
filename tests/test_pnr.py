@@ -174,6 +174,7 @@ def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch
         macros=(("abuf_s0_m0", cell), ("wbuf_s0_l0_m0", cell)),
         macro_um2=2 * 784.48 * 118.78,
         buffers=f"SRAM macros: 2 x {cell}",
+        synth_cell_um2=250000.0,
     )
     monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work: result)
     step = run.place_route(Design(accel=SMOLLM2, freq_mhz=90.0), tmp_path)
@@ -187,4 +188,10 @@ def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch
     assert d["model_area_error"] == pytest.approx(
         (d["model_um2"] - d["measured_um2"]) / d["measured_um2"], abs=1e-4
     )
-    assert f"buffers in 2 x {cell}: cells and macros 0.486 mm2, the model" in step.summary
+    assert f"buffers in 2 x {cell}: macros 0.186 mm2, the model 0.373 mm2" in step.summary
+    # The model's macros are the layout's (four here, two in this stand-in result), its
+    # logic is checked against synthesis, and what place and route adds is its own line.
+    assert d["model_buffer_um2"] == round(4 * 784.48 * 118.78)
+    assert d["synth_cell_um2"] == 250000 and d["pnr_cell_growth"] == pytest.approx(0.2)
+    assert d["model_cell_error"] == pytest.approx((d["model_cell_um2"] - 250000) / 250000, abs=1e-4)
+    assert "synthesis 0.250 mm2" in step.summary and "place and route adds 20%" in step.summary

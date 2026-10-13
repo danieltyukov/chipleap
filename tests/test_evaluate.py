@@ -131,3 +131,30 @@ def test_ihp_clock_above_the_accelerators_timing_is_a_violation(smol):
     # With four ports the routed 2 x 8 engine meets 100 MHz at the slow corner.
     four = evaluate(smol, fast.with_(accel=Accel("gemv", 2, 8, 8, ports=4, abuf_kib=2, wbuf_kib=2)))
     assert not any("closes timing" in v for v in four.violations)
+
+
+def test_ihp_buffers_cost_the_macros_the_layout_places():
+    """A 1 KiB slot of a double buffer is a 2 KiB 256x64 macro, half empty, as routed;
+    the model prices what the layout places, so exploration sees that cost."""
+    from chipleap.gen import banks
+    from chipleap.hw.design import Accel
+    from chipleap.hw.tech import get_tech
+    from chipleap.macro.sram import IHP_1P
+    from chipleap.model.evaluate import buffer_mm2
+
+    ihp = get_tech("ihp-sg13g2")
+    one = Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2)
+    placed = banks.plan(one, IHP_1P)
+    assert {s.cell for s in placed.cells()} == {"RM_IHPSG13_1P_256x64_c2_bm_bist"}
+    assert buffer_mm2(one, ihp) == pytest.approx(4 * 784.48 * 118.78 / 1e6)
+    assert buffer_mm2(one, ihp) > ihp.sram_mm2(2) * 2
+    # More ports read the same banks: the same macros, whatever the layout keeps today.
+    assert buffer_mm2(Accel("gemv", 1, 8, 8, ports=2, abuf_kib=2, wbuf_kib=2), ihp) == (
+        buffer_mm2(one, ihp)
+    )
+    # A dataflow the banks do not serve: each slot in 32-bit macros, still whole macros.
+    ws = Accel("ws", 4, 4, 8, ports=1, abuf_kib=2, wbuf_kib=2)
+    assert buffer_mm2(ws, ihp) == pytest.approx(4 * 416.64 * 118.78 / 1e6)
+    # Other nodes keep the density model.
+    other = get_tech("generic-16nm")
+    assert buffer_mm2(one, other) == other.sram_mm2(2) * 2
