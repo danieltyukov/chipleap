@@ -28,6 +28,7 @@ from chipleap.rtl.openroad import (
     OpenroadError,
     OpenroadUnavailable,
     failure,
+    macro_views,
     pdk_views,
     read_limited,
     routed_views,
@@ -90,10 +91,13 @@ def ir_script(
     scope: str,
 ) -> str:
     voltage = corner_voltage(corner)
+    macro = files.get("macros", {"lefs": [], "liberty": {}})
     lines = [
         f"read_lef {q.tcl(files['tech_lef'])}",
         *(f"read_lef {q.tcl(f)}" for f in files["cell_lefs"]),
+        *(f"read_lef {q.tcl(f)}" for f in macro["lefs"]),
         f"read_liberty {q.tcl(files['liberty'][corner])}",
+        *(f"read_liberty {q.tcl(f)}" for f in macro["liberty"].get(corner, [])),
         f"read_def {q.tcl(def_)}",
         f"read_sdc {q.tcl(sdc)}",
     ]
@@ -261,6 +265,8 @@ def analyze(project: Project) -> IrResult:
     act = activity(project, views.netlist, pdk, True, views.sealed)
     job = Job(work, "pdnsim")
     files = pdk.stage_all(job, (cfg.corner,))
+    # The hard macros' LEF (their supply pins on the grid) and liberty (their power).
+    files["macros"] = macro_views(project, views.run).stage_all(job, (cfg.corner,))
     def_ = job.stage(views.def_, sealed=views.sealed)
     sdc = job.stage(views.sdc, sealed=views.sealed)
     spef = job.stage(views.spef, sealed=views.sealed) if views.spef else None

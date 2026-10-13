@@ -27,7 +27,8 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +193,87 @@ class PdkViews:
             "cell_lefs": [job.stage(p) for p in self.cell_lefs],
             "liberty": {c: job.stage(self.lib(c)) for c in corners},
         }
+
+
+@dataclass(frozen=True)
+class MacroViews:
+    """A project's hard macros as OpenROAD reads them: each cell's LEF and its liberty at
+    each corner. A routed run's are the copies its manifest recorded (``sealed``), which
+    ``Job.stage`` checks; otherwise they are the macro layer's views, copied by ChipLeap
+    into a step's work directory."""
+
+    lefs: tuple[Path, ...] = ()
+    liberty: dict[str, tuple[Path, ...]] = field(default_factory=dict)
+    sealed: Sealed | None = None
+
+    def lib(self, corner: str) -> tuple[Path, ...]:
+        if self.lefs and not self.liberty.get(corner):
+            raise OpenroadUnavailable(f"no {corner} liberty for the hard macros")
+        return self.liberty.get(corner, ())
+
+    def stage_all(self, job: Job, corners: tuple[str, ...] = ("typ",)) -> dict[str, Any]:
+        """Stage each macro's LEF and its liberty at each corner; their names in the job."""
+        return {
+            "lefs": [job.stage(p, sealed=self.sealed) for p in self.lefs],
+            "liberty": {
+                c: [job.stage(p, sealed=self.sealed) for p in self.lib(c)] for c in corners
+            },
+        }
+
+
+def macro_views(project: Project, run: Path | None = None, work: Path | None = None) -> MacroViews:
+    """The project's hard macros for OpenROAD: with a routed ``run``, the LEF and liberty
+    its configuration names, each a file of the run's manifest; else the macro layer's
+    views, written into ``work`` (``chipleap.rtl.macros.views``). Empty without macros."""
+    if not project.macros:
+        return MacroViews()
+    libs: dict[str, list[Path]] = {c: [] for c in CORNERS}
+
+    def add(pattern: str, path: Path) -> None:
+        for corner, suffix in CORNERS.items():
+            if fnmatchcase(f"nom_{suffix}", pattern):
+                libs[corner].append(path)
+
+    if run is not None:
+        sealed = sealed_run(project, run)
+        cfg = _sealed_json(sealed, run / "resolved.json")
+        entries = cfg.get("MACROS") if isinstance(cfg, dict) else None
+        if not isinstance(entries, dict) or not entries:
+            raise OpenroadError("the routed run's configuration names no hard macros")
+
+        def recorded(value: Any) -> Path:
+            if not isinstance(value, str):
+                raise OpenroadError("the routed run's MACROS names a file that is not a path")
+            try:
+                return sealed.locate(value)[0]
+            except SealError as exc:
+                raise OpenroadError(f"hard macro view: {exc}") from None
+
+        lefs: list[Path] = []
+        for entry in entries.values():
+            entry = entry if isinstance(entry, dict) else {}
+            lefs += [recorded(v) for v in entry.get("lef") or []]
+            lib = entry.get("lib") or {}
+            for pattern, files in lib.items() if isinstance(lib, dict) else []:
+                for f in files if isinstance(files, list) else [files]:
+                    add(str(pattern), recorded(f))
+        return MacroViews(tuple(lefs), {c: tuple(v) for c, v in libs.items()}, sealed)
+    from chipleap.macro.layer import MacroImportError
+    from chipleap.rtl import macros
+
+    if work is None:
+        raise ValueError("macro_views needs a work directory without a routed run")
+    try:
+        views, srams, _ = macros.views(project, work)
+    except (macros.MacroStepError, MacroImportError) as exc:
+        raise OpenroadUnavailable(f"hard macros: {exc}") from exc
+    for cell, view in views.items():
+        if cell in srams:
+            for pattern, path in srams[cell].libs.items():
+                add(pattern, path)
+        else:
+            add("*", view.lib)
+    return MacroViews(tuple(v.lef for v in views.values()), {c: tuple(v) for c, v in libs.items()})
 
 
 def _in_pdk(path: Path, suffixes: tuple[str, ...], what: str) -> Path:

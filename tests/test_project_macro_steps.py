@@ -289,3 +289,68 @@ def test_the_tests_pass_on_the_netlist_with_the_srams_functional_model(tmp_path)
     assert r.data["macro_models"] == "functional"
     m = (root / "build" / "gls" / "sim" / "manifest.json").read_text()
     assert '"FUNCTIONAL": 1' in m and f"macros/{CELL}.v" in m
+
+
+# DFT: macros stay off the chains and out of the test.
+
+CUT = """\
+module top
+(
+  clk_i,
+  a_i,
+  q_o,
+  _1_,
+  \\_1_.d ,
+  \\u_core.u_mem.A_ADDR.d ,
+  \\u_core.u_mem.A_DOUT ,
+  \\u_core.u_mem.A_WEN.d
+);
+  input clk_i;
+  input [7:0] a_i;
+  output [31:0] q_o;
+  input _1_;
+  output \\_1_.d ;
+  output [7:0] \\u_core.u_mem.A_ADDR.d ;
+  input [31:0] \\u_core.u_mem.A_DOUT ;
+  output [0:0] \\u_core.u_mem.A_WEN.d ;
+  assign \\u_core.u_mem.A_ADDR.d  = a_i;
+  assign q_o = \\u_core.u_mem.A_DOUT ;
+endmodule
+"""
+
+
+def test_a_cut_macro_is_taken_out_of_the_test():
+    from chipleap.rtl.dft import seal_macros
+
+    text, unobserved, tied = seal_macros(CUT, ["u_core.u_mem"])
+    assert unobserved == ["\\u_core.u_mem.A_ADDR.d", "\\u_core.u_mem.A_WEN.d"]
+    assert tied == ["\\u_core.u_mem.A_DOUT"]
+    header = text[text.index("(") : text.index(");")]
+    # The flip-flop's cut ports stay; the macro's go, its last port without a comma too.
+    assert "\\_1_.d" in header and "u_mem" not in header
+    assert "  wire [7:0] \\u_core.u_mem.A_ADDR.d ;" in text
+    assert "  wire [31:0] \\u_core.u_mem.A_DOUT ;" in text
+    assert "  assign \\u_core.u_mem.A_DOUT = 0;\nendmodule" in text
+    assert "input [31:0] \\u_core.u_mem" not in text and "output [7:0] \\u_core" not in text
+    # Another instance's names are left as they are.
+    _, none_unobserved, none_tied = seal_macros(CUT, ["u_other"])
+    assert none_unobserved == [] and none_tied == []
+
+
+@pytest.mark.skipif(
+    __import__("os").environ.get("CHIPLEAP_RUN_IMPL") != "1", reason="set CHIPLEAP_RUN_IMPL=1"
+)
+def test_dft_keeps_the_sram_off_the_chains_and_its_patterns_pass(tmp_path):
+    from chipleap.rtl.dft import dft
+
+    root = sram_project(tmp_path / "sram", dft={})
+    r = dft(load_project(root))
+    assert r.status == "pass", r.summary
+    assert r.data["flops"] == 1 and r.data["scanned"] == 1
+    atpg = r.data["atpg"]
+    assert atpg["macro_outputs_held_at_0"] == 1 and atpg["macro_inputs_not_observed"] == 16
+    assert 0 < atpg["coverage_pct"] < 100
+    assert r.data["simulation"]["errors"] == 0 and r.data["simulation"]["patterns"] > 0
+    tb = (root / "build" / "dft" / "sim" / "tb.v").read_text()
+    assert "initial force dut.u_mem.A_DOUT = 0;" in tb
+    assert "out of the test" in r.summary

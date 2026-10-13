@@ -10,7 +10,10 @@ shows the chains and the patterns work.
 3. Fault cuts the flip-flops out of the pre-scan netlist, so each one's output becomes an
    input and its D an output, ``nl2bench`` converts the cut netlist, Quaigh generates
    test patterns and Fault simulates every stuck-at fault against them: its coverage is
-   the step's number.
+   the step's number. Hard macros stay off the chains: Fault cuts them too, then
+   ``seal_macros`` takes them out of the test, so a fault seen only at a macro's inputs
+   is not detected and no pattern sets a macro's outputs, which hold at 0 (in silicon, a
+   test-mode gate on them). A macro is tested through its own BIST port, not by scan.
 4. ChipLeap lays each pattern onto the chains and writes ``patterns.json`` and a STIL
    file, then simulates the scan netlist with the cell models on Icarus 13: a flush
    pattern through every chain, and the first few ATPG patterns shifted in, captured and
@@ -52,6 +55,7 @@ from chipleap.rtl.openroad import (
     OpenroadUnavailable,
     PdkViews,
     failure,
+    macro_views,
     pdk_views,
     read_json,
     read_limited,
@@ -134,6 +138,9 @@ class AtpgResult:
     version: str = ""
     # The vector file as read once, for the patterns: the file is not read again.
     data: dict[str, Any] = field(default_factory=dict)
+    # The hard macros' ports taken out of the test: inputs not observed, outputs tied to 0.
+    unobserved: list[str] = field(default_factory=list)
+    tied: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -177,10 +184,13 @@ def _bit_ref(bit: str) -> str:
 def scan_script(project: Project, files: dict[str, Any], netlist: str, cfg: DftConfig) -> str:
     """The OpenROAD script that inserts the scan chains. Every value from the project is
     a quoted word; the netlist and libraries are ChipLeap's staged copies."""
+    macro = files.get("macros", {"lefs": [], "liberty": {}})
     lines = [
         f"read_lef {q.tcl(files['tech_lef'])}",
         *(f"read_lef {q.tcl(f)}" for f in files["cell_lefs"]),
+        *(f"read_lef {q.tcl(f)}" for f in macro["lefs"]),
         f"read_liberty {q.tcl(files['liberty']['typ'])}",
+        *(f"read_liberty {q.tcl(f)}" for f in macro["liberty"].get("typ", [])),
         f"read_verilog {q.tcl(netlist)}",
         f"link_design {q.tcl(project.top)}",
     ]
@@ -293,6 +303,9 @@ def insert_scan(project: Project, workdir: Path | None = None) -> ScanResult:
         raise DftError(f"synthesis failed: {exc}") from exc
     job = Job(work, "scan")
     files = views.stage_all(job)
+    # Scan insertion leaves the hard macros as they are: no macro has a scan equivalent.
+    boxes = macro_views(project, work=builddir.work_dir(work, "macro_views"))
+    files["macros"] = boxes.stage_all(job)
     netlist = job.stage(synth.netlist)
     # From here on the synthesized netlist is the staged copy: its hash was taken of the
     # bytes copied, and it is read only with that hash checked.
@@ -375,6 +388,49 @@ def scan_sealed(scan: ScanResult) -> Sealed:
 # ATPG with Fault.
 
 
+_CUT_PORT_RE = re.compile(r"^\s*(input|output)\s+(\[[^\]]*\]\s*)?(\\\S+)\s*;\s*$", re.M)
+
+
+def seal_macros(cut: str, instances: list[str]) -> tuple[str, list[str], list[str]]:
+    """Fault's cut netlist with the hard macros' ports taken out of the test: a macro's
+    inputs (``\\<inst>.<pin>.d`` outputs, as Fault cuts it) become plain wires, so no
+    fault counts as detected there, and its outputs (``\\<inst>.<pin>`` inputs) become
+    wires tied to 0, so no pattern sets them. Returns the netlist and the names of both.
+    Scan chains cannot load or unload a macro, and in silicon only a test-mode gate on a
+    macro's outputs makes them known: the coverage this gives assumes that gate."""
+    prefixes = tuple(f"\\{i}." for i in instances)
+    unobserved: list[str] = []
+    tied: list[str] = []
+    ties: list[str] = []
+
+    def decl(m: re.Match[str]) -> str:
+        kind, rng, name = m.group(1), m.group(2) or "", m.group(3)
+        if not name.startswith(prefixes):
+            return m.group(0)
+        if kind == "output" and name.endswith(".d"):
+            unobserved.append(name)
+        elif kind == "input":
+            tied.append(name)
+            ties.append(f"  assign {name} = 0;")
+        else:
+            raise DftError(f"Fault cut a macro port it should not have: {name}")
+        return f"  wire {rng}{name} ;"
+
+    text = _CUT_PORT_RE.sub(decl, cut)
+    gone = set(unobserved) | set(tied)
+    head = re.search(r"\bmodule\s+\S+\s*\((.*?)\);", text, re.S)
+    if head is None:
+        raise DftError("Fault's cut netlist has no module header")
+    ports = [p.strip() for p in head.group(1).split(",")]
+    kept = ",\n  ".join(p for p in ports if p and p not in gone)
+    text = text[: head.start(1)] + "\n  " + kept + "\n" + text[head.end(1) :]
+    end = text.rfind("endmodule")
+    if end < 0:
+        raise DftError("Fault's cut netlist has no endmodule")
+    text = text[:end] + "\n".join(ties) + ("\n" if ties else "") + text[end:]
+    return text, unobserved, tied
+
+
 def _bypass(project: Project) -> list[str]:
     """Fault's options for the clocks and resets, held inactive while it simulates."""
     args: list[str] = []
@@ -436,14 +492,30 @@ def run_atpg(project: Project, scan: ScanResult, views: PdkViews, workdir: Path)
     builddir.write_text(work, "scl.yml", yaml.safe_dump(FAULT_SCL, sort_keys=False))
     env = fault_env(tool.path)
     bypass = _bypass(project)
+    # The hard macros are cut like flip-flops (Fault's black boxes), then taken out of
+    # the test (seal_macros).
+    from chipleap.rtl import macros
+
+    stubs = [_stage(b, work) for b in macros.stubs(project)]
+    boxes = (
+        ["--blackbox", ",".join(Path(b).stem for b in stubs), "--blackbox-models", ",".join(stubs)]
+        if stubs
+        else []
+    )
     code, log = _run(
-        [tool.path, "cut", "-s", "scl.yml", *bypass, "-o", f"{top}.cut.v", f"{top}.nl.v"],
+        [tool.path, "cut", "-s", "scl.yml", *boxes, *bypass, "-o", f"{top}.cut.v", f"{top}.nl.v"],
         work,
         "cut.log",
         env,
     )
     if code != 0 or not (work / f"{top}.cut.v").is_file():
         raise DftError(f"fault cut failed (exit {code}): {_last(log)}")
+    unobserved: list[str] = []
+    tied: list[str] = []
+    if stubs:
+        cut = read_limited(work / f"{top}.cut.v")
+        text, unobserved, tied = seal_macros(cut, [m.flat for m in project.macros])
+        builddir.write_text(work, f"{top}.cut.v", text)
     lib = _stage(views.lib("typ"), work)
     code, log = _run(
         [conv.path, "-o", f"{top}.bench", "-l", lib, f"{top}.cut.v"], work, "bench.log", env
@@ -486,7 +558,9 @@ def run_atpg(project: Project, scan: ScanResult, views: PdkViews, workdir: Path)
         vectors = work / f"{top}.tv.json"
     if code != 0 or not vectors.is_file():
         raise DftError(f"fault atpg failed (exit {code}): {_last(log)}")
-    return parse_atpg(log, read_limited(work / f"{top}.cov.yml"), vectors, tool.version)
+    result = parse_atpg(log, read_limited(work / f"{top}.cov.yml"), vectors, tool.version)
+    result.unobserved, result.tied = unobserved, tied
+    return result
 
 
 def _last(log: str) -> str:
@@ -822,10 +896,17 @@ def write_bench_data(
 
 
 def testbench(
-    project: Project, top: Module, scan: ScanResult, bench: _Bench, t_flush: int, n_patterns: int
+    project: Project,
+    top: Module,
+    scan: ScanResult,
+    bench: _Bench,
+    t_flush: int,
+    n_patterns: int,
+    tied: tuple[str, ...] = (),
 ) -> str:
     """A Verilog testbench that shifts the flush pattern and then each ATPG pattern through
-    the chains of the scan netlist, capturing once per pattern."""
+    the chains of the scan netlist, capturing once per pattern. ``tied`` are the hard
+    macros' outputs ATPG took as 0 (``seal_macros``), held at 0 here too."""
     clocks = [c.port for c in project.clocks]
     resets = {r.port: r for r in project.resets}
     n = max(len(bench.chains), 1)
@@ -883,6 +964,9 @@ def testbench(
     if not bench.po:
         lines.append("  assign po_now = 1'b0;")
     lines += [f"  {_ident(project.top)} dut (", ",\n".join(conns), "  );"]
+    for name in tied:
+        inst, _, pin = name.lstrip("\\").rpartition(".")
+        lines.append(f"  initial force dut.{_ident(inst)}.{_ident(pin)} = 0;")
     lines += [
         "  task tick; begin #10 clk = 1'b1; #10 clk = 1'b0; end endtask",
         "  initial begin",
@@ -968,6 +1052,7 @@ def simulate_patterns(
     netlist: Path | None = None,
     name: str = "sim",
     sealed: Sealed | None = None,
+    tied: tuple[str, ...] = (),
 ) -> SimResult:
     """Run the flush pattern and ``patterns`` through the chains of ``netlist`` (the scan
     netlist by default) on Icarus 13 with the cell models. Either netlist is simulated
@@ -984,11 +1069,17 @@ def simulate_patterns(
     work = builddir.work_dir(workdir, name, empty=True)
     dut = _stage(netlist or scan.netlist, work, sealed=source)
     models = [_stage(m, work) for m in views.models]
+    # The hard macros as their black boxes: the patterns hold their outputs (``tied``).
+    from chipleap.rtl import macros
+
+    models += [_stage(b, work) for b in macros.stubs(project)]
     top = read_netlist([work / dut]).top(project.top)
     clocks = [c.port for c in project.clocks]
     bench = _bench(scan, top, clocks, [r.port for r in project.resets])
     t_flush, _ = write_bench_data(bench, patterns, work)
-    builddir.write_text(work, "tb.v", testbench(project, top, scan, bench, t_flush, len(patterns)))
+    builddir.write_text(
+        work, "tb.v", testbench(project, top, scan, bench, t_flush, len(patterns), tied)
+    )
     env = clean_env()
     compile_cmd = [
         tool.path,
@@ -1071,6 +1162,14 @@ def dft_data(
             "detected": atpg.detected,
             "patterns": atpg.patterns,
             "generator_coverage_pct": atpg.generator_coverage_pct,
+            **(
+                {
+                    "macro_inputs_not_observed": len(atpg.unobserved),
+                    "macro_outputs_held_at_0": len(atpg.tied),
+                }
+                if project.macros
+                else {}
+            ),
         },
         "simulation": _sim_data(sim),
         "simulation_routed": _sim_data(routed),
@@ -1079,6 +1178,20 @@ def dft_data(
         "patterns_stil": project.rel(project.build_dir / "dft" / "patterns.stil"),
         "notes": notes,
     }
+
+
+def _macro_outputs(project: Project) -> tuple[str, ...]:
+    """Every output of every hard macro, as Fault names a cut macro's outputs
+    (``\\<instance>.<pin>``): what the chain simulation holds at 0 without ATPG."""
+    from chipleap.rtl import macros
+    from chipleap.rtl.cdc import macro_boxes
+
+    boxes = macro_boxes(project)
+    out: list[str] = []
+    for m in project.macros:
+        cell = m.cell if m.package is None else macros.manifest(project, m.package).name
+        out += [f"\\{m.flat}.{pin}" for pin in boxes[cell].outputs]
+    return tuple(out)
 
 
 def run_dft(
@@ -1118,12 +1231,13 @@ def run_dft(
     sim: SimResult | None = None
     routed: SimResult | None = None
     try:
-        sim = simulate_patterns(project, scan, patterns[: cfg.patterns], views, work)
+        tied = tuple(atpg.tied) if atpg else _macro_outputs(project)
+        sim = simulate_patterns(project, scan, patterns[: cfg.patterns], views, work, tied=tied)
     except OpenroadUnavailable as exc:
         notes.append(f"chain simulation skipped: {exc}")
         return scan, atpg, sim, routed, notes
     try:
-        routed = simulate_routed(project, scan, patterns[: cfg.patterns], work)
+        routed = simulate_routed(project, scan, patterns[: cfg.patterns], work, tied)
     except OpenroadError as exc:
         # The routed check is a second look when there is a routed design; one ChipLeap
         # did not record here is not read, and the scan netlist's result stands.
@@ -1132,7 +1246,11 @@ def run_dft(
 
 
 def simulate_routed(
-    project: Project, scan: ScanResult, patterns: list[Pattern], work: Path
+    project: Project,
+    scan: ScanResult,
+    patterns: list[Pattern],
+    work: Path,
+    tied: tuple[str, ...] = (),
 ) -> SimResult | None:
     """The same chains and patterns on the routed netlist, when the routed design has the
     scan chains: place and route adds buffers to them but must keep their order."""
@@ -1155,6 +1273,7 @@ def simulate_routed(
         views.netlist,
         "sim-routed",
         views.sealed,
+        tied,
     )
 
 
@@ -1184,6 +1303,13 @@ def dft(project: Project) -> StepResult:
             f"Fault with Quaigh: {atpg.coverage_pct:.1f}% stuck-at coverage "
             f"({atpg.detected} of {atpg.faults} faults) with {atpg.patterns} patterns"
         )
+        if project.macros:
+            n = len(project.macros)
+            parts[-1] += (
+                f", with the {n} hard macro{'s' if n != 1 else ''} out of the test (inputs not "
+                "observed, outputs held at 0 as a test-mode gate would hold them; a macro is "
+                "tested through its own BIST port)"
+            )
         if cfg.min_coverage is not None and atpg.coverage_pct < cfg.min_coverage:
             failed = True
             parts[-1] += f", below the {cfg.min_coverage:g}% asked for"
