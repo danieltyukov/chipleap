@@ -25,7 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.macro.layer import GDS_NAME, MacroView, gds_raw_name, gds_records
+from chipleap.macro.gds import GdsError, structure_digests
+from chipleap.macro.layer import GDS_NAME, MacroView
 
 FILE_MAX = 1 << 30
 MODULES_MAX = 100_000
@@ -73,24 +74,19 @@ def _read(path: Path) -> bytes:
 
 def gds_names(data: bytes) -> dict[str, str]:
     """Each structure of a GDS stream with a digest of its records (its name and
-    elements, not the dates in its header). A name that is not plain is an error."""
+    elements, not the dates in its header), as macro/v1 defines identical structures
+    (``chipleap.macro.gds.structure_digests``). A name that is not plain is an error."""
     out: dict[str, str] = {}
-    current = ""
-    h = hashlib.sha256()
-    for rtype, a, b in gds_records(data):
-        if rtype == 0x06:  # STRNAME
-            raw = gds_raw_name(data[a:b])
+    try:
+        for raw, digest in structure_digests(data):
             if not GDS_NAME.fullmatch(raw):
                 raise MergeError(f"GDS cell name {raw[:40]!r} is not plain")
             current = raw.decode()
-            h = hashlib.sha256()
-        if current:
-            h.update(data[a - 4 : b])
-        if rtype == 0x07 and current:  # ENDSTR
-            if current in out and out[current] != h.hexdigest():
+            if current in out and out[current] != digest:
                 raise MergeError(f"GDS cell {current} is defined twice in one file")
-            out[current] = h.hexdigest()
-            current = ""
+            out[current] = digest
+    except GdsError as exc:
+        raise MergeError(f"GDS: {exc}") from None
     return out
 
 

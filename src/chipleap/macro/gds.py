@@ -12,9 +12,11 @@ ChipLeap and aispice (``aispice_core::macropkg::gds``) read GDS the same way.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import struct
 from array import array
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
@@ -491,6 +493,31 @@ def _finish(
                 ((x2 - x0) / rows, (y2 - y0) / rows),
             )
         )
+
+
+def structure_digests(data: bytes) -> Iterator[tuple[bytes, str]]:
+    """Each structure of a GDS stream: its name as written (one NUL pads an odd length)
+    and the SHA-256 of its records from STRNAME to ENDSTR, each with its four-byte
+    header. Two structures with the same digest are identical, for macro/v1's
+    ``pdk.cell_name`` and for a chip's merges (``chipleap.chip.merge``); BGNSTR, which
+    holds the dates, is not compared. Raises :class:`GdsError` when a record runs past
+    the end of the stream."""
+    pos, n = 0, len(data)
+    name: bytes | None = None
+    start = 0
+    while pos + 4 <= n:
+        length, rtype = (data[pos] << 8) | data[pos + 1], data[pos + 2]
+        if length < 4 or pos + length > n:
+            raise GdsError(f"bad record length {length} at byte {pos}")
+        if rtype == 0x06:  # STRNAME
+            body = data[pos + 4 : pos + length]
+            name, start = (body[:-1] if body.endswith(b"\0") else body), pos
+        pos += length
+        if rtype == 0x07 and name is not None:  # ENDSTR
+            yield name, hashlib.sha256(data[start:pos]).hexdigest()
+            name = None
+        if rtype == 0x04:  # ENDLIB
+            return
 
 
 def read_gds(path: str | Path, limits: Limits = LIMITS) -> GdsLibrary:

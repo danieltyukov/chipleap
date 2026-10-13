@@ -621,17 +621,17 @@ def cmd_macro(args: argparse.Namespace) -> int:
     if args.macro_cmd == "schema":
         print(schema_text(), end="")
         return 0
-    cells: frozenset[str] = frozenset()
+    libs = None
     if args.pdk_libs:
-        from chipleap.macro.layer import MacroImportError, pdk_cell_names
+        from chipleap.macro.layer import MacroImportError, pdk_libs
 
         try:
-            cells = pdk_cell_names(Path(args.pdk_libs).expanduser())
+            libs = pdk_libs(Path(args.pdk_libs).expanduser())
         except (MacroImportError, OSError) as exc:
             print(f"chipleap: --pdk-libs: {exc}", file=sys.stderr)
             return 2
     try:
-        report = check_package(args.dir, pdk=args.pdk, pdk_cells=cells)
+        report = check_package(args.dir, pdk=args.pdk, pdk_libs=libs)
     except FileNotFoundError as exc:
         print(f"chipleap: {exc}", file=sys.stderr)
         return 2

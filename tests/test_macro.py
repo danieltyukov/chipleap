@@ -17,6 +17,7 @@ from chipleap.cli import main
 from chipleap.macro import (
     MacroError,
     Manifest,
+    PdkLibs,
     check_package,
     load_manifest,
     make_evidence,
@@ -25,6 +26,8 @@ from chipleap.macro import (
     schema,
     write_evidence,
 )
+from chipleap.macro.gds import structure_digests
+from chipleap.macro.layer import pdk_libs
 from chipleap.macro.manifest import read_toml
 from chipleap.macro.schema import validate_def
 from chipleap.macro.text import fmt_g
@@ -37,9 +40,9 @@ EXPECTED = json.loads((FIXTURES / "expected.json").read_text())
 # The contract both repositories share. aispice pins the same hashes in
 # crates/aispice-core/tests/macro_contract.rs; change both together (CONTRIBUTING.md).
 CONTRACT = {
-    "docs/macro-package.md": "7f64a8235353f4f8f34584657104454e3c2d5a2e73b69c0c9d806996f51760b7",
+    "docs/macro-package.md": "e626f078629cfd2b9023a22ac038d7046026d12de2b226bff62eae5f8977e1ef",
     "src/chipleap/macro/macro-v1.schema.json": "01fadd5205677b27ef3dcc5a00c086aaf00f2dba63d398d17fc046dd67254327",
-    "tests/fixtures/macro/SHA256SUMS": "e2afb61df8867df02db4ae502029c0ad21b9f08af1d8fb06774c4af8835f3ee0",
+    "tests/fixtures/macro/SHA256SUMS": "1868d302d0c4efec6708215b100ce253446bb6a1095712ce1bb2ba79c7899a8e",
 }
 
 
@@ -48,12 +51,17 @@ def _sha(path: Path) -> str:
 
 
 def _case_id(case: dict) -> str:
-    return case["package"] + (f"@{case['pdk']}" if case["pdk"] else "")
+    return (
+        case["package"]
+        + (f"@{case['pdk']}" if case["pdk"] else "")
+        + (f"+{case['pdk_libs']}" if case.get("pdk_libs") else "")
+    )
 
 
 @pytest.mark.parametrize("case", EXPECTED["cases"], ids=_case_id)
 def test_fixture_reports_exactly_what_expected_json_says(case):
-    report = check_package(FIXTURES / case["package"], pdk=case["pdk"])
+    libs = pdk_libs(FIXTURES / case["pdk_libs"]) if case.get("pdk_libs") else None
+    report = check_package(FIXTURES / case["package"], pdk=case["pdk"], pdk_libs=libs)
     assert (report.name, report.kind) == (case["name"], case["kind"])
     assert (report.passed, report.errors, report.warnings) == (
         case["pass"],
@@ -566,29 +574,72 @@ def _counter(tmp_path: Path, name: str, tap: str = "") -> Path:
 
 
 def test_a_package_named_in_the_pdks_name_space_is_refused(tmp_path):
-    report = check_package(_counter(tmp_path, "sg13g2_counter"))
-    assert [(f.rule, f.file) for f in report.findings] == [
-        ("pdk.cell_name", "macro.toml"),
-        ("pdk.cell_name", "sg13g2_counter.gds"),  # its tap cell, sg13g2_counter_tap
+    pkg = _counter(tmp_path, "sg13g2_counter")
+    report = check_package(pkg)
+    # Its tap cell, sg13g2_counter_tap, cannot be compared without the PDK's libraries.
+    assert [(f.rule, f.severity, f.file) for f in report.findings] == [
+        ("pdk.cell_name", "error", "macro.toml"),
+        ("pdk.cell_name", "warning", "sg13g2_counter.gds"),
     ]
     assert report.findings[0].message == (
         'name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do'
     )
+    # With them, it is no cell of the PDK's: an error.
+    report = check_package(pkg, pdk_libs=pdk_libs(FIXTURES / "pdk" / "ihp-sg13g2"))
+    assert [(f.severity, f.message) for f in report.findings] == [
+        (
+            "error",
+            'name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do',
+        ),
+        (
+            "error",
+            'GDS cell "sg13g2_counter_tap" begins with "sg13g2", as the cells of PDK '
+            '"ihp-sg13g2" do',
+        ),
+    ]
 
 
 def test_case_does_not_hide_a_pdk_cell_name(tmp_path):
-    report = check_package(_counter(tmp_path, "counter", tap="RM_IHPSG13_tap"))
+    pkg = _counter(tmp_path, "counter", tap="RM_IHPSG13_tap")
+    report = check_package(pkg, pdk_libs=PdkLibs())
     assert [f.message for f in report.findings] == [
         'GDS cell "RM_IHPSG13_tap" begins with "rm_ihpsg13", as the cells of PDK "ihp-sg13g2" do'
     ]
+    # A PDK cell's name in another case is not its name.
+    pkg = _counter(tmp_path / "upper", "counter", tap="SG13G2_INV_1")
+    report = check_package(pkg, pdk_libs=pdk_libs(FIXTURES / "pdk" / "ihp-sg13g2"))
+    assert [f.message for f in report.findings] == [
+        'GDS cell "SG13G2_INV_1" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do'
+    ]
+
+
+def test_a_pdk_cell_is_compared_without_the_dates_of_its_structure():
+    """A package's copy of the PDK's inverter differs from the PDK's only in BGNSTR, and
+    the chip's merges (chipleap.chip.merge) compare structures the same way."""
+    from chipleap.chip.merge import gds_names
+
+    lib = FIXTURES / "pdk" / "ihp-sg13g2" / "libs.ref" / "sg13g2_stdcell" / "gds"
+    pdk_gds = (lib / "sg13g2_stdcell.gds").read_bytes()
+    pkg_gds = (
+        FIXTURES / "broken" / "std-cell-identical" / "tiny_counter.macro" / "tiny_counter.gds"
+    ).read_bytes()
+    assert pdk_gds.count(b"\x07\xe9") and not pkg_gds.count(b"\x07\xe9")  # 2025, 2026
+    pdk = dict(structure_digests(pdk_gds))
+    pkg = dict(structure_digests(pkg_gds))
+    assert pdk[b"sg13g2_inv_1"] == pkg[b"sg13g2_inv_1"]
+    assert gds_names(pdk_gds)["sg13g2_inv_1"] == pdk[b"sg13g2_inv_1"]
+    modified = (
+        FIXTURES / "broken" / "std-cell-modified" / "tiny_counter.macro" / "tiny_counter.gds"
+    ).read_bytes()
+    assert dict(structure_digests(modified))[b"sg13g2_inv_1"] != pdk[b"sg13g2_inv_1"]
 
 
 def test_a_cell_of_the_pdks_libraries_is_refused_when_the_validator_has_them(tmp_path):
     pkg = _counter(tmp_path, "counter", tap="nmos")
     assert check_package(pkg).passed
-    report = check_package(pkg, pdk_cells=["nmos", "pmos"])
+    report = check_package(pkg, pdk_libs=PdkLibs(frozenset({"nmos", "pmos"})))
     assert [f.message for f in report.findings] == ['GDS cell "nmos" is a cell of PDK "ihp-sg13g2"']
-    assert check_package(pkg, pdk_cells=["NMOS"]).errors == 1
+    assert check_package(pkg, pdk_libs=PdkLibs(frozenset({"NMOS"}))).errors == 1
 
 
 def test_other_pdks_have_no_name_space_of_ihps(tmp_path):
@@ -597,6 +648,12 @@ def test_other_pdks_have_no_name_space_of_ihps(tmp_path):
     toml.write_text(toml.read_text().replace('name = "ihp-sg13g2"', 'name = "other-pdk"'))
     rules = [f.rule for f in check_package(pkg).findings]
     assert "pdk.cell_name" not in rules
+
+
+def test_the_pdks_libraries_hold_names_and_gds_digests():
+    libs = pdk_libs(FIXTURES / "pdk" / "ihp-sg13g2")
+    assert libs.names == {"sg13g2_inv_1"}
+    assert list(libs.gds) == ["sg13g2_inv_1"] and len(libs.gds["sg13g2_inv_1"]) == 1
 
 
 def test_the_cli_reads_the_pdks_libraries(tmp_path, capsys):

@@ -35,7 +35,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from chipleap.macro.check import Report, check_package
+from chipleap.macro.check import PdkLibs, Report, check_package
+from chipleap.macro.gds import GdsError, structure_digests
 from chipleap.macro.limits import LIMITS
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, load_manifest
 from chipleap.rtl import builddir
@@ -220,10 +221,22 @@ def pdk_cell_names(pdk: Path) -> frozenset[str]:
     return _pdk_names(str(pdk))
 
 
-@lru_cache(maxsize=4)
+def pdk_libs(pdk: Path) -> PdkLibs:
+    """The cells of the PDK's libraries in ``pdk``, as macro/v1's ``pdk.cell_name``
+    compares a package with them: every name case-folded, and the digest of each GDS
+    cell by its name."""
+    return _pdk_libs(str(pdk))
+
+
 def _pdk_names(pdk: str) -> frozenset[str]:
+    return _pdk_libs(pdk).names
+
+
+@lru_cache(maxsize=4)
+def _pdk_libs(pdk: str) -> PdkLibs:
     root = Path(pdk) / "libs.ref"
     names: set[str] = set()
+    gds: dict[str, set[str]] = {}
     if not root.is_dir():
         raise MacroImportError(f"{pdk} has no libs.ref directory")
     for f in sorted(root.glob("*/lef/*.lef")) + sorted(root.glob("*/cdl/*.cdl")):
@@ -235,8 +248,14 @@ def _pdk_names(pdk: str) -> frozenset[str]:
     for f in sorted(root.glob("*/gds/*.gds")):
         if f.stat().st_size > NAMES_FILE_MAX:
             raise MacroImportError(f"{f.name} of the PDK is larger than ChipLeap reads")
-        names.update(n.casefold() for n in _structure_names(f.read_bytes()))
-    return frozenset(names)
+        try:
+            for raw, digest in structure_digests(f.read_bytes()):
+                name = raw.decode("ascii", "replace")
+                names.add(name.casefold())
+                gds.setdefault(name, set()).add(digest)
+        except GdsError as exc:
+            raise MacroImportError(f"{f.name} of the PDK: {exc}") from None
+    return PdkLibs(frozenset(names), {k: frozenset(v) for k, v in gds.items()})
 
 
 # Copying and checking
