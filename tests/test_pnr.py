@@ -106,6 +106,7 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     assert cfg["DESIGN_NAME"] == "chipleap_accel_sram" and cfg["FP_SIZING"] == "absolute"
     # The macros' long input nets are repaired after global routing too.
     assert cfg["RUN_POST_GRT_DESIGN_REPAIR"] is True
+    assert cfg["DESIGN_REPAIR_MAX_WIRE_LENGTH"] == cfg["GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH"] == 300
     assert cfg["VERILOG_FILES"] == ["dir::src/chipleap_accel.v", "dir::src/chipleap_accel_sram.v"]
     assert set(cfg["MACROS"]) == {cell}
     entry = cfg["MACROS"][cell]

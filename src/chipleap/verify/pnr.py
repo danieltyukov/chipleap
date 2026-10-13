@@ -212,8 +212,17 @@ def run_librelane(
 
 # A design with hard macros has long nets to the macros' pins (a word written to every
 # bank, in rows at the top and the bottom of the core), whose slew and capacitance only
-# show once they are routed: LibreLane repairs them after global routing too.
-MACRO_REPAIR = {"RUN_POST_GRT_DESIGN_REPAIR": True}
+# show once they are routed: LibreLane repairs them after global routing too, and buffers
+# every net longer than MACRO_WIRE_UM. Without the length cap, repair found the
+# SmolLM2 accelerator's write-data nets to its SRAMs (800 um, eight macro pins) too slow
+# at the slow corner and changed nothing: resizing a driver cannot fix a wire, and the
+# length LibreLane derives (about 5 mm) never splits it.
+MACRO_WIRE_UM = 300
+MACRO_REPAIR = {
+    "RUN_POST_GRT_DESIGN_REPAIR": True,
+    "DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
+    "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
+}
 
 
 def sram_config(
