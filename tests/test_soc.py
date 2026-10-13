@@ -349,3 +349,17 @@ def test_a_loop_in_the_synthesized_netlist_is_reported(tmp_path):
         "Found and reported 1 problems.\n",
     )
     assert soc_step.netlist_problems(tmp_path).startswith("1 problems: Warning: found logic loop")
+
+
+def test_x_heeps_other_clocks_are_asynchronous_to_clk():
+    sdc = soc.sdc(
+        soc.mcu_ports(MCU.replace("input logic uart_rx_i,", "input logic jtag_tck_i,")), 11.111
+    )
+    assert "create_clock [get_ports clk_i] -name clk -period 11.111" in sdc
+    # Only the clocks whose ports the top has: no SPI slave or I2S in this MCU.
+    assert "-name jtag_tck -period 50" in sdc
+    assert "spi_slave_sck" not in sdc and "i2s_sck" not in sdc
+    assert "foreach c {clk jtag_tck}" in sdc
+    assert sdc.rstrip().endswith("set_clock_groups -asynchronous {*}$groups")
+    # Clock ports are not data inputs.
+    assert "foreach name {clk_i jtag_tck_i}" in sdc
