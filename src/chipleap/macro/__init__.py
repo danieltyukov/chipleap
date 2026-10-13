@@ -15,7 +15,14 @@ the views, add evidence with :func:`make_evidence` and :func:`write_evidence`, t
 check the result with :func:`check_package`.
 """
 
-from chipleap.macro.check import Finding, Report, check_package, parse_pdk_option, required_files
+from chipleap.macro.check import (
+    Finding,
+    PdkLibs,
+    Report,
+    check_package,
+    parse_pdk_option,
+    required_files,
+)
 from chipleap.macro.evidence import make_evidence, write_evidence
 from chipleap.macro.gds import GdsError, GdsLibrary, parse_gds, read_gds
 from chipleap.macro.manifest import (
@@ -41,6 +48,7 @@ __all__ = [
     "MacroError",
     "Manifest",
     "Pdk",
+    "PdkLibs",
     "Pin",
     "Producer",
     "Report",

@@ -178,11 +178,11 @@ def test_a_pdk_library_too_large_to_read_is_an_error(tmp_path, monkeypatch):
     pdk = fake_pdk(tmp_path)
     # Read whole, the IO library's LEF reserves its cells.
     assert "sg13g2_IOPadIn" in layer.reserved_names(pdk)
-    layer._pdk_names.cache_clear()
+    layer._pdk_libs.cache_clear()
     monkeypatch.setattr(layer, "NAMES_FILE_MAX", 100)
     with pytest.raises(MacroImportError, match="larger than ChipLeap reads"):
         layer.reserved_names(pdk)
-    layer._pdk_names.cache_clear()
+    layer._pdk_libs.cache_clear()
     with pytest.raises(MacroImportError, match=r"no libs\.ref"):
         layer.reserved_names(tmp_path / "nowhere")
 
@@ -219,6 +219,7 @@ def test_a_package_is_always_a_package(tmp_path):
         root / "build",
         "ihp-sg13g2",
         layer.Reserved(frozenset()),
+        libs=layer.PdkLibs(),
     ).views["strongarm"]
     assert v.source == "package" and v.supply_hookup and v.report is not None
     from chipleap.chip.config import ChipMacro as M

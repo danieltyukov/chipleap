@@ -13,12 +13,18 @@ import math
 import os
 import re
 import stat
-from collections.abc import Iterable
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from chipleap.macro.gds import GdsCycleError, GdsError, GdsLibrary, parse_gds
+from chipleap.macro.gds import (
+    GdsCycleError,
+    GdsError,
+    GdsLibrary,
+    parse_gds,
+    structure_identities,
+)
 from chipleap.macro.limits import (
     LIMITS,
     FileTooLarge,
@@ -58,6 +64,18 @@ _PDK_COMMIT = re.compile(r"[0-9a-f]{7,40}")
 # The name spaces of each PDK's own cells, lower case: a chip merges layouts and netlists
 # by cell name, so a macro's cell named in one could replace a cell of the PDK.
 PDK_CELL_PREFIXES = {"ihp-sg13g2": ("sg13g2", "rm_ihpsg13")}
+
+
+@dataclass(frozen=True)
+class PdkLibs:
+    """The cells of a PDK's libraries (the LEF macros, CDL subcircuits and GDS cells of
+    every library under ``libs.ref``, read by ``chipleap.macro.layer.pdk_libs``): every
+    name, compared in ASCII lower case, and the identity of each cell of the GDS a chip
+    merges the standard cells from, by its exact name
+    (``chipleap.macro.gds.structure_identities``)."""
+
+    names: frozenset[str] = frozenset()
+    std_cells: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -271,14 +289,16 @@ def _sha256(root: Path, rel: str, limit: int) -> str:
 
 class _Checker:
     def __init__(
-        self, root: Path, report: Report, limits: Limits, pdk_cells: frozenset[str] = frozenset()
+        self, root: Path, report: Report, limits: Limits, pdk_libs: PdkLibs | None = None
     ) -> None:
         self.root = root
         self.report = report
         self.limits = limits
-        self.pdk_cells = pdk_cells  # lower case: the cells of the PDK's libraries, if given
-        # The cells a chip would merge, seen while the views are read: (file, kind, name).
-        self.cells: list[tuple[str, str, str]] = []
+        self.pdk_libs = pdk_libs  # the PDK's libraries, names in lower case, if given
+        # The cells a chip would merge, seen while the views are read: (file, kind, name,
+        # and for a GDS cell named exactly like a standard cell of the PDK's, its verdict
+        # and the cell it places that is not the PDK's own, from std_cells).
+        self.cells: list[tuple[str, str, str, str, str]] = []
         self.too_large: set[str] = set()  # files reported as too large, once each
         self.unreadable: set[str] = set()  # files reported as unreadable, once each
         self.digests: dict[str, str | None] = {}  # package files hashed for evidence
@@ -437,6 +457,33 @@ class _Checker:
                 "warning",
             )
 
+    def std_cells(self, m: Manifest, lib: GdsLibrary, data: bytes) -> dict[str, tuple[str, str]]:
+        """For each GDS cell named exactly like a standard cell of the PDK's libraries:
+        ("own", "") when it is the PDK's own, the two identical and every cell it places
+        the PDK's own too; ("differs", "") when it is not identical; ("places", child)
+        when a cell it places is not the PDK's own. The top cell is never one."""
+        std = self.pdk_libs.std_cells if self.pdk_libs is not None else {}
+        if not any(c in std for c in lib.cells if c != m.name):
+            return {}
+        ids: dict[str, str] = {}
+        for raw, identity in structure_identities(data):
+            name = raw.rstrip(b"\0").decode("latin-1")
+            ids[name] = "" if name in ids else identity
+        out: dict[str, tuple[str, str]] = {}
+
+        def verdict(c: str) -> tuple[str, str]:
+            if c not in out:
+                if c == m.name or c not in std:
+                    out[c] = ("not", "")
+                elif not ids.get(c) or ids[c] != std[c]:
+                    out[c] = ("differs", "")
+                else:
+                    child = next((r for r in lib.children(c) if verdict(r)[0] != "own"), None)
+                    out[c] = ("own", "") if child is None else ("places", child)
+            return out[c]
+
+        return {c: verdict(c) for c in lib.cells if c != m.name and c in std}
+
     def required_files(self, m: Manifest) -> None:
         for f in required_files(m):
             if not self.present(f):
@@ -462,7 +509,10 @@ class _Checker:
         except GdsError as exc:
             self.add("gds.parse", f, f"cannot read the GDS: {_sum_text(exc)}")
             return
-        self.cells += [(f, "GDS cell", c) for c in lib.cells if c != m.name]
+        verdicts = self.std_cells(m, lib, data)
+        self.cells += [
+            (f, "GDS cell", c, *verdicts.get(c, ("", ""))) for c in lib.cells if c != m.name
+        ]
         tops = lib.top_cells()
         if m.name not in tops:
             if m.name in lib.cells:
@@ -778,7 +828,7 @@ class _Checker:
         try:
             sub = spice_subckt(_text(data), m.name, self.limits)
             self.cells += [
-                (f, "subcircuit", c)
+                (f, "subcircuit", c, "", "")
                 for c in spice_subckts(_text(data), self.limits)
                 if ascii_lower(c) != ascii_lower(m.name)
             ]
@@ -1031,24 +1081,30 @@ class _Checker:
 def _cell_names(c: _Checker, m: Manifest) -> None:
     """``pdk.cell_name``: the package's name and every cell the chip would merge, ASCII
     case folded, outside its PDK's cell name spaces and, when the validator has the PDK's
-    libraries, not one of their cells."""
+    libraries, not one of their cells. The one exception is a GDS cell that is the PDK's
+    own standard cell (``_Checker.std_cells``), which only the libraries can show."""
     prefixes = PDK_CELL_PREFIXES.get(m.pdk.name, ())
-    for f, what, name in [(MANIFEST, "name", m.name), *c.cells]:
+    libs = c.pdk_libs
+    pdk = quote(m.pdk.name)
+    for f, what, name, verdict, placed in [(MANIFEST, "name", m.name, "", ""), *c.cells]:
         low = ascii_lower(name)
         hit = next((p for p in prefixes if low.startswith(p)), None)
-        if hit is not None:
-            c.add(
-                "pdk.cell_name",
-                f,
-                f"{what} {quote(name)} begins with {quote(hit)}, as the cells of PDK "
-                f"{quote(m.pdk.name)} do",
+        if verdict == "own" or (hit is None and (libs is None or low not in libs.names)):
+            continue
+        if verdict == "differs":
+            message = f"{what} {quote(name)} differs from the cell of that name in PDK {pdk}"
+        elif verdict == "places":
+            message = f"{what} {quote(name)} places {quote(placed)}, which is not the PDK's own"
+        elif hit is None:
+            message = f"{what} {quote(name)} is a cell of PDK {pdk}"
+        elif what == "GDS cell" and libs is None:
+            message = (
+                f"{what} {quote(name)} begins with {quote(hit)}, as the cells of PDK {pdk} "
+                "do, and without the PDK's libraries cannot be shown to be the PDK's own"
             )
-        elif low in c.pdk_cells:
-            c.add(
-                "pdk.cell_name",
-                f,
-                f"{what} {quote(name)} is a cell of PDK {quote(m.pdk.name)}",
-            )
+        else:
+            message = f"{what} {quote(name)} begins with {quote(hit)}, as the cells of PDK {pdk} do"
+        c.add("pdk.cell_name", f, message)
 
 
 def required_files(m: Manifest) -> list[str]:
@@ -1066,14 +1122,14 @@ def check_package(
     path: str | Path,
     pdk: str | None = None,
     limits: Limits = LIMITS,
-    pdk_cells: Iterable[str] = (),
+    pdk_libs: PdkLibs | None = None,
 ) -> Report:
     """Check a macro package directory against macro/v1.
 
-    ``pdk`` is the placing chip's PDK, ``NAME`` or ``NAME@COMMIT``. ``pdk_cells`` are the
-    names of the cells of the PDK's libraries, when the caller has them
-    (``chipleap.macro.layer.pdk_cell_names``). Raises ``FileNotFoundError`` when ``path``
-    is not a directory and ``ValueError`` when ``pdk`` is malformed. ``limits`` exist for
+    ``pdk`` is the placing chip's PDK, ``NAME`` or ``NAME@COMMIT``. ``pdk_libs`` are the
+    cells of the PDK's libraries, when the caller has them
+    (``chipleap.macro.layer.pdk_libs``). Raises ``FileNotFoundError`` when ``path`` is
+    not a directory and ``ValueError`` when ``pdk`` is malformed. ``limits`` exist for
     tests; the spec fixes their values.
     """
     expected = parse_pdk_option(pdk) if pdk is not None else None
@@ -1081,7 +1137,9 @@ def check_package(
     if not root.is_dir():
         raise FileNotFoundError(f"{path} is not a directory")
     report = Report(str(path))
-    c = _Checker(root, report, limits, frozenset(ascii_lower(n) for n in pdk_cells))
+    if pdk_libs is not None:
+        pdk_libs = PdkLibs(frozenset(ascii_lower(n) for n in pdk_libs.names), pdk_libs.std_cells)
+    c = _Checker(root, report, limits, pdk_libs)
     _check(c, expected)
     unlisted = report.unlisted_errors + report.unlisted_warnings
     if unlisted:
