@@ -2,23 +2,25 @@
   "artifacts": [
     {
       "path": "strongarm.specs.toml",
-      "sha256": "78cd3c470c3efdb782d33e3a2ef8b49ee5cf693a1d21ad4bdd1220cd78f7b6ab"
+      "sha256": "cdfe47f2eb207c7d7e7a3350616d7f9f1f6b35440eee1f05a6bdd72058e18e5a"
     }
   ],
   "data": {
     "corners": [
-      "tt/27C"
+      "tt",
+      "ss",
+      "ff"
     ],
     "simulator": "ngspice"
   },
   "engineering": {
     "status": "pass",
-    "summary": "2 specs at 1 corners after layout, every value within its limits"
+    "summary": "4 specs at 3 corners after layout, every value within its limits"
   },
   "inputs": [
     {
       "path": "strongarm.pex.spice",
-      "sha256": "695a7288d7cb8a588324e07891b78104b08af815ad71429c9f918f2a675c8ca1"
+      "sha256": "31668cf77b0d17b463b40972b95b330ac7d71456bc2a16dcb48767ff01d8be65"
     }
   ],
   "operation": "sim",
