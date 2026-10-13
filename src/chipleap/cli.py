@@ -621,8 +621,17 @@ def cmd_macro(args: argparse.Namespace) -> int:
     if args.macro_cmd == "schema":
         print(schema_text(), end="")
         return 0
+    cells: frozenset[str] = frozenset()
+    if args.pdk_libs:
+        from chipleap.macro.layer import MacroImportError, pdk_cell_names
+
+        try:
+            cells = pdk_cell_names(Path(args.pdk_libs).expanduser())
+        except (MacroImportError, OSError) as exc:
+            print(f"chipleap: --pdk-libs: {exc}", file=sys.stderr)
+            return 2
     try:
-        report = check_package(args.dir, pdk=args.pdk)
+        report = check_package(args.dir, pdk=args.pdk, pdk_cells=cells)
     except FileNotFoundError as exc:
         print(f"chipleap: {exc}", file=sys.stderr)
         return 2
@@ -944,6 +953,11 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("dir", help="the package directory, e.g. tiny_ota.macro")
     m.add_argument(
         "--pdk", help="the PDK of the chip that places it: NAME or NAME@COMMIT, e.g. ihp-sg13g2"
+    )
+    m.add_argument(
+        "--pdk-libs",
+        metavar="DIR",
+        help="the PDK's directory (ihp-sg13g2): also refuse cells named like its libraries' cells",
     )
     m.add_argument("--strict", action="store_true", help="also fail on warnings")
     m.add_argument("--json", action="store_true")
