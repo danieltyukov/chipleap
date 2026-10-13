@@ -198,6 +198,7 @@ def test_place_and_route_sizes_the_die_around_the_macro(
     assert entry["instances"]["u_mem"]["orientation"] == "N"
     assert set(entry["lib"]) == {"*_typ_*", "*_slow_*", "*_fast_*"}
     assert cfg["PDN_CFG"] == "dir::pdn.tcl"
+    assert cfg["RUN_POST_GRT_DESIGN_REPAIR"] is True
     script = (work / "pdn.tcl").read_text()
     assert "-inst_pattern {^u_mem$} -pin_pattern {^VDDARRAY!$} -power" in script
     x = entry["instances"]["u_mem"]["location"][0]

@@ -98,6 +98,7 @@ TEMPLATE_KEYS = {
     "FP_MACRO_VERTICAL_HALO": "number",
     "MACROS": "macros",
     "PDN_CFG": "pdn",
+    "RUN_POST_GRT_DESIGN_REPAIR": "bool",
 }
 # The entries of a hard macro in MACROS that name files, and the corners of its liberty.
 MACRO_FILES = ("gds", "lef", "vh", "spice", "nl", "pnl")

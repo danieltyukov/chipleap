@@ -206,6 +206,12 @@ def run_librelane(
     return json.loads(metrics_file.read_text()), gds
 
 
+# A design with hard macros has long nets to the macros' pins (a word written to every
+# bank, in rows at the top and the bottom of the core), whose slew and capacitance only
+# show once they are routed: LibreLane repairs them after global routing too.
+MACRO_REPAIR = {"RUN_POST_GRT_DESIGN_REPAIR": True}
+
+
 def sram_config(
     accel: Accel,
     clock_mhz: float,
@@ -215,6 +221,7 @@ def sram_config(
     """The LibreLane configuration for ``accel`` with its buffers in SRAM macros: the
     generated top, the floorplan ChipLeap sized, the macros and their power grid."""
     return {
+        **MACRO_REPAIR,
         "DESIGN_NAME": banks.TOP,
         "VERILOG_FILES": ["dir::src/chipleap_accel.v", f"dir::src/{banks.TOP}.v"],
         "CLOCK_PORT": "clk_i",
