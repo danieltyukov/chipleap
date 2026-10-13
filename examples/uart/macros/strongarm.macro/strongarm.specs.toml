@@ -10,7 +10,7 @@ min = 0.8
 definition = "decision = value_at(V(outp,outn), 2.9n) >= 0.8"
 
 [specs.measured]
-tt_27 = 1.1999754650438499
+tt_27 = 1.1999754650438517
 
 [[specs]]
 name = "outn_low"
@@ -20,7 +20,7 @@ max = 0.3
 definition = "outn_low = value_at(V(outn), 2.9n) <= 0.3"
 
 [specs.measured]
-tt_27 = 0.00001894325840372191
+tt_27 = 0.000018943258406239607
 
 [[specs]]
 name = "decision_schematic"

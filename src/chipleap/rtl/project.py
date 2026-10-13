@@ -43,6 +43,9 @@ import yaml
 
 from chipleap.chip.config import (
     CORE_MAX_UM,
+    IO_DELAY_MAX_NS,
+    IO_LOAD_MAX_PF,
+    IO_TRANSITION_MAX_NS,
     MACROS_MAX,
     ORIENTATIONS,
     PAD_PITCH_MAX,
@@ -52,6 +55,7 @@ from chipleap.chip.config import (
     SUPPLIES,
     ChipConfig,
     ChipMacro,
+    IoBudget,
     Pad,
     port_bit,
 )
@@ -1601,7 +1605,7 @@ def _parse_macros(value: Any, paths: _Paths) -> tuple[RtlMacro, ...]:
 def _parse_chip(value: Any, paths: _Paths, top: str) -> ChipConfig | None:
     if value is None:
         return None
-    c = _mapping(value, "chip", ("name", "pads", "macros", "pad_pitch_um", "core_um"))
+    c = _mapping(value, "chip", ("name", "pads", "macros", "pad_pitch_um", "core_um", "io"))
     name = _ident(c.get("name", f"{top}_chip"), "chip.name")
     pitch = _positive(c.get("pad_pitch_um", 100), "chip.pad_pitch_um", PAD_PITCH_MAX)
     if pitch < PAD_PITCH_MIN:
@@ -1699,7 +1703,30 @@ def _parse_chip(value: Any, paths: _Paths, top: str) -> ChipConfig | None:
                 )
             connect[str(pin)] = net
         macros.append(ChipMacro(inst, package, orient, at, connect))
-    return ChipConfig(name, pads, tuple(macros), pitch, core)
+    return ChipConfig(name, pads, tuple(macros), pitch, core, _parse_io(c.get("io")))
+
+
+def _parse_io(value: Any) -> IoBudget:
+    if value is None:
+        return IoBudget()
+    io = _mapping(
+        value,
+        "chip.io",
+        ("input_delay_ns", "output_delay_ns", "output_load_pf", "input_transition_ns"),
+    )
+    out: dict[str, float] = {}
+    for key, upper in (
+        ("input_delay_ns", IO_DELAY_MAX_NS),
+        ("output_delay_ns", IO_DELAY_MAX_NS),
+        ("output_load_pf", IO_LOAD_MAX_PF),
+        ("input_transition_ns", IO_TRANSITION_MAX_NS),
+    ):
+        if key in io:
+            v = io[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= upper:
+                raise ProjectError(f"chip.io.{key} must be a number from 0 to {upper:g}")
+            out[key] = float(v)
+    return IoBudget(**out)
 
 
 def _chip_dict(chip: ChipConfig, rel: Callable[[Path], str]) -> dict[str, Any]:
@@ -1719,6 +1746,8 @@ def _chip_dict(chip: ChipConfig, rel: Callable[[Path], str]) -> dict[str, Any]:
     }
     if chip.core_um is not None:
         out["core_um"] = list(chip.core_um)
+    if chip.io != IoBudget():
+        out["io"] = {k: v for k, v in asdict(chip.io).items() if v is not None}
     if chip.macros:
         out["macros"] = [
             {
