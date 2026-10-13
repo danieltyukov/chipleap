@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from chipleap.macro import PdkLibs, load_manifest, parse_gds
 from chipleap.macro import layer as macros
-from chipleap.macro import load_manifest, parse_gds
 from chipleap.macro.layer import MacroImportError, Reserved
 from chipleap.macro.views import parse_liberty, spice_subckt
 from chipleap.rtl.project import _walk, read_inside
@@ -44,6 +44,7 @@ def import_one(
     pdk: str = "ihp-sg13g2",
     reserved: Reserved | None = None,
     more: tuple[tuple[str, Path], ...] = (),
+    libs: PdkLibs | None = None,
 ) -> macros.Imported:
     return macros.import_packages(
         [("m1", package), *more],
@@ -52,6 +53,7 @@ def import_one(
         root / "build",
         pdk,
         reserved if reserved is not None else generated(),
+        libs=libs if libs is not None else PdkLibs(),
     )
 
 
@@ -281,9 +283,12 @@ def _generator():
     return mod
 
 
-def counter_named(root: Path, name: str, extra_cells: tuple[str, ...] = ()) -> Path:
+def counter_named(
+    root: Path, name: str, extra_cells: tuple[str, ...] = (), std: bool = False
+) -> Path:
     """The tiny_counter fixture under another name, valid for macro/v1 (its evidence
-    hashes recomputed), with ``extra_cells`` defined in its GDS and placed in its top."""
+    hashes recomputed), with ``extra_cells`` defined in its GDS and placed in its top,
+    and with ``std`` the stand-in PDK's buffer and inverter, as the PDK's."""
     gen = _generator()
     files = gen.counter()
     out: dict[str, bytes] = {}
@@ -309,6 +314,9 @@ def counter_named(root: Path, name: str, extra_cells: tuple[str, ...] = ()) -> P
     for i, extra in enumerate(extra_cells):
         cells.append(gen.Cell(extra).rect(gen.METAL1, 0, 0, 100, 100))
         top.sref(extra, 1000 + 200 * i, 1000)
+    if std:
+        cells += [gen.std_inv(), gen.std_buf()]
+        top.sref("sg13g2_buf_1", 15000, 3000)
     out[f"{name}.gds"] = gen.gds(name, cells)
     gen.with_evidence(out, name)
     dest = root / "macros" / f"{name}.macro"
@@ -339,6 +347,68 @@ def test_a_package_named_like_the_pdk_cannot_replace_its_cells(proj):
     assert "ntap" in import_one(proj, pkg, reserved=NO_NAMES).views["ntap"].gds_cells
     with pytest.raises(MacroImportError, match="a name the PDK or ChipLeap uses"):
         import_one(proj, pkg, reserved=reserved_with("ntap"))
+
+
+# A hardened block's standard cells
+
+STAND_IN = ROOT / "tests" / "fixtures" / "macro" / "pdk" / "ihp-sg13g2"
+
+
+def test_a_hardened_block_imports_with_the_pdks_own_standard_cells(proj):
+    """Two blocks that hold the PDK's own inverter and buffer import, with the chip's
+    reserved names in place; the chip's merge (chipleap.chip.merge) accepts their
+    copies beside the standard cells, as identical."""
+    from chipleap.chip.merge import gds_source, unique
+
+    libs = macros.pdk_libs(STAND_IN)
+    reserved = macros.reserved_names(STAND_IN, ("top",))
+    assert "sg13g2_inv_1" in reserved
+    a = counter_named(proj, "cnt_a", std=True)
+    b = counter_named(proj, "cnt_b", std=True)
+    imported = import_one(proj, a, reserved=reserved, libs=libs, more=(("m2", b),))
+    for cell in ("cnt_a", "cnt_b"):
+        view = imported.views[cell]
+        assert view.pdk_cells == ("sg13g2_inv_1", "sg13g2_buf_1")
+        assert set(view.gds_cells) == {cell, "sg13g2_inv_1", "sg13g2_buf_1"}
+    std_gds = STAND_IN / "libs.ref" / "sg13g2_stdcell" / "gds" / "sg13g2_stdcell.gds"
+    unique(
+        [gds_source("the standard cells", std_gds)]
+        + [gds_source(f"macro {c}", v.gds) for c, v in imported.views.items()],
+        fold=False,
+        what="GDS cell",
+    )
+
+
+def test_a_changed_or_unproven_standard_cell_is_refused_on_import(proj):
+    """The same import refuses a changed copy of the PDK's inverter, as the merge would,
+    and refuses the PDK's own copy without the PDK's libraries."""
+    from chipleap.chip.merge import MergeError, gds_source, unique
+
+    libs = macros.pdk_libs(STAND_IN)
+    reserved = macros.reserved_names(STAND_IN, ("top",))
+    root, pkg = project_with(
+        proj.parent / "changed", BROKEN / "std-cell-modified" / "tiny_counter.macro"
+    )
+    with pytest.raises(MacroImportError, match="differs from the cell of that name"):
+        import_one(root, pkg, reserved=reserved, libs=libs)
+    std_gds = STAND_IN / "libs.ref" / "sg13g2_stdcell" / "gds" / "sg13g2_stdcell.gds"
+    with pytest.raises(MergeError, match="GDS cell sg13g2_inv_1"):
+        unique(
+            [
+                gds_source("the standard cells", std_gds),
+                gds_source("macro", pkg / "tiny_counter.gds"),
+            ],
+            fold=False,
+            what="GDS cell",
+        )
+    root, pkg = project_with(
+        proj.parent / "plain", BROKEN / "std-cell-identical" / "tiny_counter.macro"
+    )
+    with pytest.raises(MacroImportError, match=r"pdk\.cell_name"):
+        import_one(root, pkg, reserved=reserved, libs=PdkLibs())
+    # A cell of the PDK's that is no standard cell still must carry the package's name.
+    with pytest.raises(MacroImportError, match="must be tiny_counter or start with"):
+        macros.check_gds_cells(["tiny_counter", "sg13g2_Corner"], "tiny_counter", ("sg13g2_inv_1",))
 
 
 def test_a_package_whose_name_space_holds_a_reserved_name_is_refused(proj):

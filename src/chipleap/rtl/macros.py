@@ -39,6 +39,7 @@ from chipleap.macro.layer import (
     MacroView,
     Reserved,
     import_packages,
+    pdk_libs,
     reserved_names,
 )
 from chipleap.macro.manifest import MANIFEST, Manifest, parse_toml
@@ -237,6 +238,7 @@ def views(
             work,
             spec,
             reserved,
+            libs=pdk_libs(root),
         )
         for cell, view in imported.views.items():
             if cell in all_views:
