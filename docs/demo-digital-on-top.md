@@ -155,7 +155,7 @@ The budget at the ports is 2 ns input and output delay, a 5 pF load and a 1 ns i
 
 ## The SRAM variant
 
-[examples/memchip](../examples/memchip) is the same flow with a hard macro inside the core instead of next to it. A 256-byte memory core wraps one of IHP's SRAM macros (`RM_IHPSG13_1P_256x8_c3_bm_bist`), inside a ring of 37 pads.
+[examples/memchip](../examples/memchip) is the same flow with a hard macro that the core's RTL instantiates, instead of a block placed beside the core. A 256-byte memory core wraps one of IHP's SRAM macros (`RM_IHPSG13_1P_256x8_c3_bm_bist`), inside a ring of 37 pads.
 
 ```sh
 chipleap verify examples/memchip --steps chip
