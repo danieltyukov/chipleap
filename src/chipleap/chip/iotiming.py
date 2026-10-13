@@ -4,12 +4,12 @@ LibreLane times the core against its side of the pads (the IO cells' ``p2c`` and
 pins), with an IO liberty that has no arcs, so the pads' delays are not in its numbers.
 After routing, ChipLeap times the chip again with OpenSTA (in OpenROAD) at every corner
 the core was signed off at: the routed netlist and its parasitics, the standard cells'
-liberty of that corner, IHP's ``sg13g2_io`` liberty of the matching corner, which has
-the pads' arcs (``pad`` to ``p2c`` of an input pad, ``c2p`` to ``pad`` of an output pad)
-and the macros' liberty. The clocks are created on the chip's own ports, so a clock's
-path through its input pad is part of its insertion delay, and the data ports get the
-budget of the world outside (``chip.io``): an input delay, an output delay, the load an
-output pad drives and the edge rate at an input pad.
+liberty of that corner, IHP's ``sg13g2_io`` liberty of the same process, core voltage and
+temperature, which has the pads' arcs (``pad`` to ``p2c`` of an input pad, ``c2p`` to
+``pad`` of an output pad), and the macros' liberty. The clocks are created on the chip's
+own ports, so a clock's path through its input pad is part of its insertion delay, and
+the data ports get the budget of the world outside (``chip.io``): an input delay, an
+output delay, the load an output pad drives and the edge rate at an input pad.
 
 The report gives each corner's worst setup and hold slack and, at the slow corner, the
 worst pad-to-core, core-to-pad and pad-to-pad paths with the share of their delay inside
@@ -20,9 +20,11 @@ the chip's IO timing does not pass; its delay is never taken as zero.
 from __future__ import annotations
 
 import json
+import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -35,21 +37,30 @@ from chipleap.rtl.eco import TimingPath, parse_paths
 from chipleap.rtl.openroad import Job, failure, read_limited
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS
 
-# IHP's IO liberty for each corner of the standard cells (core supply, IO supply).
-IO_CORNERS = {
-    "typ": "typ_1p2V_3p3V_25C",
-    "slow": "slow_1p08V_3p0V_125C",
-    "fast": "fast_1p32V_3p6V_m40C",
-}
-# The arc each signal pad's cell must have: (from pin, to pin).
+# The arc each signal pad's cell must have: (from pin, to pin). The "to" pin is the
+# cell's output, where a path's delay through the pad is reported.
 PAD_ARCS = {PAD_CELLS["in"]: ("pad", "p2c"), PAD_CELLS["out"]: ("c2p", "pad")}
+# The table both arcs' delays need, for a rising and a falling output.
+DELAY_TABLES = ("cell_rise", "cell_fall")
 PATHS_SHOWN = 5
 LIBERTY_MAX = 64 << 20
-CORNER_RE = re.compile(r"nom_(typ|slow|fast)_[A-Za-z0-9_]+")
+UNCERTAINTY_MAX_NS = 100.0
+# LibreLane's signoff corners: parasitics (nom, min, max), process, core supply, temperature.
+STA_CORNER_RE = re.compile(r"(nom|min|max)_(typ|slow|fast)_(\d+p\d+)V_(m?\d+)C")
+# IHP's IO liberty: process, core supply, IO supply, temperature.
+IO_LIB_RE = re.compile(rf"{IO}_(typ|slow|fast)_(\d+p\d+)V_(\d+p\d+)V_(m?\d+)C\.lib")
 
 
 class IoTimingError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class Corner:
+    name: str  # LibreLane's, nom_slow_1p08V_125C
+    process: str  # typ, slow or fast
+    std_libs: tuple[Path, ...]
+    io_lib: Path
 
 
 @dataclass
@@ -65,6 +76,7 @@ class IoTiming:
     paths: dict[str, list[dict[str, Any]]]  # category -> worst paths at the slow corner
     untimed: list[str] = field(default_factory=list)  # pads whose IO cell has no arc
     budget: dict[str, float] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def met(self) -> bool:
@@ -80,13 +92,14 @@ class IoTiming:
             "paths": self.paths,
             "untimed_pads": self.untimed,
             "budget": self.budget,
+            "warnings": self.warnings,
             "met": self.met,
         }
 
 
 def budget(io: IoBudget, period_ns: float) -> dict[str, float]:
     """The numbers the constraints use: ``chip.io``, its delays defaulting to
-    ``DEFAULT_IO_DELAY_PCT`` of the first clock's period."""
+    ``DEFAULT_IO_DELAY_PCT`` of the reference clock's period."""
     share = period_ns * DEFAULT_IO_DELAY_PCT / 100
     return {
         "input_delay_ns": io.input_delay_ns if io.input_delay_ns is not None else share,
@@ -103,9 +116,18 @@ def pad_ports(b: Binding) -> tuple[list[str], list[str]]:
     return ins, outs
 
 
-def signoff_sdc(b: Binding, clocks: Mapping[str, float], numbers: Mapping[str, float]) -> str:
+def reference_period(b: Binding, clocks: Mapping[str, float]) -> float:
+    """The period the IO delays refer to: the first clock's, or the virtual clock's."""
+    first = next(iter(b.clocks), None)
+    return clocks[first] if first is not None else DEFAULT_PERIOD_NS
+
+
+def signoff_sdc(
+    b: Binding, clocks: Mapping[str, float], numbers: Mapping[str, float], uncertainty: float
+) -> str:
     """Constraints at the chip's ports: each clock on its pad's port, so its input pad is
-    part of its insertion delay; the data ports with the outside world's budget."""
+    part of its insertion delay; the data ports with the outside world's budget, the
+    same number for the earliest and the latest arrival (as LibreLane's IO constraint)."""
     ins, outs = pad_ports(b)
     clock_ports = {f"pad_{flat(p)}" for p in b.clocks}
     lines = ["# Written by ChipLeap: the chip timed at its ports, through its pads."]
@@ -113,75 +135,226 @@ def signoff_sdc(b: Binding, clocks: Mapping[str, float], numbers: Mapping[str, f
         for port in b.clocks:
             name = flat(port)
             lines.append(
-                f"create_clock -name {q.plain(name)} -period {clocks[port]:g} "
+                f"create_clock -name {q.plain(name)} -period {q.number(clocks[port])} "
                 f"[get_ports {q.plain('pad_' + name)}]"
             )
         ref = flat(next(iter(b.clocks)))
     else:
         ref = "__VIRTUAL_CLK__"
-        lines.append(f"create_clock -name {ref} -period {DEFAULT_PERIOD_NS:g}")
+        lines.append(f"create_clock -name {ref} -period {q.number(DEFAULT_PERIOD_NS)}")
     data_in = [p for p in ins if p not in clock_ports]
-    lines += ["set_propagated_clock [all_clocks]", "set_clock_uncertainty 0.25 [all_clocks]"]
+    lines += [
+        "set_propagated_clock [all_clocks]",
+        f"set_clock_uncertainty {q.number(uncertainty)} [all_clocks]",
+    ]
     if data_in:
         lines.append(
-            f"set_input_delay {numbers['input_delay_ns']:g} -clock {ref} "
+            f"set_input_delay {q.number(numbers['input_delay_ns'])} -clock {ref} "
             f"[get_ports {q.tcl_list(data_in)}]"
         )
     if ins:
         lines.append(
-            f"set_input_transition {numbers['input_transition_ns']:g} [get_ports {q.tcl_list(ins)}]"
+            f"set_input_transition {q.number(numbers['input_transition_ns'])} "
+            f"[get_ports {q.tcl_list(ins)}]"
         )
     if outs:
         lines += [
-            f"set_output_delay {numbers['output_delay_ns']:g} -clock {ref} "
+            f"set_output_delay {q.number(numbers['output_delay_ns'])} -clock {ref} "
             f"[get_ports {q.tcl_list(outs)}]",
-            f"set_load {numbers['output_load_pf']:g} [get_ports {q.tcl_list(outs)}]",
+            f"set_load {q.number(numbers['output_load_pf'])} [get_ports {q.tcl_list(outs)}]",
         ]
     return "\n".join(lines) + "\n"
 
 
-def _group(text: str, kind: str, name: str) -> str:
-    """The body of ``kind (name) { ... }`` in liberty text, braces matched; "" if absent."""
-    m = re.search(rf"\b{kind}\s*\(\s*\"?{re.escape(name)}\"?\s*\)\s*\{{", text)
-    if m is None:
-        return ""
-    depth, i = 1, m.end()
-    while i < len(text) and depth:
-        depth += {"{": 1, "}": -1}.get(text[i], 0)
-        i += 1
-    return text[m.end() : i]
+# The IO liberty
 
 
-def missing_arcs(liberty: str, cells: Iterable[str]) -> list[str]:
-    """The cells among ``cells`` whose pad arc (``PAD_ARCS``) the liberty lacks."""
-    if len(liberty) > LIBERTY_MAX:
+def _plain_liberty(text: str) -> str:
+    """Liberty text without comments and line continuations."""
+    if len(text) > LIBERTY_MAX:
         raise IoTimingError("the IO liberty is larger than expected")
-    out = []
+    return re.sub(r"/\*.*?\*/", " ", text, flags=re.S).replace("\\\n", " ")
+
+
+def _groups(text: str, kind: str, name: str | None = None) -> Iterator[tuple[str, str]]:
+    """Each ``kind (name) { ... }`` group of liberty text at any depth, as (its name, its
+    body), braces matched; only those named ``name`` when given."""
+    head = re.compile(rf"\b{kind}\s*\(\s*\"?([^\")]*?)\"?\s*\)\s*\{{")
+    for m in head.finditer(text):
+        if name is not None and m.group(1) != name:
+            continue
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            i += 1
+        yield m.group(1), text[m.end() : i - 1]
+
+
+def _first(text: str, kind: str, name: str) -> str | None:
+    return next((body for _, body in _groups(text, kind, name)), None)
+
+
+def _arc(liberty: str, cell: str) -> tuple[str | None, str]:
+    """The timing group of ``cell``'s pad arc with both delay tables, or None and what
+    is missing."""
+    arc = PAD_ARCS.get(cell)
+    if arc is None:
+        return None, f"{cell} has no pad arc ChipLeap knows"
+    src, dst = arc
+    body = _first(liberty, "cell", cell)
+    if body is None:
+        return None, f"{cell} is not in the IO liberty"
+    pin = _first(body, "pin", dst)
+    if pin is None:
+        return None, f"{cell} has no pin {dst}"
+    lacking = ""
+    for _, timing in _groups(pin, "timing"):
+        related = re.search(r"\brelated_pin\s*:\s*\"?(\w+)\"?\s*;", timing)
+        if related is None or related.group(1) != src:
+            continue
+        absent = [t for t in DELAY_TABLES if not re.search(rf"\b{t}\s*\(", timing)]
+        if not absent:
+            return timing, ""
+        lacking = f"{cell}'s {src} to {dst} arc has no {' or '.join(absent)} table"
+    return None, lacking or f"{cell} has no {src} to {dst} arc"
+
+
+def missing_arcs(liberty: str, cells: Iterable[str]) -> dict[str, str]:
+    """What the liberty lacks, by cell, among ``cells``: a pad arc with a delay table for
+    both edges. An IO cell whose arc ChipLeap does not know is reported too."""
+    text = _plain_liberty(liberty)
+    out = {}
     for cell in sorted(set(cells)):
-        arc = PAD_ARCS.get(cell)
-        if arc is None:
-            continue
-        pin = _group(_group(liberty, "cell", cell), "pin", arc[1])
-        if not re.search(rf"related_pin\s*:\s*\"?{arc[0]}\"?\s*;", pin):
-            out.append(f"{cell} has no {arc[0]} to {arc[1]} arc")
+        timing, problem = _arc(text, cell)
+        if timing is None:
+            out[cell] = problem
     return out
 
 
-def corners(resolved: Mapping[str, Any]) -> dict[str, list[Path]]:
-    """The signoff corners LibreLane used (typ, slow, fast) with their standard-cell
-    liberty files, from its resolved configuration."""
-    libs = resolved.get("LIB") or {}
-    out: dict[str, list[Path]] = {}
-    for name in resolved.get("STA_CORNERS") or []:
-        m = CORNER_RE.fullmatch(str(name))
-        files = libs.get(name) if isinstance(libs, dict) else None
-        if m is None or not isinstance(files, list):
+def _index(timing: str, table: str, n: int) -> list[float]:
+    """The ``index_n`` axis of the first ``table`` group in a timing group."""
+    body = next((b for _, b in _groups(timing, table)), "")
+    m = re.search(rf"\bindex_{n}\s*\(\s*\"([^\"]*)\"", body)
+    try:
+        return [float(v) for v in m.group(1).split(",")] if m else []
+    except ValueError:
+        return []
+
+
+def characterised(liberty: str, numbers: Mapping[str, float], cells: Iterable[str]) -> list[str]:
+    """The budget's numbers outside the range IHP characterised the pads for, where
+    OpenSTA extrapolates: the input edge rate on an input pad's table, the load on an
+    output pad's."""
+    text = _plain_liberty(liberty)
+    out = []
+    checks = {
+        PAD_CELLS["in"]: ("input_transition_ns", 1, "ns"),
+        PAD_CELLS["out"]: ("output_load_pf", 2, "pF"),
+    }
+    for cell in sorted(set(cells)):
+        if cell not in checks:
             continue
-        out[m.group(1)] = [Path(f) for f in files if isinstance(f, str)]
-    if "slow" not in out:
+        timing, _ = _arc(text, cell)
+        key, n, unit = checks[cell]
+        axis = _index(timing, "cell_rise", n) if timing is not None else []
+        if axis and not min(axis) <= numbers[key] <= max(axis):
+            out.append(
+                f"chip.io.{key} {numbers[key]:g} {unit} is outside the {min(axis):g} to "
+                f"{max(axis):g} {unit} {cell} is characterised for; its delay is extrapolated"
+            )
+    return out
+
+
+# LibreLane's signoff
+
+
+def _volts(text: str) -> float:
+    return float(text.replace("p", "."))
+
+
+def _celsius(text: str) -> float:
+    return -float(text[1:]) if text.startswith("m") else float(text)
+
+
+def _pdk_file(value: Any, pdk_root: Path) -> Path:
+    """A file LibreLane names in its resolved configuration, which must be in the PDK it
+    installed for itself."""
+    if not isinstance(value, str) or not value:
+        raise IoTimingError("LibreLane's resolved configuration names a file that is not a path")
+    path = Path(value)
+    if not path.resolve().is_relative_to(pdk_root.resolve()) or not path.is_file():
+        raise IoTimingError(f"LibreLane read {path.name} from outside its PDK")
+    return path
+
+
+def pdk_root(resolved: Mapping[str, Any]) -> Path:
+    root = Path(str(resolved.get("PDK_ROOT", "")))
+    if not root.is_absolute() or not root.is_dir():
+        raise IoTimingError("LibreLane's resolved configuration names no PDK")
+    return root
+
+
+def io_library(io_dir: Path, process: str, core_v: float, temp: float) -> Path:
+    """IHP's IO liberty of a process at a core supply and temperature: exactly one."""
+    found = []
+    for f in sorted(io_dir.glob(f"{IO}_*.lib")):
+        m = IO_LIB_RE.fullmatch(f.name)
+        if m is None or m.group(1) != process:
+            continue
+        if math.isclose(_volts(m.group(2)), core_v) and _celsius(m.group(4)) == temp:
+            found.append(f)
+    if len(found) != 1:
+        what = "no" if not found else f"{len(found)}"
+        raise IoTimingError(
+            f"IHP's IO library has {what} {process} liberty at {core_v:g} V and {temp:g} C"
+        )
+    return found[0]
+
+
+def corners(resolved: Mapping[str, Any], io_dir: Path) -> list[Corner]:
+    """The corners LibreLane signed the core off at, each with its standard cells'
+    liberty and IHP's IO liberty of the same process, core supply and temperature. The
+    parasitics are the nominal extraction, so a ``min_`` or ``max_`` corner is timed as
+    its ``nom_`` one; a corner ChipLeap cannot match is an error."""
+    names = resolved.get("STA_CORNERS")
+    libs = resolved.get("LIB")
+    if not isinstance(names, list) or not isinstance(libs, dict):
+        raise IoTimingError("LibreLane's resolved configuration has no signoff corners")
+    root = pdk_root(resolved)
+    out: dict[str, Corner] = {}
+    for name in names:
+        m = STA_CORNER_RE.fullmatch(str(name))
+        if m is None:
+            raise IoTimingError(
+                f"LibreLane's corner {str(name)[:60]} has no IO liberty ChipLeap knows"
+            )
+        nominal = f"nom_{str(name).split('_', 1)[1]}"
+        if nominal in out:
+            continue
+        files = next((v for k, v in libs.items() if fnmatchcase(nominal, str(k))), None)
+        if not isinstance(files, list) or not files:
+            raise IoTimingError(f"LibreLane's resolved configuration has no liberty for {nominal}")
+        process, volts, temp = m.group(2), _volts(m.group(3)), _celsius(m.group(4))
+        out[nominal] = Corner(
+            nominal,
+            process,
+            tuple(_pdk_file(f, root) for f in files),
+            io_library(io_dir, process, volts, temp),
+        )
+    if not any(c.process == "slow" for c in out.values()):
         raise IoTimingError("LibreLane's resolved configuration has no slow corner")
-    return out
+    return sorted(out.values(), key=lambda c: ("typ", "slow", "fast").index(c.process))
 
+
+def uncertainty(resolved: Mapping[str, Any]) -> float:
+    """The clock uncertainty LibreLane timed the core with."""
+    v = resolved.get("CLOCK_UNCERTAINTY_CONSTRAINT")
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= UNCERTAINTY_MAX_NS:
+        raise IoTimingError("LibreLane's resolved configuration has no clock uncertainty")
+    return float(v)
+
+
+# OpenSTA
 
 SCRIPT_CATEGORIES = {
     # name: report_checks options (ChipLeap's own text; the port lists are quoted)
@@ -200,7 +373,8 @@ def script(
     with_paths: bool,
 ) -> str:
     """OpenSTA in OpenROAD: the routed chip at one corner, its worst slacks and, with
-    ``with_paths``, its worst paths by category."""
+    ``with_paths``, its worst paths by category, input pins shown so a pad's own delay
+    is apart from the wire's into it."""
     lines = [
         *(f"read_lef {q.tcl(f)}" for f in files["lefs"]),
         *(f"read_liberty {q.tcl(f)}" for f in files["libs"]),
@@ -217,15 +391,14 @@ def script(
             f"set data_out [get_ports -quiet {q.tcl_list(outs)}]",
         ]
         for name, opts in SCRIPT_CATEGORIES.items():
+            needs = [v for v in ("$data_in", "$data_out") if v in opts]
+            guard = " && ".join(f"[llength {v}] > 0" for v in needs)
             for kind in ("max", "min"):
-                guard = "$data_in" if "data_in" in opts else "$data_out"
-                if "data_in" in opts and "data_out" in opts:
-                    guard = "[concat $data_in $data_out]"
                 lines += [
                     f'puts "CHIPLEAP-PATHS begin {name} {kind}"',
-                    f"if {{[llength {guard}] > 0}} {{",
+                    f"if {{{guard}}} {{",
                     f"  report_checks {opts} -path_delay {kind} "
-                    f"-group_path_count {PATHS_SHOWN} -digits 4",
+                    f"-group_path_count {PATHS_SHOWN} -fields {{input_pin}} -digits 4",
                     "}",
                     f'puts "CHIPLEAP-PATHS end {name} {kind}"',
                 ]
@@ -244,7 +417,9 @@ def parse_worst(log: str) -> tuple[float | None, float | None]:
     return out["setup"], out["hold"]
 
 
-def parse_categories(log: str, pads: set[str]) -> dict[str, list[dict[str, Any]]]:
+def parse_categories(log: str, pad_pins: set[str]) -> dict[str, list[dict[str, Any]]]:
+    """Each category's worst paths, with the delay at the pads' output pins (``pad_pins``,
+    ``instance/pin``): the arcs through the pads, without the wires into them."""
     out: dict[str, list[dict[str, Any]]] = {}
     for name, kind in re.findall(r"^CHIPLEAP-PATHS begin (\w+) (max|min)", log, re.M):
         start = log.find(f"CHIPLEAP-PATHS begin {name} {kind}")
@@ -252,14 +427,20 @@ def parse_categories(log: str, pads: set[str]) -> dict[str, list[dict[str, Any]]
         section = log[start:end] if end > start else ""
         found = parse_paths(f"CHIPLEAP-PATHS begin\n{section}\nCHIPLEAP-PATHS end", kind)
         key = f"{name}_{'setup' if kind == 'max' else 'hold'}"
-        out[key] = [_path(p, pads) for p in sorted(found, key=lambda p: p.slack_ns)]
+        out[key] = [_path(p, pad_pins) for p in sorted(found, key=lambda p: p.slack_ns)]
     return out
 
 
-def _path(p: TimingPath, pads: set[str]) -> dict[str, Any]:
+def _path(p: TimingPath, pad_pins: set[str]) -> dict[str, Any]:
     d = p.to_dict()
-    d["pad_delay_ns"] = round(sum(s.delay_ns for s in p.stages if s.instance in pads), 4)
+    d["pad_delay_ns"] = round(sum(s.delay_ns for s in p.stages if s.pin in pad_pins), 4)
     return d
+
+
+def _inside(path: Path, root: Path, what: str) -> Path:
+    if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+        raise IoTimingError(f"LibreLane's run has no {what}")
+    return path
 
 
 def run(
@@ -268,80 +449,85 @@ def run(
     pdk: Path,
     name: str,
     b: Binding,
+    pad_cells: Mapping[str, str],
     clocks: Mapping[str, float],
     io: IoBudget,
     macro_files: Iterable[tuple[Path, Path]],
     io_lef: Path,
 ) -> IoTiming:
-    """Time the routed chip in ``run_dir`` at its ports at every corner. ``macro_files``
-    are each macro's LEF and liberty, ``io_lef`` the IO library's LEF the flow used."""
+    """Time the routed chip in ``run_dir`` at its ports at every corner. ``pad_cells``
+    is each signal pad instance's IO cell, ``macro_files`` each macro's LEF and liberty,
+    ``io_lef`` the IO library's LEF the flow used."""
     resolved = json.loads(read_limited(run_dir / "resolved.json"))
-    std = corners(resolved)
-    netlist = run_dir / "final" / "nl" / f"{name}.nl.v"
-    spef = run_dir / "final" / "spef" / "nom" / f"{name}.nom.spef"
-    for f in (netlist, spef):
-        if not f.is_file():
-            raise IoTimingError(f"LibreLane's run has no {f.name}")
-    tech = resolved.get("TECH_LEFS") or {}
-    tech_lef = next((Path(v) for k, v in tech.items() if str(k).startswith("nom")), None)
-    cell_lefs = [Path(v) for v in resolved.get("CELL_LEFS") or [] if isinstance(v, str)]
-    if tech_lef is None or not cell_lefs:
+    root = pdk_root(resolved)
+    signoff = corners(resolved, pdk / "libs.ref" / IO / "lib")
+    netlist = _inside(run_dir / "final" / "nl" / f"{name}.nl.v", run_dir, f"{name}.nl.v")
+    spef = _inside(
+        run_dir / "final" / "spef" / "nom" / f"{name}.nom.spef", run_dir, f"{name}.nom.spef"
+    )
+    tech = resolved.get("TECH_LEFS")
+    tech_lef = next(
+        (
+            v
+            for k, v in (tech.items() if isinstance(tech, dict) else [])
+            if str(k).startswith("nom")
+        ),
+        None,
+    )
+    cell_lefs = resolved.get("CELL_LEFS")
+    if tech_lef is None or not isinstance(cell_lefs, list) or not cell_lefs:
         raise IoTimingError("LibreLane's resolved configuration names no LEF")
-    period = next(iter(clocks.values()), DEFAULT_PERIOD_NS)
-    numbers = budget(io, period)
+    lefs = [_pdk_file(tech_lef, root), *(_pdk_file(f, root) for f in cell_lefs)]
+    numbers = budget(io, reference_period(b, clocks))
+    sdc_text = signoff_sdc(b, clocks, numbers, uncertainty(resolved))
     ins, outs = pad_ports(b)
     clock_ports = {f"pad_{flat(p)}" for p in b.clocks}
     data_in = [p for p in ins if p not in clock_ports]
-    used = _io_cells(b)
+    ports_of: dict[str, list[str]] = {}
+    for port, inst in b.chip_ports.items():
+        if inst in pad_cells:
+            ports_of.setdefault(pad_cells[inst], []).append(port)
+    pad_pins = {
+        f"{inst}/{PAD_ARCS[cell][1]}" for inst, cell in pad_cells.items() if cell in PAD_ARCS
+    }
     untimed: list[str] = []
+    warnings: list[str] = []
     results: list[CornerTiming] = []
     paths: dict[str, list[dict[str, Any]]] = {}
-    pads = set(b.io)
     macro_list = list(macro_files)
-    for corner in ("typ", "slow", "fast"):
-        if corner not in std:
-            continue
-        io_lib = pdk / "libs.ref" / IO / "lib" / f"{IO}_{IO_CORNERS[corner]}.lib"
-        if not io_lib.is_file():
-            raise IoTimingError(f"IHP's IO library has no {corner} corner ({io_lib.name})")
-        text = read_limited(io_lib, LIBERTY_MAX)
-        for problem in missing_arcs(text, used.values()):
-            entry = f"{problem} ({corner} corner): its pads are not timed"
+    for corner in signoff:
+        text = read_limited(corner.io_lib, LIBERTY_MAX)
+        for cell, problem in missing_arcs(text, pad_cells.values()).items():
+            who = ", ".join(sorted(ports_of.get(cell, [])))
+            entry = f"{problem} ({corner.process} corner): {who} not timed"
             if entry not in untimed:
                 untimed.append(entry)
-        job = Job(work, f"io_timing_{corner}")
+        for w in characterised(text, numbers, pad_cells.values()):
+            if w not in warnings:
+                warnings.append(w)
+        job = Job(work, f"io_timing_{corner.process}")
         files = {
             "lefs": [
-                job.stage(tech_lef, "tech.lef"),
-                *(job.stage(f, f"cells_{i}.lef") for i, f in enumerate(cell_lefs)),
+                job.stage(lefs[0], "tech.lef"),
+                *(job.stage(f, f"cells_{i}.lef") for i, f in enumerate(lefs[1:])),
                 job.stage(io_lef, "io.lef"),
                 *(job.stage(lef, f"macro_{i}.lef") for i, (lef, _) in enumerate(macro_list)),
             ],
             "libs": [
-                *(job.stage(f, f"cells_{i}.lib") for i, f in enumerate(std[corner])),
-                job.stage(io_lib, "io.lib"),
+                *(job.stage(f, f"cells_{i}.lib") for i, f in enumerate(corner.std_libs)),
+                job.stage(corner.io_lib, "io.lib"),
                 *(job.stage(lib, f"macro_{i}.lib") for i, (_, lib) in enumerate(macro_list)),
             ],
             "netlist": job.stage(netlist, "chip.nl.v"),
             "spef": job.stage(spef, "chip.spef"),
         }
-        sdc = builddir.write_text(job.dir, "chip_io.sdc", signoff_sdc(b, clocks, numbers))
-        log, code = job.run(script(files, name, sdc.name, data_in, outs, corner == "slow"))
+        sdc = builddir.write_text(job.dir, "chip_io.sdc", sdc_text)
+        slow = corner.process == "slow"
+        log, code = job.run(script(files, name, sdc.name, data_in, outs, slow))
         if code != 0 or "CHIPLEAP-WORST hold" not in log:
             raise failure("OpenSTA at the chip's ports", log, code)
         setup, hold = parse_worst(log)
-        results.append(CornerTiming(corner, setup, hold))
-        if corner == "slow":
-            paths = parse_categories(log, pads)
-    return IoTiming(results, paths, untimed, numbers)
-
-
-def _io_cells(b: Binding) -> dict[str, str]:
-    """Each signal pad instance's IO cell, from the nets it carries."""
-    out = {}
-    for inst, conns in b.io.items():
-        if "p2c" in conns:
-            out[inst] = PAD_CELLS["in"]
-        elif "c2p" in conns:
-            out[inst] = PAD_CELLS["out"]
-    return out
+        results.append(CornerTiming(corner.process, setup, hold))
+        if slow:
+            paths = parse_categories(log, pad_pins)
+    return IoTiming(results, paths, untimed, numbers, warnings)

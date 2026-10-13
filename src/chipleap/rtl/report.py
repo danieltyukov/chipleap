@@ -204,7 +204,7 @@ def _kv(r: StepResult) -> list[tuple[str, str]]:
             ),
             ("setup slack, slow, core side of the pads", f"{d['setup_slack_ns']:+.3f} ns"),
             ("hold slack, core side of the pads", f"{d['hold_slack_ns']:+.3f} ns"),
-            *_io_kv(d.get("io_timing")),
+            *_io_kv(d.get("io_timing"), len(d["macros"])),
         ]
     return []
 
@@ -213,11 +213,20 @@ def _slack(v: Any) -> str:
     return "not constrained" if v is None else f"{v:+.3f} ns"
 
 
-def _io_kv(io: Any) -> list[tuple[str, str]]:
+def _io_kv(io: Any, macros: int) -> list[tuple[str, str]]:
     if not io:
         return []
     by = {c["corner"]: c for c in io["corners"]}
+    b = io["budget"]
     out = []
+    if b:
+        out.append(
+            (
+                "budget at the ports",
+                f"input delay {b['input_delay_ns']:g} ns, output delay {b['output_delay_ns']:g} ns, "
+                f"load {b['output_load_pf']:g} pF, input edge {b['input_transition_ns']:g} ns",
+            )
+        )
     if "slow" in by:
         out.append(("setup slack, slow, at the ports", _slack(by["slow"]["setup_slack_ns"])))
     holds = [c["hold_slack_ns"] for c in io["corners"] if c["hold_slack_ns"] is not None]
@@ -225,6 +234,10 @@ def _io_kv(io: Any) -> list[tuple[str, str]]:
         out.append(("hold slack, worst corner, at the ports", f"{min(holds):+.3f} ns"))
     if io["untimed_pads"]:
         out.append(("pads not timed", "; ".join(io["untimed_pads"])))
+    if io.get("warnings"):
+        out.append(("timing at the ports, warnings", "; ".join(io["warnings"])))
+    if macros:
+        out.append(("paths through macros", "not timed: a macro's liberty has no arcs"))
     return out
 
 

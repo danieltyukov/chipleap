@@ -456,6 +456,7 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
         p.pdk,
         name,
         p.binding,
+        {s.cell.inst: s.cell.cell for s in p.plan.pads if s.pad.kind == "signal"},
         {c.port: c.period_ns for c in project.clocks},
         chip.io,
         [(v.lef, v.lib) for v in p.imported.views.values()],
