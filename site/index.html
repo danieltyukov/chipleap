@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ChipLeap: design the chip your model needs</title>
-  <meta name="description" content="ChipLeap explores hardware architecture from a workload such as Llama 3.2 1B: memory, external memory, dataflow, compute and process node, each decision explained. It generates an X-HEEP RISC-V SoC or AXI4 IP for any host, and checks it with simulation, synthesis and place and route.">
+  <title>ChipLeap: design the chip your model needs, or bring your RTL</title>
+  <meta name="description" content="ChipLeap explores hardware architecture from a workload such as Llama 3.2 1B, each decision explained, and generates an X-HEEP RISC-V SoC or AXI4 IP. Or bring your own RTL: lint, simulation, formal, CDC, synthesis, equivalence, place and route, DFT, power and ECO take it to a whole chip with a pad ring, checked with DRC and LVS on IHP SG13G2.">
   <meta name="color-scheme" content="light">
   <link rel="canonical" href="https://danieltyukov.github.io/chipleap/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="ChipLeap">
   <meta property="og:title" content="ChipLeap: design the chip your model needs">
-  <meta property="og:description" content="Architecture exploration from workload to verified hardware, every decision explained, down to a routed layout. Open source.">
+  <meta property="og:description" content="From an AI workload or your own RTL to a chip checked with DRC and LVS, every decision explained. Open source.">
   <meta property="og:url" content="https://danieltyukov.github.io/chipleap/">
   <meta property="og:image" content="https://danieltyukov.github.io/chipleap/og.png">
   <meta property="og:image:width" content="1200">
@@ -18,14 +18,14 @@
   <meta property="og:image:alt" content="A rendered die designed by ChipLeap next to the line: design the chip your model needs.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="ChipLeap: design the chip your model needs">
-  <meta name="twitter:description" content="Architecture exploration from workload to verified hardware, every decision explained, down to a routed layout.">
+  <meta name="twitter:description" content="From an AI workload or your own RTL to a chip checked with DRC and LVS, every decision explained.">
   <meta name="twitter:image" content="https://danieltyukov.github.io/chipleap/og.png">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=411bdbf3e6">
+  <link rel="stylesheet" href="styles.css?v=8528602373">
 </head>
 <body>
   <header class="nav">
@@ -33,7 +33,8 @@
       <a class="brand" href="./" aria-label="ChipLeap home"><img src="logo-mark.svg" alt="" width="28" height="28"><span>ChipLeap</span></a>
       <nav aria-label="Sections">
         <a href="#design">How it decides</a>
-        <a href="#verified">Verification</a>
+        <a href="#rtl">Your RTL</a>
+        <a href="#chip">Chips</a>
         <a href="#assistant">MCP</a>
         <a href="https://github.com/danieltyukov/chipleap/tree/main/docs">Docs</a>
       </nav>
@@ -50,10 +51,10 @@
         <div class="hero-copy">
           <a class="pill" href="https://github.com/danieltyukov/chipleap">Open source, MIT licensed</a>
           <h1>Design the chip your model needs.</h1>
-          <p class="lead">ChipLeap explores the architecture before anyone writes RTL: memory system, external memory, dataflow, compute and process node, each choice explained. Then it generates the hardware, a RISC-V SoC on <span class="nb">X-HEEP</span> or AXI4 IP for any host, and checks it down to a routed layout.</p>
+          <p class="lead">ChipLeap explores the architecture before anyone writes RTL: memory system, external memory, dataflow, compute and process node, each choice explained. Then it generates the hardware, a RISC-V SoC on <span class="nb">X-HEEP</span> or AXI4 IP for any host, and checks it down to a routed layout. Or bring RTL of your own: the same flow takes it to a whole chip.</p>
           <div class="hero-actions">
             <a class="btn btn-primary" href="#start">Get started</a>
-            <a class="btn btn-ghost" href="#design">Watch it decide</a>
+            <a class="btn btn-ghost" href="#rtl">Bring your RTL</a>
           </div>
           <div class="cmd" role="group" aria-label="Install command">
             <code>pip install chipleap</code>
@@ -85,7 +86,7 @@
       <div class="shell works">
         <span>Generates and checks with</span>
         <ul>
-          <li>X-HEEP</li><li>AXI4</li><li>IHP SG13G2</li><li>Verilator</li><li>Yosys</li><li>LibreLane</li><li>Model Context Protocol</li>
+          <li>X-HEEP</li><li>AXI4</li><li>IHP SG13G2</li><li>cocotb</li><li>Verilator</li><li>Yosys</li><li>SymbiYosys</li><li>OpenROAD</li><li>LibreLane</li><li>KLayout</li><li>Fault</li><li>MCP</li>
         </ul>
       </div>
     </section>
@@ -95,7 +96,7 @@
         <div class="section-head">
           <h2 id="design-h">Watch it design a chip</h2>
           <!-- story-intro:start -->
-<p>Llama 3.2 1B decoding at 5 tokens per second, within 8 mm² and 400 mW. The agent starts from a bare microcontroller, names what limits it, tries every single change, keeps the best and says why. The floorplan is drawn to scale at every step. This run evaluated 2,154 designs in under 5 seconds.</p>
+<p>Llama 3.2 1B decoding at 5 tokens per second, within 8 mm² and 400 mW. The agent starts from a bare microcontroller, names what limits it, tries every single change, keeps the best and says why. The floorplan is drawn to scale at every step. This run evaluated 2,154 designs in under 10 seconds.</p>
 <!-- story-intro:end -->
         </div>
         <div class="story-grid">
@@ -168,6 +169,56 @@
       </div>
     </section>
 
+    <section id="rtl" class="rtl" aria-labelledby="rtl-h">
+      <div class="shell">
+        <div class="section-head">
+          <h2 id="rtl-h">Bring your own RTL</h2>
+          <!-- rtl-intro:start -->
+<p>Point ChipLeap at a directory of Verilog or SystemVerilog with cocotb tests and it runs what a tape-out asks of RTL, on open tools and the IHP SG13G2 PDK. Below is what each step reported for <code>examples/uart</code>, a UART transmitter and receiver (8N1) with cocotb tests against a Python reference model, at 100 MHz.</p>
+<!-- rtl-intro:end -->
+        </div>
+        <!-- rtl-flow:start -->
+<div class="rtl-flow"><details class="rtl-group" open><summary>Check the RTL<small>5 steps</small></summary><ol><li><b>Lint</b><span class="tool">Verilator 5.052, slang 9.1.0</span><span class="res">no warnings</span></li><li><b>Simulation</b><span class="tool">cocotb on Icarus 12.0</span><span class="res">5 of 5 tests pass</span></li><li><b>Coverage</b><span class="tool">Verilator 5.052</span><span class="res">line 83.3 %, branch 100 %, toggle 100 %; 2 points no test reaches</span></li><li><b>Formal</b><span class="tool">SymbiYosys, abc pdr</span><span class="res">the design&#x27;s assertions proved for every cycle</span></li><li><b>Clock and reset crossings</b><span class="tool">ChipLeap&#x27;s checker on Yosys&#x27;s netlist</span><span class="res">1 crossing, all synchronized (2-flop synchronizer on rx_i); a warning: the reset is released asynchronously</span></li></ol></details><details class="rtl-group" open><summary>Implement<small>5 steps</small></summary><ol><li><b>Synthesis</b><span class="tool">Yosys and ABC on IHP&#x27;s cells</span><span class="res">221 cells, 51 flip-flops, 0.0041 mm², critical path 1.01 ns</span></li><li><b>Place and route</b><span class="tool">LibreLane (OpenROAD, KLayout), signed off at the slow corner</span><span class="res">352 cells on a 0.0105 mm² core; 100 MHz met at 125 °C (about 264 MHz there); DRC, LVS and antenna clean</span></li><li><b>Equivalence</b><span class="tool">Yosys equivalence</span><span class="res">RTL to netlist: 74 of 75 proved, the rest equal for 40 cycles; netlist to layout: all 969 points proved</span></li><li><b>Gate-level simulation</b><span class="tool">cocotb on Icarus 13.0, IHP&#x27;s cell models</span><span class="res">5 of 5 tests pass on the routed netlist with SDF delays</span></li><li><b>ECO</b><span class="res skip">not run here: no eco changes in the project</span></li></ol></details><details class="rtl-group" open><summary>After the layout<small>4 steps</small></summary><ol><li><b>Design for test</b><span class="tool">OpenROAD scan insertion, Fault 0.9.4 with Quaigh</span><span class="res">3 chains of 17 flip-flops, 99.2 % stuck-at coverage with 39 patterns, which pass through the chains of the routed netlist</span></li><li><b>Power</b><span class="tool">OpenROAD with the project&#x27;s own tests</span><span class="res">0.345 mW at the typical corner from the tests&#x27; activity (0.947 mW vectorless)</span></li><li><b>IR drop</b><span class="tool">OpenROAD PDNSim on the routed grid</span><span class="res">0.52 mV at worst, 0.04 % of 1.2 V</span></li><li><b>Power intent</b><span class="tool">UPF read and placed by OpenROAD</span><span class="res">2 domains, PD_RX placed in its own region; 13 signals between them</span></li></ol></details><details class="rtl-group" open><summary>The chip<small>4 steps</small></summary><ol><li><b>Macros</b><span class="tool">macro/v1 packages, checked, their views rewritten</span><span class="res">aispice&#x27;s strongarm, 20.93 x 45 um</span></li><li><b>Chip assembly</b><span class="tool">LibreLane with IHP&#x27;s pad ring; bond pads, seal ring and fill in KLayout</span><span class="res">33 pads on a 1.52 x 1.52 mm die</span></li><li><b>Timing at the ports</b><span class="tool">OpenSTA through IHP&#x27;s IO cells, every corner</span><span class="res">+0.971 ns of setup slack at the slow corner (+6.302 ns at the core&#x27;s side of the pads)</span></li><li><b>Signoff</b><span class="tool">IHP&#x27;s DRC and LVS decks, antenna</span><span class="res">0 DRC violations, LVS match, 0 antenna violations</span></li></ol></details></div>
+<!-- rtl-flow:end -->
+        <pre class="terminal rtl-cmds"><code><span class="t-c"># write project.yaml for your RTL</span>
+chipleap project init path/to/rtl
+
+<span class="t-c"># check it, then take it down to the chip</span>
+chipleap verify path/to/rtl
+chipleap verify path/to/rtl --steps all</code></pre>
+      </div>
+    </section>
+
+    <section id="chip" class="dark chip-section" aria-labelledby="chip-h">
+      <div class="shell">
+        <div class="section-head">
+          <h2 id="chip-h">Down to a chip</h2>
+          <p>A <code>chip</code> section turns a project into a whole chip: the core, hardened blocks and a pad ring of IHP's IO cells, routed by LibreLane, with bond pads, seal ring and fill, timed at its own ports through the pads, then checked with IHP's own DRC and LVS decks.</p>
+        </div>
+        <!-- chip:start -->
+<div class="chip-grid"><figure class="chip-art"><div class="chip-frame"><picture><source type="image/webp" srcset="img/chip-1000.webp 1000w, img/chip-1400.webp 1400w" sizes="(max-width: 980px) 100vw, 640px"><img src="img/chip-1000.jpg" width="1000" height="1000" loading="lazy" alt="The uart_chip layout drawn from its GDS before fill: 33 bond pads and IHP&#x27;s IO cells around the core, a comparator from aispice in the core, and the seal ring"></picture><div class="callout right" style="--x:50.0%;--y:49.9%;--tx:46px;--ty:34px"><svg width="1" height="1"><line x1="0" y1="0" x2="46" y2="52"/></svg><span class="dot"><i>1</i></span><span class="tag"><b>Core</b>uart, 286 standard cells</span></div><div class="callout right" style="--x:41.5%;--y:44.3%;--tx:40px;--ty:-100px"><svg width="1" height="1"><line x1="0" y1="0" x2="40" y2="-82"/></svg><span class="dot"><i>2</i></span><span class="tag"><b>Analog macro</b>strongarm, from aispice</span></div><div class="callout right" style="--x:6.2%;--y:36.8%;--tx:46px;--ty:-60px"><svg width="1" height="1"><line x1="0" y1="0" x2="46" y2="-42"/></svg><span class="dot"><i>3</i></span><span class="tag"><b>Analog pad</b>ain_m, into strongarm</span></div><div class="callout left" style="--x:56.6%;--y:85.5%;--tx:-44px;--ty:-70px"><svg width="1" height="1"><line x1="0" y1="0" x2="-44" y2="-52"/></svg><span class="dot"><i>4</i></span><span class="tag"><b>IO ring</b>33 pads of IHP&#x27;s sg13g2_io</span></div></div><ol class="callout-key"><li><b>Core</b> uart, 286 standard cells</li><li><b>Analog macro</b> strongarm, from aispice</li><li><b>Analog pad</b> ain_m, into strongarm</li><li><b>IO ring</b> 33 pads of IHP&#x27;s sg13g2_io</li></ol><figcaption>uart_chip, drawn from the GDS ChipLeap wrote, before fill.</figcaption></figure><div class="chip-facts"><dl><div><dt>Die with seal ring</dt><dd>1.52 x 1.52<small>mm</small></dd></div><div><dt>Pads</dt><dd>33</dd></div><div><dt>DRC violations, IHP deck</dt><dd>0</dd></div><div><dt>LVS, IHP deck</dt><dd>match</dd></div><div><dt>Setup slack at the ports, slow corner</dt><dd>+0.971<small>ns</small></dd></div><div><dt>Hold slack at the ports, worst corner</dt><dd>+0.101<small>ns</small></dd></div></dl><p>Timed at its ports through IHP's IO cells, the chip's worst path at the slow corner spends 5.4 ns inside the output pad, driving 5 pF: setup slack falls from +6.302 ns at the core's side of the pads to +0.971 ns at the ports.</p><p>Every check is IHP's own: the DRC deck on the whole die with its density rules, the LVS deck down to the macros' transistors. <a href="https://github.com/danieltyukov/chipleap/blob/main/docs/chips.md">How a chip is built and checked</a>.</p></div></div>
+<!-- chip:end -->
+      </div>
+    </section>
+
+    <section id="analog" class="analog" aria-labelledby="analog-h">
+      <div class="shell analog-grid">
+        <div>
+          <h2 id="analog-h">Analog blocks come from aispice</h2>
+          <p>ChipLeap covers the digital side. Its analog counterpart, aispice, sizes analog blocks on the same PDK, draws their layouts with generators checked by IHP's DRC and LVS decks, and measures their specs before and after extraction. The two hand blocks to each other as macro packages, and both check a package with the same rules before placing it.</p>
+          <div class="hero-actions">
+            <a class="btn btn-ghost" href="https://danieltyukov.github.io/aispice/">aispice</a>
+            <a class="btn btn-ghost" href="https://github.com/danieltyukov/chipleap/blob/main/docs/macro-package.md">The package format</a>
+          </div>
+        </div>
+        <ol class="handoff" aria-label="How a block moves from aispice to a ChipLeap chip">
+          <li><b>aispice</b><span>Sizes the block at every corner, draws it, checks DRC and LVS, extracts it.</span></li>
+          <li><b><code>strongarm.macro</code></b><span>GDS, LEF, liberty, Verilog, SPICE, measured specs and the DRC and LVS evidence, named by one <code>macro.toml</code>.</span></li>
+          <li><b>ChipLeap</b><span>Checks the package, places it in the core and runs LVS down to its transistors.</span></li>
+        </ol>
+      </div>
+    </section>
+
     <section id="assistant" class="assistant" aria-labelledby="assistant-h">
       <div class="shell assistant-grid">
         <div class="assistant-copy">
@@ -236,7 +287,7 @@
       <div class="shell start-grid">
         <div>
           <h2 id="start-h">Run it on your machine</h2>
-          <p>Python 3.10 or newer. Verilator, Yosys, sv2v and the IHP PDK are optional: <code>chipleap verify</code> uses what it finds, and <code>chipleap doctor</code> lists it.</p>
+          <p>Python 3.10 or newer. Verilator, Yosys, LibreLane, the IHP PDK and the other tools are optional: <code>chipleap verify</code> uses what it finds and skips the rest with the reason, and <code>chipleap doctor</code> lists it.</p>
           <div class="hero-actions">
             <a class="btn btn-primary" href="https://github.com/danieltyukov/chipleap">View on GitHub</a>
             <a class="btn btn-ghost" href="https://github.com/danieltyukov/chipleap/tree/main/docs">Read the docs</a>
@@ -251,7 +302,11 @@ chipleap require llama.yaml
 chipleap explore llama.yaml -o out
 
 <span class="t-c"># simulate, synthesize, run X-HEEP checks</span>
-chipleap verify out</code></pre>
+chipleap verify out
+
+<span class="t-c"># or bring your RTL, down to the chip</span>
+chipleap project init path/to/rtl
+chipleap verify path/to/rtl --steps all</code></pre>
       </div>
     </section>
 
@@ -259,10 +314,12 @@ chipleap verify out</code></pre>
       <div class="shell narrow">
         <h2 id="faq-h">Questions</h2>
         <details><summary>Does it need a commercial EDA licence?</summary><p>No. Simulation and lint use Verilator, synthesis uses Yosys with sv2v, place and route uses LibreLane, the technology data comes from the IHP SG13G2 open PDK, and X-HEEP's own generator checks the configuration. The model, the explorer and the generators need none of them. If you do have Cadence, Synopsys or Siemens tools, the same checks run on them, on your machine or on a design server, and <code>chipleap tech add</code> reads your own PDK.</p></details>
+        <details><summary>Can I use it on RTL I wrote?</summary><p>Yes. <code>chipleap project init</code> writes a project file for a directory of Verilog or SystemVerilog with cocotb tests, and <code>chipleap verify</code> runs the same checks the generated hardware gets, then the steps after the layout and, with a <code>chip</code> section, the whole chip. <a href="https://github.com/danieltyukov/chipleap/blob/main/docs/projects.md">docs/projects.md</a> describes the project file and each step.</p></details>
         <details><summary>How accurate is the model?</summary><p>For the accelerator, the model predicts the generated RTL's cycle count exactly in simulation without memory stalls, and within a few percent with random stalls. Its logic area is within 3% on average of Yosys synthesis on IHP SG13G2, and the synthesized logic runs faster than the clock the model allows there. Memories, CPU and energy rest on technology data that is measured for IHP SG13G2 and scaled from published figures for the other nodes, and reports say which is which. <a href="https://github.com/danieltyukov/chipleap/blob/main/docs/model.md">docs/model.md</a> lists every number and its source.</p></details>
         <details><summary>Do I have to use RISC-V or X-HEEP?</summary><p>No. X-HEEP is the default because it is an open, configurable RISC-V microcontroller from EPFL with a Python configuration API and several chips taped out, and its generator validates what ChipLeap writes. With <code>platform: standalone</code> ChipLeap generates the accelerator alone as AXI4 IP, with a plain C driver, for an Arm, RISC-V or FPGA SoC; its AXI interfaces are simulated bit-exact like the rest.</p></details>
         <details><summary>Can I use my own model or network?</summary><p>Yes. Any decoder-only transformer can be described by its shape, and other networks as convolutions, depthwise convolutions, matrix multiplies and element-wise operators.</p></details>
         <details><summary>What does the generated accelerator not do yet?</summary><p>It computes int8 activations against int8, int4 or int2 weights with int32 results. Requantization, activation functions and int4 group scales run on the CPU, and the model counts them there. It has been placed and routed on IHP SG13G2 with clean DRC and LVS, but not taped out.</p></details>
+        <details><summary>Has a ChipLeap chip been taped out?</summary><p>Not yet. The chip on this page passes IHP's DRC deck on the whole die with its density rules, its LVS deck down to the transistors of the macros, antenna checks, timing at every corner through the pads, and the public parts of a shuttle's precheck. Fabrication is the step still missing.</p></details>
         <details><summary>Is it affiliated with EPFL, IHP or any company named here?</summary><p>No. ChipLeap is an independent open-source project.</p></details>
       </div>
     </section>
@@ -277,10 +334,11 @@ chipleap verify out</code></pre>
         <a href="https://github.com/danieltyukov/chipleap/tree/main/docs">Docs</a>
         <a href="https://github.com/danieltyukov/chipleap/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/danieltyukov/chipleap/issues">Issues</a>
+        <a href="https://danieltyukov.github.io/aispice/">aispice</a>
       </nav>
       <p>MIT license. Not affiliated with EPFL, IHP or any company named on this page.</p>
     </div>
   </footer>
-  <script src="app.js?v=10d38c89e7" defer></script>
+  <script src="app.js?v=62f245ebe4" defer></script>
 </body>
 </html>
