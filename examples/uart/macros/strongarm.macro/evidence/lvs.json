@@ -1,0 +1,48 @@
+{
+  "data": {
+    "devices": [
+      "M0",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "M5",
+      "M6",
+      "M7",
+      "M8",
+      "M9",
+      "M10",
+      "pair_dummy1",
+      "pair_dummy2",
+      "latch_n_dummy1",
+      "latch_n_dummy2",
+      "latch_n_dummy3",
+      "latch_n_dummy4"
+    ],
+    "matched": true
+  },
+  "engineering": {
+    "status": "pass",
+    "summary": "IHP KLayout LVS deck: the layout matches strongarm.spice (17 devices)"
+  },
+  "inputs": [
+    {
+      "path": "strongarm.gds",
+      "sha256": "c1da3801ba455aa531b50cb66096428d5146b04e36a094f85a9edeed92a0c391"
+    },
+    {
+      "path": "strongarm.spice",
+      "sha256": "b80dd5f78e9a6d5d7db113b1dc558e73f5afe3a27d88182a87ce9169770f2bac"
+    }
+  ],
+  "operation": "lvs",
+  "pdk": {
+    "commit": "22f2a25f1734796de3debbbf29cf697cbbc54081",
+    "name": "ihp-sg13g2"
+  },
+  "schema": "macro.evidence/v1",
+  "tool": {
+    "name": "klayout",
+    "version": "0.30.7"
+  }
+}

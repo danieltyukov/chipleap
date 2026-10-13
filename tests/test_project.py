@@ -102,7 +102,7 @@ def test_full_project(rtl):
     [
         ({"speed": 1}, "unknown top-level keys: speed"),
         ({"macros": {}}, "macros: reserved for a later version of ChipLeap (D3)"),
-        ({"chip": {}}, "(D4)"),
+        ({"chip": {}}, "chip.pads: needs at least one vdd, vss, iovdd, iovss pad"),
         ({"schema": "project/v9"}, "schema 'project/v9' is not supported"),
         ({"top": "2bad"}, "top must be a Verilog identifier"),
         ({"sources": ["rtl/missing.sv"]}, "sources: rtl/missing.sv is not a file"),

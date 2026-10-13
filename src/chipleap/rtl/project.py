@@ -41,6 +41,20 @@ from typing import Any, Concatenate, ParamSpec, TypeVar
 
 import yaml
 
+from chipleap.chip.config import (
+    CORE_MAX_UM,
+    MACROS_MAX,
+    ORIENTATIONS,
+    PAD_PITCH_MAX,
+    PAD_PITCH_MIN,
+    SIDES,
+    SLOTS_MAX,
+    SUPPLIES,
+    ChipConfig,
+    ChipMacro,
+    Pad,
+    port_bit,
+)
 from chipleap.hw.design import SPEC_NAME_MAX, is_safe_name, safe_name
 from chipleap.hw.tech import TECHNOLOGIES
 from chipleap.rtl import builddir
@@ -67,7 +81,6 @@ ALLOW_ENV = "CHIPLEAP_ALLOW_PATHS"
 # Sections later milestones will read. A file written for them fails clearly here.
 RESERVED = {
     "macros": "D3",
-    "chip": "D4",
 }
 # IHP SG13G2's corners by short name: the liberty's suffix.
 CORNERS = {"typ": "typ_1p20V_25C", "slow": "slow_1p08V_125C", "fast": "fast_1p32V_m40C"}
@@ -307,6 +320,7 @@ class Project:
     equivalence: EquivConfig = field(default_factory=EquivConfig)
     cdc: CdcConfig = field(default_factory=CdcConfig)
     gate_sim: GateSimConfig = field(default_factory=GateSimConfig)
+    chip: ChipConfig | None = None  # None: the project has no chip section
     description: str = ""
     filelists: tuple[Path, ...] = ()  # the filelist and every file it includes
     # Directories outside the project the user allowed files from (never the project file).
@@ -394,6 +408,9 @@ class Project:
         files += [*self.lint.waivers, *([self.sdc] if self.sdc else [])]
         if self.formal is not None:
             files += [*self.formal.sources, *self.formal.sby]
+        if self.chip is not None:
+            for m in self.chip.macros:
+                files += self.files_in(m.package)
         if self.tests.dir is not None:
             files += self.files_in(self.tests.dir, (".py",))
         if self.golden is not None:
@@ -521,6 +538,8 @@ class Project:
             out["upf"] = {"domains": domains}
         if self.eco:
             out["eco"] = [c.to_dict() for c in self.eco]
+        if self.chip is not None:
+            out["chip"] = _chip_dict(self.chip, self.rel)
         return out
 
 
@@ -1457,6 +1476,162 @@ def _parse_gate_sim(value: Any) -> GateSimConfig:
     return GateSimConfig(netlist, str(corner), delays)
 
 
+def _chip_pad(value: Any, where: str) -> Pad:
+    if value is None:
+        return Pad("empty")
+    if isinstance(value, str):
+        if value in SUPPLIES:
+            return Pad(value)
+        if port_bit(value) is None:
+            raise ProjectError(
+                f"{where}: {value!r} is not a port bit of the top (name or name[index]), "
+                f"nor a supply ({', '.join(SUPPLIES)})"
+            )
+        return Pad("signal", value)
+    a = _mapping(value, where, ("analog", "resistor"))
+    if "analog" not in a:
+        raise ProjectError(f"{where} must be a port bit, a supply, null or {{analog: NET}}")
+    resistor = a.get("resistor", False)
+    if not isinstance(resistor, bool):
+        raise ProjectError(f"{where}.resistor must be true or false")
+    return Pad("analog", _ident(a["analog"], f"{where}.analog"), resistor)
+
+
+def _parse_chip(value: Any, paths: _Paths, top: str) -> ChipConfig | None:
+    if value is None:
+        return None
+    c = _mapping(value, "chip", ("name", "pads", "macros", "pad_pitch_um", "core_um"))
+    name = _ident(c.get("name", f"{top}_chip"), "chip.name")
+    pitch = _positive(c.get("pad_pitch_um", 100), "chip.pad_pitch_um", PAD_PITCH_MAX)
+    if pitch < PAD_PITCH_MIN:
+        raise ProjectError(f"chip.pad_pitch_um must be at least {PAD_PITCH_MIN:g} for bonding")
+    if pitch != int(pitch):
+        # The fillers come in whole micrometres; any remainder would break the ring's rails.
+        raise ProjectError("chip.pad_pitch_um must be a whole number of um")
+    core = None
+    if c.get("core_um") is not None:
+        raw = c["core_um"]
+        if not isinstance(raw, list) or len(raw) != 2:
+            raise ProjectError("chip.core_um must be [width, height] in um")
+        w = _positive(raw[0], "chip.core_um[0]", CORE_MAX_UM)
+        h = _positive(raw[1], "chip.core_um[1]", CORE_MAX_UM)
+        core = (w, h)
+    pads_raw = _mapping(c.get("pads"), "chip.pads", SIDES)
+    pads: dict[str, tuple[Pad, ...]] = {}
+    signals: set[str] = set()
+    analog: set[str] = set()
+    for side in SIDES:
+        items = pads_raw.get(side)
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            raise ProjectError(f"chip.pads.{side} must be a list of pads")
+        if len(items) > SLOTS_MAX:
+            raise ProjectError(f"chip.pads.{side}: at most {SLOTS_MAX} pads on a side")
+        row = []
+        for i, item in enumerate(items):
+            where = f"chip.pads.{side}[{i}]"
+            pad = _chip_pad(item, where)
+            if pad.kind == "signal":
+                if pad.net in signals:
+                    raise ProjectError(f"{where}: {pad.net} is on a pad already")
+                signals.add(pad.net)
+            elif pad.kind == "analog":
+                if pad.net in analog:
+                    raise ProjectError(f"{where}: analog net {pad.net} is on a pad already")
+                analog.add(pad.net)
+            row.append(pad)
+        pads[side] = tuple(row)
+    kinds = {p.kind for row in pads.values() for p in row}
+    missing = [k for k in SUPPLIES if k not in kinds]
+    if missing:
+        raise ProjectError(f"chip.pads: needs at least one {', '.join(missing)} pad")
+    raw_macros = c.get("macros") or []
+    if not isinstance(raw_macros, list):
+        raise ProjectError("chip.macros must be a list of {instance, package, ...}")
+    if len(raw_macros) > MACROS_MAX:
+        raise ProjectError(f"chip.macros: at most {MACROS_MAX} macros")
+    macros: list[ChipMacro] = []
+    for i, m in enumerate(raw_macros):
+        where = f"chip.macros[{i}]"
+        m = _mapping(m, where, ("instance", "package", "orientation", "at_um", "connect"))
+        inst = _ident(m.get("instance"), f"{where}.instance")
+        if inst in {x.instance for x in macros}:
+            raise ProjectError(f"{where}.instance: {inst} is listed twice")
+        if inst.startswith(("pad_", "fill_", "corner_", "u_core")):
+            raise ProjectError(
+                f"{where}.instance: {inst} starts like ChipLeap's own instances (pad_, fill_, "
+                "corner_, u_core)"
+            )
+        if not isinstance(m.get("package"), str):
+            raise ProjectError(f"{where}.package must be the path of a .macro directory")
+        package = paths.path(paths.root, m["package"], f"{where}.package", kind="dir")
+        orient = _choice(m.get("orientation", "N"), ORIENTATIONS, f"{where}.orientation")
+        at = None
+        if m.get("at_um") is not None:
+            raw = m["at_um"]
+            if not isinstance(raw, list) or len(raw) != 2:
+                raise ProjectError(f"{where}.at_um must be [x, y] in um from the core's corner")
+            vals = []
+            for k, v in enumerate(raw):
+                if (
+                    isinstance(v, bool)
+                    or not isinstance(v, (int, float))
+                    or not (0 <= v <= CORE_MAX_UM)
+                ):
+                    raise ProjectError(f"{where}.at_um[{k}] must be from 0 to {CORE_MAX_UM:g}")
+                vals.append(float(v))
+            at = (vals[0], vals[1])
+        conn = m.get("connect") or {}
+        if not isinstance(conn, dict):
+            raise ProjectError(f"{where}.connect must map the macro's pins to nets")
+        connect: dict[str, str] = {}
+        for pin, net in conn.items():
+            if not isinstance(pin, str) or port_bit(pin) is None:
+                raise ProjectError(
+                    f"{where}.connect: {str(pin)[:40]!r} is not a pin: a name, a bus or a bit "
+                    "of one (q[3])"
+                )
+            if not isinstance(net, str) or port_bit(net) is None:
+                raise ProjectError(
+                    f"{where}.connect.{pin} must be a net: a port bit of the top or a name"
+                )
+            connect[str(pin)] = net
+        macros.append(ChipMacro(inst, package, orient, at, connect))
+    return ChipConfig(name, pads, tuple(macros), pitch, core)
+
+
+def _chip_dict(chip: ChipConfig, rel: Callable[[Path], str]) -> dict[str, Any]:
+    def pad(p: Pad) -> Any:
+        if p.kind == "empty":
+            return None
+        if p.kind == "signal":
+            return p.net
+        if p.kind == "analog":
+            return {"analog": p.net, **({"resistor": True} if p.resistor else {})}
+        return p.kind
+
+    out: dict[str, Any] = {
+        "name": chip.name,
+        "pad_pitch_um": chip.pad_pitch_um,
+        "pads": {side: [pad(p) for p in chip.pads.get(side, ())] for side in SIDES},
+    }
+    if chip.core_um is not None:
+        out["core_um"] = list(chip.core_um)
+    if chip.macros:
+        out["macros"] = [
+            {
+                "instance": m.instance,
+                "package": rel(m.package),
+                "orientation": m.orientation,
+                **({"at_um": list(m.at_um)} if m.at_um is not None else {}),
+                "connect": dict(m.connect),
+            }
+            for m in chip.macros
+        ]
+    return out
+
+
 # The top-level keys a project file may have. Later milestones add their sections here.
 SECTIONS = (
     "schema",
@@ -1486,6 +1661,7 @@ SECTIONS = (
     "ir_drop",
     "upf",
     "eco",
+    "chip",
 )
 
 
@@ -1578,6 +1754,7 @@ def parse_project(
         equivalence=_parse_equivalence(data.get("equivalence")),
         cdc=_parse_cdc(data.get("cdc"), clocks, resets),
         gate_sim=_parse_gate_sim(data.get("gate_sim")),
+        chip=_parse_chip(data.get("chip"), paths, top),
         description=str(data.get("description", "")),
         filelists=tuple(fl.files),
         allowed=paths.roots[1:],

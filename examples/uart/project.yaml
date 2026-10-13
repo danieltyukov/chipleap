@@ -25,3 +25,56 @@ upf:
   domains:
     - {name: PD_TOP}
     - {name: PD_RX, elements: [u_rx]}
+# The UART as a chip (chipleap verify examples/uart --steps chip): a pad ring from IHP's
+# sg13g2_io library, and a StrongARM comparator from aispice (macros/strongarm.macro)
+# whose output is the receive line, its inputs on two analog pads.
+chip:
+  name: uart_chip
+  pad_pitch_um: 100
+  core_um: [400, 400]
+  pads:
+    south:
+      - tx_data_i[0]
+      - tx_data_i[1]
+      - tx_data_i[2]
+      - vdd
+      - vss
+      - clk_i
+      - rst_ni
+      - tx_valid_i
+      - tx_data_i[3]
+    east:
+      - tx_data_i[4]
+      - tx_data_i[5]
+      - tx_data_i[6]
+      - iovdd
+      - iovss
+      - tx_data_i[7]
+      - tx_ready_o
+      - tx_o
+      - null
+    north:
+      - rx_data_o[0]
+      - rx_data_o[1]
+      - rx_data_o[2]
+      - vdd
+      - vss
+      - rx_data_o[3]
+      - rx_data_o[4]
+      - rx_data_o[5]
+      - rx_data_o[6]
+    west:
+      - rx_data_o[7]
+      - rx_valid_o
+      - rx_error_o
+      - iovdd
+      - iovss
+      - {analog: ain_p}
+      - {analog: ain_m}
+      - null
+      - null
+  macros:
+    - instance: comp
+      package: macros/strongarm.macro
+      at_um: [60, 260]
+      connect: {clk: clk_i, inp: ain_p, inm: ain_m, outp: rx_i}

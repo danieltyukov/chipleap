@@ -59,10 +59,13 @@ Point ChipLeap at a directory of Verilog or SystemVerilog with cocotb tests:
 ```sh
 chipleap project init path/to/rtl       # writes project.yaml: top, sources, clock, reset, tests
 chipleap verify path/to/rtl             # lint, simulation, coverage, formal, CDC, synthesis, equivalence
-chipleap verify path/to/rtl --steps all # and place and route to a GDS, then the tests on the routed netlist
+chipleap verify path/to/rtl --steps all # and place and route to a GDS, then the tests on the routed netlist,
+                                        # then the whole chip with its pad ring and macros
 ```
 
 Lint runs Verilator and slang, simulation runs the cocotb tests on Icarus or Verilator, coverage reports line, branch and toggle coverage, SymbiYosys proves the design's own assertions, a structural checker finds unsynchronized clock and reset domain crossings, synthesis maps to the IHP SG13G2 cells, equivalence shows the netlist implements the RTL, LibreLane routes it with the same slow-corner signoff as the accelerators, and the tests run again on the routed netlist with its SDF delays. With `--steps all` it also inserts scan chains with OpenROAD and generates stuck-at patterns with Fault, which it simulates through the chains; measures power from the activity of your own tests on the gate-level netlist and IR drop on the routed power grid; places UPF power domains with OpenROAD; and applies ECO changes to the routed design and signs it off again without placing it again. Failing tests come back by name, every problem with its file and line, and a failing property or netlist with its counterexample, which is also what an assistant gets through MCP to fix the RTL in a loop. [examples/uart](examples/uart) is a UART that routes to a clean GDS; [docs/projects.md](docs/projects.md) describes the project file.
+
+With a `chip` section the project becomes a whole chip: the core, hardened blocks from [macro packages](docs/macro-package.md) (an analog comparator from aispice, say) and a pad ring of IHP's IO cells, routed by LibreLane, with bond pads, seal ring and fill, LVS clean on IHP's deck down to the macros' transistors, DRC clean on the whole die, and a bond map ([docs/chips.md](docs/chips.md)). The UART example is one: 33 pads on a 1.5 mm die, with a comparator on its receive line.
 
 ## Ask your AI assistant
 

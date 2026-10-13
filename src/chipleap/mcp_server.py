@@ -729,6 +729,25 @@ def gate_sim_rtl(project: str, tests: str = "") -> dict[str, Any]:
     return _guarded("gls", lambda: gls(p, tests))
 
 
+def plan_chip(project: str) -> dict[str, Any]:
+    """The floorplan of the project's chip section, without running a tool."""
+    from chipleap.chip.assemble import ERRORS, ChipError, plan_chip
+
+    p = _project(project)
+    try:
+        return plan_chip(p)
+    except (ChipError, *ERRORS) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def assemble_chip(project: str) -> dict[str, Any]:
+    """The project's whole chip, built and checked (``chipleap verify --steps chip``)."""
+    from chipleap.chip.assemble import chip
+
+    p = _project(project)
+    return _guarded("chip", lambda: chip(p))
+
+
 def coverage_gaps(
     project: str, file: str = "", kinds: str = "", limit: int = 50, context: int = 2
 ) -> dict[str, Any]:
@@ -802,6 +821,8 @@ TOOLS: dict[str, Callable[..., Any]] = {
     "cdc_rtl": cdc_rtl,
     "gate_sim_rtl": gate_sim_rtl,
     "coverage_gaps": coverage_gaps,
+    "plan_chip": plan_chip,
+    "assemble_chip": assemble_chip,
 }
 # Tools whose results depend on the machine, on files or write files are logged but not
 # replayed. Power, IR drop, timing paths and ECOs read the routed design in build/, which
@@ -818,6 +839,7 @@ SIDE_EFFECTS = {
     "ir_drop_rtl",
     "timing_paths_rtl",
     "eco_rtl",
+    "assemble_chip",
 }
 # Tools that read a project. Their results depend on its files and on the installed tools,
 # so their log entries also carry a digest of every input file and the tool versions, and
@@ -835,6 +857,7 @@ PROJECT_TOOLS = {
     "gate_sim_rtl",
     "dft_rtl",
     "upf_rtl",
+    "plan_chip",
 }
 
 
@@ -1295,6 +1318,25 @@ def build_server(log_dir: str | None = None) -> Any:
     )
     def gate_sim_rtl(project: str, tests: str = "") -> dict[str, Any]:
         return logged("gate_sim_rtl", TOOLS["gate_sim_rtl"])(project=project, tests=tests)
+
+    @server.tool(
+        description="The floorplan of an RTL project's chip (its project.yaml chip section): "
+        "die and core, every pad with its number in the bond map, side, net, IO cell and bond "
+        "pad centre, and where each macro goes. Runs no tool; a signal pad's cell (input or "
+        "output) follows its port's direction once the chip is built."
+    )
+    def plan_chip(project: str) -> dict[str, Any]:
+        return logged("plan_chip", TOOLS["plan_chip"])(project=project)
+
+    @server.tool(
+        description="Build and check an RTL project's whole chip: the core, its macro packages "
+        "(checked against macro/v1 first) and an IHP sg13g2_io pad ring, placed and routed by "
+        "LibreLane, with bond pads, seal ring and fill, then IHP's LVS (standard cells and "
+        "macros at transistor level) and DRC decks, the supply hookup, a GDS precheck and a "
+        "bond map. Takes 15 minutes or more; writes build/chip."
+    )
+    def assemble_chip(project: str) -> dict[str, Any]:
+        return logged("assemble_chip", TOOLS["assemble_chip"])(project=project)
 
     @server.tool(
         description="The coverage points an RTL project's tests never reached in the last "

@@ -141,18 +141,14 @@ def _scan_netlist(project: Project, workdir: Path, src: Path) -> dict[str, Any]:
     return {"VERILOG_FILES": [f"dir::src/{scan.netlist.name}"], "RUN_LINTER": False}
 
 
-def config(project: Project, workdir: Path) -> dict[str, Any]:
-    """The LibreLane configuration for ``project``; copies its RTL and constraints into
-    ``workdir``. With ``dft.insert`` the scan-inserted netlist takes the RTL's place."""
+def verilog_config(project: Project, workdir: Path) -> dict[str, Any]:
+    """LibreLane's Verilog settings for ``project``; copies its RTL into ``workdir/src``."""
     src = builddir.work_dir(workdir, "src", empty=True)
-    cfg: dict[str, Any] = {"DESIGN_NAME": project.top}
-    if project.dft is not None and project.dft.insert:
-        cfg.update(_scan_netlist(project, workdir, src))
-        return _finish(project, workdir, cfg)
     try:
         files, raw = prepare_verilog(project, src)
     except SynthError as exc:
         raise PnrError(str(exc)) from exc
+    cfg: dict[str, Any] = {}
     if raw:
         cfg["VERILOG_FILES"] = [_copy_into(project, f, src) for f in files]
         if project.include_dirs:
@@ -163,6 +159,18 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
             cfg["VERILOG_DEFINES"] = project.define_args()
     else:
         cfg["VERILOG_FILES"] = [f"dir::src/{f.name}" for f in files]
+    return cfg
+
+
+def config(project: Project, workdir: Path) -> dict[str, Any]:
+    """The LibreLane configuration for ``project``; copies its RTL and constraints into
+    ``workdir``. With ``dft.insert`` the scan-inserted netlist takes the RTL's place."""
+    cfg: dict[str, Any] = {"DESIGN_NAME": project.top}
+    if project.dft is not None and project.dft.insert:
+        src = builddir.work_dir(workdir, "src", empty=True)
+        cfg.update(_scan_netlist(project, workdir, src))
+        return _finish(project, workdir, cfg)
+    cfg.update(verilog_config(project, workdir))
     if project.parameters:
         cfg["SYNTH_PARAMETERS"] = [f"{k}={v}" for k, v in project.parameters.items()]
     return _finish(project, workdir, cfg)
