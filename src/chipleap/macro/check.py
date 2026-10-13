@@ -6,16 +6,18 @@ rule ids and messages; tests/fixtures/macro/expected.json pins both.
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import math
 import os
 import re
+import stat
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
-from chipleap.macro.evidence import sha256_file
 from chipleap.macro.gds import GdsCycleError, GdsError, GdsLibrary, parse_gds
 from chipleap.macro.limits import (
     LIMITS,
@@ -23,8 +25,8 @@ from chipleap.macro.limits import (
     LimitError,
     Limits,
     json_depth,
-    read_capped,
     toml_depth,
+    too_large,
 )
 from chipleap.macro.manifest import (
     MANIFEST,
@@ -186,6 +188,87 @@ def _unreadable(err: OSError) -> str:
     return f"cannot read the file: {err.strerror or _sum_text(err)}"
 
 
+# Reading the package: only what is in it. A symbolic link could lead to a sibling
+# directory (another package's evidence, say) or anywhere on the machine, and a FIFO
+# would block the read, so neither is followed or opened.
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+def _kind(root: Path, rel: str) -> str:
+    """What the package holds at ``rel``, its last part not followed: "file", "dir",
+    "link", "other" or "" for nothing."""
+    try:
+        mode = os.lstat(root / rel).st_mode
+    except (OSError, ValueError):
+        return ""
+    if stat.S_ISLNK(mode):
+        return "link"
+    if stat.S_ISREG(mode):
+        return "file"
+    return "dir" if stat.S_ISDIR(mode) else "other"
+
+
+def _open(root: Path, rel: str) -> BinaryIO:
+    """Package file ``rel`` (``name`` or ``evidence/name``) opened for reading, without
+    following a symbolic link in any part of it, and only if it is a regular file."""
+    *dirs, name = rel.split("/")
+    fd = os.open(root, os.O_RDONLY | _DIRECTORY)
+    try:
+        for d in dirs:
+            try:
+                nfd = os.open(d, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise OSError(exc.errno, f"{d} is a symbolic link") from None
+                raise
+            os.close(fd)
+            fd = nfd
+        try:
+            ffd = os.open(name, os.O_RDONLY | _NOFOLLOW | _NONBLOCK, dir_fd=fd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise OSError(exc.errno, "it is a symbolic link") from None
+            raise
+    finally:
+        os.close(fd)
+    f = os.fdopen(ffd, "rb")
+    if not stat.S_ISREG(os.fstat(ffd).st_mode):
+        f.close()
+        raise OSError(errno.EINVAL, "it is not a regular file")
+    return f
+
+
+def _read(root: Path, rel: str, limit: int) -> bytes:
+    """A package file's bytes. Raises :class:`FileTooLarge` past ``limit`` and
+    ``OSError`` when it cannot be read."""
+    with _open(root, rel) as f:
+        size = os.fstat(f.fileno()).st_size
+        if size > limit:
+            raise FileTooLarge(too_large(size, limit))
+        data = f.read(limit + 1)
+    if len(data) > limit:  # it grew after the stat
+        raise FileTooLarge(too_large(len(data), limit))
+    return data
+
+
+def _sha256(root: Path, rel: str, limit: int) -> str:
+    """A package file's SHA-256, read in chunks, within ``limit``."""
+    h = hashlib.sha256()
+    with _open(root, rel) as f:
+        size = os.fstat(f.fileno()).st_size
+        if size > limit:
+            raise FileTooLarge(too_large(size, limit))
+        read = 0
+        while chunk := f.read(1 << 20):
+            read += len(chunk)
+            if read > limit:
+                raise FileTooLarge(too_large(read, limit))  # it grew after the stat
+            h.update(chunk)
+    return h.hexdigest()
+
+
 class _Checker:
     def __init__(
         self, root: Path, report: Report, limits: Limits, pdk_cells: frozenset[str] = frozenset()
@@ -197,6 +280,7 @@ class _Checker:
         # The cells a chip would merge, seen while the views are read: (file, kind, name).
         self.cells: list[tuple[str, str, str]] = []
         self.too_large: set[str] = set()  # files reported as too large, once each
+        self.unreadable: set[str] = set()  # files reported as unreadable, once each
         self.digests: dict[str, str | None] = {}  # package files hashed for evidence
         self.hash_limit_reported = False
 
@@ -208,15 +292,25 @@ class _Checker:
         else:
             self.report.unlisted_warnings += 1
 
+    def present(self, rel: str) -> bool:
+        """Whether the package holds ``rel`` as anything but a directory: a symbolic
+        link is there, and reading it is refused."""
+        return _kind(self.root, rel) not in ("", "dir")
+
     def read(self, rel: str, limit: int) -> bytes | None:
         """A package file's bytes, or None after reporting why it cannot be read."""
         try:
-            return read_capped(self.root / rel, limit)
+            return _read(self.root, rel, limit)
         except FileTooLarge as exc:
             self.report_too_large(rel, str(exc))
         except OSError as exc:
-            self.add("file.unreadable", rel, _unreadable(exc))
+            self.report_unreadable(rel, _unreadable(exc))
         return None
+
+    def report_unreadable(self, rel: str, message: str) -> None:
+        if rel not in self.unreadable:
+            self.unreadable.add(rel)
+            self.add("file.unreadable", rel, message)
 
     def report_too_large(self, rel: str, message: str) -> None:
         if rel not in self.too_large:
@@ -226,8 +320,7 @@ class _Checker:
     # macro.toml
 
     def manifest(self) -> Manifest | None:
-        path = self.root / MANIFEST
-        if not path.is_file():
+        if not self.present(MANIFEST):
             self.add("file.missing", MANIFEST, "required file is missing")
             return None
         raw = self.read(MANIFEST, self.limits.manifest_bytes)
@@ -346,14 +439,14 @@ class _Checker:
 
     def required_files(self, m: Manifest) -> None:
         for f in required_files(m):
-            if not (self.root / f).is_file():
+            if not self.present(f):
                 self.add("file.missing", f, "required file is missing")
 
     # GDS
 
     def gds(self, m: Manifest, lef: LefMacro | None) -> None:
         f = m.file("gds")
-        if not (self.root / f).is_file():
+        if not self.present(f):
             return
         data = self.read(f, self.limits.gds_bytes)
         if data is None:
@@ -432,11 +525,10 @@ class _Checker:
         """(macro, (rule, message) of a problem, macro names), reporting nothing: the GDS
         check needs the LEF origin, and the LEF's own findings come after the GDS's."""
         f = m.file("lef")
-        path = self.root / f
-        if not path.is_file():
+        if not self.present(f):
             return None, None, []
         try:
-            macros = parse_lef(_text(read_capped(path, self.limits.view_bytes)), self.limits)
+            macros = parse_lef(_text(_read(self.root, f, self.limits.view_bytes)), self.limits)
         except FileTooLarge as exc:
             return None, ("file.too_large", str(exc)), []
         except OSError as exc:
@@ -455,12 +547,14 @@ class _Checker:
         macro_names: list[str],
     ) -> None:
         f = m.file("lef")
-        if not (self.root / f).is_file():
+        if not self.present(f):
             return
         if problem is not None:
             rule, message = problem
             if rule == "file.too_large":
                 self.report_too_large(f, message)
+            elif rule == "file.unreadable":
+                self.report_unreadable(f, message)
             else:
                 self.add(rule, f, message)
             return
@@ -534,7 +628,7 @@ class _Checker:
     # Liberty
 
     def liberty(self, m: Manifest, f: str) -> None:
-        if not (self.root / f).is_file():
+        if not self.present(f):
             return
         data = self.read(f, self.limits.liberty_bytes)
         if data is None:
@@ -594,7 +688,7 @@ class _Checker:
 
     def verilog(self, m: Manifest) -> None:
         f = m.file("v")
-        if not (self.root / f).is_file():
+        if not self.present(f):
             return
         data = self.read(f, self.limits.view_bytes)
         if data is None:
@@ -604,8 +698,21 @@ class _Checker:
         except LimitError as exc:
             self.add("verilog.limit", f, str(exc))
             return
+        except ViewError as exc:
+            self.add("verilog.duplicate", f, str(exc))
+            return
         if ports is None:
             self.add("verilog.module", f, f"no module {quote(m.name)}")
+            return
+        # A port declared twice (on both sides of an ifdef, say): a tool reads one of
+        # the declarations, and which one depends on its defines.
+        count: dict[str, int] = {}
+        for port in ports:
+            count[port.name] = count.get(port.name, 0) + max(port.declared, 1)
+        twice = sorted(n for n, k in count.items() if k > 1)
+        for name in twice:
+            self.add("verilog.duplicate", f, f"port {quote(name)} is declared more than once")
+        if twice:
             return
         by_name = {vp.name: vp for vp in ports}
         for p in m.pins:
@@ -663,7 +770,7 @@ class _Checker:
 
     def spice(self, m: Manifest) -> None:
         f = m.file("spice")
-        if not (self.root / f).is_file():
+        if not self.present(f):
             return
         data = self.read(f, self.limits.view_bytes)
         if data is None:
@@ -707,7 +814,7 @@ class _Checker:
 
     def specs(self, m: Manifest) -> None:
         f = m.file("specs.toml")
-        if not (self.root / f).is_file():
+        if not self.present(f):
             return
         raw = self.read(f, self.limits.specs_bytes)
         if raw is None:
@@ -775,15 +882,22 @@ class _Checker:
 
     # Evidence
 
-    def summaries(self, folder: Path) -> list[str] | None:
+    def summaries(self) -> list[str] | None:
         """Names of the summaries in evidence/, sorted; None when there are too many.
-        Names that are not UTF-8 are skipped, as aispice cannot name them either."""
-        if not folder.is_dir():
+        Names that are not UTF-8 are skipped, as aispice cannot name them either. Any
+        ``*.json`` but a directory is a summary: one that is a symbolic link is listed,
+        and reported when it is read. ``evidence`` itself must be a directory, not a
+        link to one."""
+        kind = _kind(self.root, "evidence")
+        if kind in ("link", "other"):
+            what = "a symbolic link" if kind == "link" else "not a directory"
+            self.report_unreadable("evidence", f"cannot read the folder: it is {what}")
+        if kind != "dir":
             return []
         found: list[str] = []
-        with os.scandir(folder) as entries:
+        with os.scandir(self.root / "evidence") as entries:
             for entry in entries:
-                if not entry.name.endswith(".json") or not entry.is_file():
+                if not entry.name.endswith(".json") or entry.is_dir(follow_symlinks=False):
                     continue
                 try:
                     os.fsencode(entry.name).decode("utf-8")
@@ -799,7 +913,7 @@ class _Checker:
         found too large for its own check is not read here either."""
         if base in self.digests:
             return self.digests[base]
-        if base in self.too_large:
+        if base in self.too_large or base in self.unreadable:
             return None
         if len(self.digests) >= self.limits.hashed_files:
             if not self.hash_limit_reported:
@@ -813,16 +927,16 @@ class _Checker:
             return None
         digest: str | None = None
         try:
-            digest = sha256_file(self.root / base, self.limits.gds_bytes)
+            digest = _sha256(self.root, base, self.limits.gds_bytes)
         except FileTooLarge as exc:
             self.report_too_large(base, str(exc))
         except OSError as exc:
-            self.add("file.unreadable", base, _unreadable(exc))
+            self.report_unreadable(base, _unreadable(exc))
         self.digests[base] = digest
         return digest
 
     def evidence(self, m: Manifest) -> None:
-        files = self.summaries(self.root / "evidence")
+        files = self.summaries()
         if files is None:
             self.add(
                 "evidence.limit",
@@ -868,7 +982,7 @@ class _Checker:
                 if not isinstance(path_in, str) or not isinstance(digest, str):
                     continue
                 base = path_in.replace("\\", "/").rsplit("/", 1)[-1]
-                if base in ("", ".", "..") or not (self.root / base).is_file():
+                if base in ("", ".", "..") or not self.present(base):
                     continue
                 actual = self.digest(f, base)
                 if actual is not None and actual != digest:

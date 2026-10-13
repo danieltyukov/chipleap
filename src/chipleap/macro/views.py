@@ -143,17 +143,21 @@ def _lef_number(s: str) -> float:
 
 
 def parse_lef(text: str, limits: Limits = LIMITS) -> dict[str, LefMacro]:
-    """Every MACRO in a LEF file, by name. Raises :class:`ViewError` when it is malformed
-    and :class:`LimitError` when it has too many tokens or a macro too many pins."""
+    """Every MACRO in a LEF file, by name. Keywords are read in any case, as OpenROAD
+    reads them; names keep theirs. Raises :class:`ViewError` when it is malformed or
+    defines a macro, or a pin of one, twice (tools differ on which one they keep), and
+    :class:`LimitError` when it has too many tokens or a macro too many pins."""
     toks = _lef_tokens(text, limits)
     macros: dict[str, LefMacro] = {}
     i = 0
     while i < len(toks):
-        if toks[i] == "MACRO" and i + 1 < len(toks):
-            t = _Tokens(toks, f"MACRO {toks[i + 1]}")
+        if ascii_upper(toks[i]) == "MACRO" and i + 1 < len(toks):
+            name = toks[i + 1]
+            if name in macros:
+                raise ViewError(f"MACRO {name} is defined twice")
+            t = _Tokens(toks, f"MACRO {name}")
             t.i = i + 2
-            m = _lef_macro(t, toks[i + 1], limits)
-            macros.setdefault(m.name, m)
+            macros[name] = _lef_macro(t, name, limits)
             i = t.i
         else:
             i += 1
@@ -164,13 +168,13 @@ def _lef_macro(t: _Tokens, name: str, limits: Limits) -> LefMacro:
     m = LefMacro(name)
     pins = 0
     while True:
-        kw = t.next()
+        kw = ascii_upper(t.next())
         if kw == "END":
             if t.next() != name:
                 raise ViewError(f"MACRO {name} ends with the wrong name")
             return m
         if kw == "CLASS":
-            m.cls = " ".join(t.statement())
+            m.cls = ascii_upper(" ".join(t.statement()))
         elif kw == "ORIGIN":
             args = t.statement()
             if len(args) < 2:
@@ -178,7 +182,7 @@ def _lef_macro(t: _Tokens, name: str, limits: Limits) -> LefMacro:
             m.origin = (_lef_number(args[0]), _lef_number(args[1]))
         elif kw == "SIZE":
             args = t.statement()
-            if len(args) != 3 or args[1] != "BY":
+            if len(args) != 3 or ascii_upper(args[1]) != "BY":
                 raise ViewError(f"SIZE of {name} is not 'SIZE w BY h'")
             m.size = (_lef_number(args[0]), _lef_number(args[2]))
         elif kw == "PIN":
@@ -186,7 +190,9 @@ def _lef_macro(t: _Tokens, name: str, limits: Limits) -> LefMacro:
             if pins > limits.pins:
                 raise LimitError(f"MACRO {quote(name)} has more than {limits.pins} pins")
             pin = _lef_pin(t, t.next())
-            m.pins.setdefault(pin.name, pin)
+            if pin.name in m.pins:
+                raise ViewError(f"PIN {pin.name} of MACRO {name} is defined twice")
+            m.pins[pin.name] = pin
         elif kw in ("OBS", "DENSITY"):
             _lef_skip_block(t)
         else:
@@ -196,7 +202,7 @@ def _lef_macro(t: _Tokens, name: str, limits: Limits) -> LefMacro:
 def _lef_pin(t: _Tokens, name: str) -> LefPin:
     p = LefPin(name)
     while True:
-        kw = t.next()
+        kw = ascii_upper(t.next())
         if kw == "END":
             if t.next() != name:
                 raise ViewError(f"PIN {name} ends with the wrong name")
@@ -204,13 +210,13 @@ def _lef_pin(t: _Tokens, name: str) -> LefPin:
         if kw == "DIRECTION":
             # OUTPUT TRISTATE is an output.
             args = t.statement()
-            p.direction = args[0] if args else ""
+            p.direction = ascii_upper(args[0]) if args else ""
         elif kw == "USE":
             args = t.statement()
-            p.use = args[0] if args else ""
+            p.use = ascii_upper(args[0]) if args else ""
         elif kw == "PORT":
             while True:
-                kw = t.next()
+                kw = ascii_upper(t.next())
                 if kw == "END":
                     break
                 args = t.statement()
@@ -223,7 +229,7 @@ def _lef_pin(t: _Tokens, name: str) -> LefPin:
 
 
 def _lef_skip_block(t: _Tokens) -> None:
-    while t.next() != "END":
+    while ascii_upper(t.next()) != "END":
         t.statement()
 
 
@@ -382,11 +388,13 @@ def parse_liberty(
     text: str, limits: Limits = LIMITS, cell: str | None = None
 ) -> dict[str, dict[str, LibPin]]:
     """Pins of every cell in the library group (or only of ``cell``), by cell then pin
-    bit name. The first cell of a name counts; later ones are skipped.
+    bit name.
 
     Bus bits come from the bus's ``bus_type`` and from ``pin`` groups inside the bus.
-    Raises :class:`ViewError` on a syntax error and :class:`LimitError` when the file
-    has too many tokens, nests groups too deep or a cell declares too many pins.
+    Raises :class:`ViewError` on a syntax error or when a cell, or a pin of the cell
+    read, is defined twice (OpenSTA keeps the last cell of a name and both pins), and
+    :class:`LimitError` when the file has too many tokens, nests groups too deep or a
+    cell declares too many pins.
     """
     groups = _lib_parse(_lib_tokens(text, limits), limits)
     lib = next((g for g in groups if g.kind == "library"), None)
@@ -400,9 +408,13 @@ def parse_liberty(
             if lo is not None and hi is not None:
                 types[g.args[0]] = (lo, hi)
     cells: dict[str, dict[str, LibPin]] = {}
+    seen: set[str] = set()
     for c in lib.groups:
-        if c.kind != "cell" or not c.args or c.args[0] in cells:
+        if c.kind != "cell" or not c.args:
             continue
+        if c.args[0] in seen:
+            raise ViewError(f"cell {c.args[0]} is defined twice")
+        seen.add(c.args[0])
         if cell is not None and c.args[0] != cell:
             continue
         pins: dict[str, LibPin] = {}
@@ -415,35 +427,47 @@ def parse_liberty(
             if declared > limits.pins:
                 raise LimitError(f"cell {quote(cell_name)} has more than {limits.pins} pins")
 
+        def add(p: LibPin, cell_name: str = c.args[0], pins: dict[str, LibPin] = pins) -> None:
+            if p.name in pins:
+                raise ViewError(f"pin {p.name} of cell {cell_name} is defined twice")
+            pins[p.name] = p
+
         for g in c.groups:
             if g.kind == "pg_pin":
                 declare(len(g.args))
                 for name in g.args:
-                    pins.setdefault(name, LibPin(name, pg=True, pg_type=g.attrs.get("pg_type", "")))
+                    add(LibPin(name, pg=True, pg_type=g.attrs.get("pg_type", "")))
             elif g.kind == "pin":
                 declare(len(g.args))
                 for name in g.args:
-                    pins.setdefault(name, _lib_pin(name, g, "", 0))
+                    add(_lib_pin(name, g, "", 0))
             elif g.kind == "bus" and g.args:
                 direction = g.attrs.get("direction", "")
                 timing = sum(1 for x in g.groups if x.kind == "timing")
                 rng = types.get(g.attrs.get("bus_type", ""))
+                bits: set[str] = set()
                 if rng is not None:
                     lo, hi = sorted(rng)
                     declare(hi - lo + 1)
                     for i in range(lo, hi + 1):
                         bit = f"{g.args[0]}[{i}]"
-                        pins.setdefault(bit, LibPin(bit, direction=direction, timing=timing))
+                        add(LibPin(bit, direction=direction, timing=timing))
+                        bits.add(bit)
+                # A pin group inside the bus describes one of its bits, once.
+                inner_seen: set[str] = set()
                 for inner in g.groups:
                     if inner.kind == "pin":
                         declare(len(inner.args))
                         for name in inner.args:
+                            if name in inner_seen:
+                                raise ViewError(f"pin {name} of cell {c.args[0]} is defined twice")
+                            inner_seen.add(name)
                             p = _lib_pin(name, inner, direction, timing)
-                            if name in pins:
+                            if name in bits:
                                 pins[name].direction = p.direction
                                 pins[name].timing = p.timing
                             else:
-                                pins[name] = p
+                                add(p)
         cells[c.args[0]] = pins
     return cells
 
@@ -464,6 +488,7 @@ class VerilogPort:
     name: str
     direction: str = ""  # input, output, inout; "" when the module never declares it
     width: int | None = None  # None for a scalar; 0 when the range is not a literal
+    declared: int = 0  # how many input, output or inout declarations name it
 
 
 _DIRECTIONS = ("input", "output", "inout")
@@ -620,19 +645,20 @@ def _skip_parens(toks: list[str], i: int) -> int:
 
 def verilog_ports(text: str, module: str, limits: Limits = LIMITS) -> list[VerilogPort] | None:
     """The ports of ``module`` in declaration order, or None if the module is absent.
-    Raises :class:`LimitError` when the file has too many tokens or the module too many
-    ports."""
+    Both sides of an ``ifdef`` are read, so a port on both is declared twice (``declared``
+    counts). Raises :class:`ViewError` when the module is declared more than once and
+    :class:`LimitError` when the file has too many tokens or the module too many ports."""
     toks = _verilog_tokens(_verilog_clean(text), limits)
-    start = next(
-        (
-            k
-            for k in range(len(toks) - 1)
-            if toks[k] in ("module", "macromodule") and toks[k + 1] == module
-        ),
-        None,
-    )
-    if start is None:
+    starts = [
+        k
+        for k in range(len(toks) - 1)
+        if toks[k] in ("module", "macromodule") and toks[k + 1] == module
+    ]
+    if not starts:
         return None
+    if len(starts) > 1:
+        raise ViewError(f"module {quote(module)} is declared more than once")
+    start = starts[0]
     i = start + 2
     if i < len(toks) and toks[i] == "#":
         i = _skip_parens(toks, i + 1)
@@ -655,7 +681,7 @@ def verilog_ports(text: str, module: str, limits: Limits = LIMITS) -> list[Veril
                     k, own = _types_and_range(item, 0, len(item))
                     width = own if own is not None else width
                 if k < len(item):
-                    ports.append(VerilogPort(item[k], direction, width))
+                    ports.append(VerilogPort(item[k], direction, width, 1))
             elif item[0] == "." and len(item) > 1:
                 ports.append(VerilogPort(item[1]))
             else:
@@ -680,6 +706,7 @@ def verilog_ports(text: str, module: str, limits: Limits = LIMITS) -> list[Veril
                 if item[0] in by_name:
                     by_name[item[0]].direction = t
                     by_name[item[0]].width = width
+                    by_name[item[0]].declared += 1
             i = j
         i += 1
     return ports

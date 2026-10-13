@@ -942,6 +942,45 @@ VARIANTS: list[tuple[str, Callable[[], Files], str, Callable[[Files], Files]]] =
         lambda f: {**f, "tiny_counter.v": counter_v(en_dir="output").encode()},
     ),
     (
+        # Both sides of an ifdef declare en: Yosys defines SYNTHESIS and reads an output.
+        "verilog-ifdef-port",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.v",
+            "    input en,\n",
+            "`ifdef SYNTHESIS\n    output en,\n`else\n    input en,\n`endif\n",
+        ),
+    ),
+    (
+        # A second cell of the macro's name: OpenSTA keeps the last one, where en is an
+        # output.
+        "liberty-duplicate-cell",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.lib",
+            "\n}\n",
+            "\n  cell (tiny_counter) {\n    pin (en) {\n      direction : output ;\n    }\n  }\n}\n",
+        ),
+    ),
+    (
+        # A macro written in lower case before the real one: OpenROAD reads LEF keywords
+        # in any case and keeps the first macro of a name.
+        "lef-duplicate-macro",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.lef",
+            "MACRO tiny_counter\n",
+            "macro tiny_counter\n  class BLOCK ;\n  size 30 by 10 ;\nend tiny_counter\n"
+            "MACRO tiny_counter\n",
+        ),
+    ),
+    (
         "bus-width",
         counter,
         "tiny_counter.macro",

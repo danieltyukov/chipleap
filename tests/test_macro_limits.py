@@ -222,7 +222,9 @@ def test_view_limits():
     with pytest.raises(LimitError, match=r"^the LEF has more than 50 tokens$"):
         parse_lef(many, SMALL)
     with pytest.raises(LimitError, match=r'^MACRO "m" has more than 3 pins$'):
-        parse_lef("MACRO m\n" + "PIN a\nEND a\n" * 4 + "END m\n", SMALL)
+        parse_lef(
+            "MACRO m\n" + "".join(f"PIN a{i}\nEND a{i}\n" for i in range(4)) + "END m\n", SMALL
+        )
     with pytest.raises(LimitError, match=r"^the liberty file has more than 50 tokens$"):
         parse_liberty(";" * 51, SMALL)
     with pytest.raises(LimitError, match=r"^groups nest more than 4 deep$"):
