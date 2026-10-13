@@ -826,6 +826,7 @@ module chipleap_accel_core #(
       logic [31:0] nx_xa_q, nx_wbit_q;  // the next chunk of the row
       logic [31:0] row_xa_q;  // the first chunk of the next row
       logic [31:0] kc_end_q, m_end_q;  // gkc of a row's last chunk, gm of the tile's last row
+      wire [31:0] wstep = 32'(V) << (3 - fmt_shift);  // a chunk's bits in a weight row
       logic [31:0] bw_dst;  // where the DMA's word goes, as a buffer address
       logic [SBI-1:0] xb_q;  // the activation bank read, and the slot of the weight banks
       logic cs_q;
@@ -867,12 +868,17 @@ module chipleap_accel_core #(
             kc_end_q <= cd.tk / V - 1;
             m_end_q <= cd.tm - 1;
           end
+          // Each next address is summed for every way the read can go and chosen
+          // after the adders, so the row-end compares that choose it are not in series
+          // with an adder. A chunk is V bytes at a word boundary: V / 4 words on.
           if (pf) begin
-            // A chunk is V bytes at a word boundary: V / 4 words further on.
-            nx_xa_q <= xa + 32'(XW);
-            nx_wbit_q <= wbit + (32'(V) << (3 - fmt_shift));
+            if (core_start) nx_xa_q <= a_base + (a_koff >> 2) + 32'(XW);
+            else if (pf_row) nx_xa_q <= row_xa_q + 32'(XW);
+            else nx_xa_q <= nx_xa_q + 32'(XW);
+            nx_wbit_q <= pf_row ? wstep : nx_wbit_q + wstep;
           end
-          if (pf_row) row_xa_q <= xa + a_stride;
+          if (core_start) row_xa_q <= a_base + (a_koff >> 2) + a_stride;
+          else if (pf_row) row_xa_q <= row_xa_q + a_stride;
         end
       end
 
