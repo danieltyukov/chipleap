@@ -811,7 +811,7 @@ def test_ihps_io_library_is_what_the_chip_expects(ihp_lef):
     assert chip_cells["sg13g2_IOPadAnalog"].core_ports("pad")
     # The UART chip's ring: every cell of the library fits the plan.
     plan = floorplan.plan(
-        load_project(ROOT / "examples" / "uart").chip, cells, {"comp": ("strongarm", 20.93, 45.0)}
+        load_project(ROOT / "examples" / "uart").chip, cells, {"comp": ("strongarm", 29.1, 40.8)}
     )
     assert plan.die == (1400.0, 1400.0) and len(plan.pads) == 33 and len(plan.ring) == 80
 

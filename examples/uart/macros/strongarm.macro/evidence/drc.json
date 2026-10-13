@@ -14,7 +14,7 @@
   "inputs": [
     {
       "path": "strongarm.gds",
-      "sha256": "20c4f90d53740c877f95122f923a43fa562c3dcefdf97d43604915e1bac84148"
+      "sha256": "4d79d2adc33db02f0fe71ea09f6298d89ff2af0356e53c3029f1712333a61eac"
     }
   ],
   "operation": "drc",

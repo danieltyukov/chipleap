@@ -14,8 +14,8 @@ version = "0.2.0"
 source = "comparator.cir"
 
 [size]
-width_um = 20.93
-height_um = 45.0
+width_um = 29.1
+height_um = 40.8
 
 [[domains]]
 name = "core"
@@ -73,6 +73,16 @@ layer = "Metal4"
 [[corners]]
 name = "tt_27"
 process = "tt"
+temperature = 27.0
+
+[[corners]]
+name = "ss_27"
+process = "ss"
+temperature = 27.0
+
+[[corners]]
+name = "ff_27"
+process = "ff"
 temperature = 27.0
 
 [extra.aispice]

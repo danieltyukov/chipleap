@@ -82,7 +82,7 @@ Both delays default to a fifth of the first clock's period, as LibreLane's own I
 
 The report gives each corner's worst setup and hold slack at the ports and, at the slow corner, the worst pad-to-core, core-to-pad and pad-to-pad paths with how much of their delay is inside the pads (the pad cells' own arcs, not the wires into them). A signal pad whose IO cell has no arc with both a rising and a falling delay table in the corner's liberty, or whose cell ChipLeap knows no arc for, is listed with its ports as not timed, and the chip does not pass: its delay is never taken as zero. Macros have no timing arcs (their liberty is written from the manifest), so paths through a macro are not timed; the report says so when the chip has macros.
 
-On the UART chip at 100 MHz with the defaults, the slow corner's worst setup slack goes from +6.302 ns at the core's side of the pads to +0.971 ns at the ports: a receive-data output's path spends 5.4 ns in its 4 mA pad driving 5 pF. The worst hold slack stays at +0.101 ns, at the fast corner, where it is a path inside the core.
+On the UART chip at 100 MHz with the defaults, the slow corner's worst setup slack goes from +6.257 ns at the core's side of the pads to +0.968 ns at the ports: a receive-data output's path spends 5.4 ns in its 4 mA pad driving 5 pF. The worst hold slack stays at +0.118 ns, at the fast corner, where it is a path inside the core.
 
 ## What it needs
 

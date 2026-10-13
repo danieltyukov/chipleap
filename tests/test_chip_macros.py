@@ -63,7 +63,7 @@ def import_one(
 def test_the_lef_is_rebuilt_with_its_origin_at_zero():
     text = (STRONGARM / "strongarm.lef").read_text()
     lef, size, pins, origin = macros.rewrite_lef(text, "strongarm")
-    assert origin == (8.55, 0.6) and size == (20.93, 45.0)
+    assert origin == (10.95, 0.6) and size == (29.1, 40.8)
     assert "ORIGIN 0 0 ;" in lef and "FOREIGN strongarm 0 0 ;" in lef
     vss = next(p for p in pins if p.name == "vss")
     assert vss.shapes == [("Metal4", (0.0, 0.0, 0.3, 0.65))]
@@ -223,10 +223,10 @@ def test_a_package_is_copied_checked_and_converted(tmp_path):
     imp = import_one(root, pkg, "ihp-sg13g2@22f2a25")
     v = imp.views["strongarm"]
     assert imp.cells == {"m1": "strongarm"}
-    assert (v.width, v.height) == (20.93, 45.0) and v.warnings == []
+    assert (v.width, v.height) == (29.1, 40.8) and v.warnings == []
     assert [p.name for p in v.pins if p.is_supply] == ["vdd", "vss"]
     assert v.lef.read_text().count("ORIGIN 0 0") == 1
-    assert parse_gds(v.gds.read_bytes()).bbox("strongarm") == pytest.approx((0, 0, 20.93, 45.0))
+    assert parse_gds(v.gds.read_bytes()).bbox("strongarm") == pytest.approx((0, 0, 29.1, 40.8))
     copy = root / "build" / "macros" / "m1" / "strongarm.macro"
     assert (copy / "macro.toml").is_file() and v.lef.parent.name == "views"
 
