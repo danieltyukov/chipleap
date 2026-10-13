@@ -70,17 +70,19 @@ The SmolLM2 example's accelerator (GEMV 1 x 8, one port, 2 + 2 KiB double-buffer
 
 The step passes when setup and hold timing are met at every corner and DRC and LVS are clean. It reports the core area, the utilisation, the cell count, the worst setup slack and the clock it implies, power, and the model's cell-area estimate for comparison, and keeps the GDS in `DIR/verify/pnr/runs/chipleap/final/gds/`. `scripts/render_gds.py` draws it with KLayout in the PDK's colours. `--pnr-tool innovus` runs the same step with Cadence Genus and Innovus instead, here or on a design server, against IHP SG13G2 or a technology of your own; [commercial-tools.md](commercial-tools.md#place-and-route) describes it. `CHIPLEAP_LIBRELANE` points at the `librelane` command and `CHIPLEAP_PNR_TIMEOUT` (seconds, default 10800) bounds the run. At the limit ChipLeap stops LibreLane, every process it started and the containers it runs in, and the step fails with the limit in its summary. Ctrl-C, SIGTERM and SIGHUP stop them the same way, and so does the MCP server when a `verify_soc` call is cancelled or the server shuts down. A container counts as the run's only when it carries the label `chipleap.run=<run id>`, and no other container is touched. ChipLeap puts a `docker` first on LibreLane's PATH that adds the label to `docker run`; a wrapper script around `docker run` and LibreLane's own `--dockerized` mode both go through it. A launcher that calls docker by its full path can add `--label chipleap.run=$CHIPLEAP_RUN_ID` itself; LibreLane with `LIBRELANE_CONTAINER_ENGINE` set cannot, and its container is not stopped. One run at a time can use a work directory. LibreLane runs without a terminal, so `--dockerized` needs `--docker-no-tty`.
 
-These are the designs routed with this flow at 100 MHz, each with 16-word flop buffers, and their setup slack at the slow corner. All are LVS and antenna clean, and all but the 16-port design are DRC clean: there the detailed router left one Metal2 shape of 0.143975 um2, under the 0.144 um2 minimum area by one 5 nm grid square.
+These are the designs routed with this flow at 100 MHz, each with 16-word flop buffers, and their setup slack at the slow corner. All are LVS and antenna clean, and all but two are DRC clean: in the GEMV 4 x 8 design and the 16-port one the detailed router left one Metal2 shape under the 0.144 um2 minimum area (0.1315 and 0.143975 um2).
 
 | Accelerator | Ports | Slow corner | Typical corner | Worst path at the slow corner |
 |---|---|---|---|---|
 | GEMV 1 x 8 | 1 | +0.89 ns, about 110 MHz | about 160 MHz | the GEMV engine's row counter |
 | Weight-stationary 4 x 4 | 1 | +0.67 ns, about 107 MHz | about 166 MHz | the accumulator update |
 | Output-stationary 4 x 4 | 1 | +1.03 ns, about 111 MHz | about 166 MHz | a read port's address step |
-| GEMV 4 x 8 | 2 | -0.27 ns, about 97 MHz | about 153 MHz | the buffer slot select into the accumulators |
+| GEMV 4 x 8 | 2 | +0.31 ns, about 103 MHz | about 158 MHz | the dot product into a lane's partial sum |
 | GEMV 2 x 8 | 4 | +0.37 ns, about 104 MHz | about 157 MHz | unpacking packed weights into the operand registers |
-| GEMV 1 x 8 | 8 | -1.18 ns, about 89 MHz | about 139 MHz | the buffer slot select into an activation operand register |
+| GEMV 1 x 8 | 8 | -0.09 ns, about 99 MHz | about 156 MHz | unpacking packed weights into the operand registers |
 | GEMV 1 x 8 | 16 | -1.25 ns, about 89 MHz | about 142 MHz | the buffer slot select into an activation operand register |
+
+The GEMV 4 x 8 and the eight-port GEMV 1 x 8 designs are routed with the core reading its tile descriptor from a register loaded a cycle ahead. Before that, the core selected the descriptor of its buffer slot after the registers, and that select limited them: GEMV 4 x 8 met about 97 MHz (-0.27 ns) on the select into the accumulators, the eight-port GEMV 1 x 8 about 89 MHz (-1.18 ns) on the select into an activation operand register, and the 16-port row above is still from then, limited by that same path. The other rows were not limited by it.
 
 Designs with more than eight read ports are placed at 35 % core utilisation instead of 45 %: at 45 % the 16-port design failed global routing on congestion; at 35 % global routing finished with no overflow. With the DMA that handed words to its read ports one after another, the GEMV 2 x 8 engine with four ports met about 71 MHz (-4.02 ns) and the GEMV 1 x 8 engine with sixteen about 24 MHz (-31.79 ns, at 45 %).
 
