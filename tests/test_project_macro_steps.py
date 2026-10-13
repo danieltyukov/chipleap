@@ -11,6 +11,7 @@ import yaml
 
 from chipleap.rtl import formal
 from chipleap.rtl.project import load_project
+from chipleap.rtl.synth import liberty_for
 from chipleap.verify.tools import sby, yosys, z3
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -223,3 +224,41 @@ def test_a_clocked_package_is_in_its_clocks_domain_and_an_unclocked_one_is_async
         (f["rule"], f["from"], f["to"]) for f in r.data["findings"] if f["severity"] == "error"
     ]
     assert errors == [("unsynchronized", "u_cmp", "outp_o")]
+
+
+# Equivalence: a macro's pins are ports on both sides.
+
+needs_liberty = pytest.mark.skipif(
+    not yosys().found or liberty_for("ihp-sg13g2") is None,
+    reason="needs Yosys and IHP SG13G2's liberty",
+)
+
+
+@needs_liberty
+@pytest.mark.parametrize("engine", ["yosys", "eqy"])
+def test_equivalence_compares_what_goes_into_a_macro_and_shares_what_comes_out(tmp_path, engine):
+    from chipleap.rtl import equiv
+    from chipleap.rtl.synth import synthesize
+    from chipleap.verify.tools import eqy
+
+    if engine == "eqy" and not eqy().found:
+        pytest.skip("needs EQY (CHIPLEAP_EQY)")
+    section = {"engine": engine, "checks": ["rtl-synth"]}
+    p = load_project(sram_project(tmp_path / "sram", equivalence=section))
+    r = equiv.check_pair(p, "rtl-synth")
+    assert r["status"] == "proved", r
+    # The macro's pins are matched points: its write enable, its address and its word.
+    work = p.root / "build" / "equiv" / "rtl-synth"
+    script = (work / ("rtl-synth.eqy" if engine == "eqy" else "equiv.ys")).read_text()
+    assert f"expose -evert -sep __ t:{CELL}" in script
+    # A netlist of an RTL that writes when it should read: the write enable into the
+    # macro differs. With the macro left as a box on both sides this proved equal.
+    bad = sram_project(tmp_path / "bad")
+    rtl = bad / "rtl" / "scratchpad.sv"
+    rtl.write_text(rtl.read_text().replace(".A_WEN(req_i & we_i)", ".A_WEN(req_i & ~we_i)"))
+    netlist = synthesize(load_project(bad)).netlist
+    gate = p.root / "gate.v"
+    gate.write_bytes(netlist.read_bytes())
+    r = equiv.check_pair(p, "rtl-synth", gate_netlist=gate)
+    assert r["status"] == "differs", r
+    assert any("u_mem__A_WEN" in n for n in r["unproven"]), r["unproven"]
