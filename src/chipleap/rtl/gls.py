@@ -18,6 +18,10 @@ environment (the convention of Tiny Tapeout's gate-level tests, for a test that 
 what only RTL has) and with ``CHIPLEAP_PARAMETERS``, as every simulation does, since a
 netlist has no parameters left to read.
 
+A project's SRAM macros run on the PDK's own models (and a package on its Verilog model):
+with an SDF, the timing models, whose clock to output and the macros' other paths the SDF
+sets (Icarus ignores their timing checks); without one, the functional models.
+
 The tests are the project's code, so this step runs them as the simulation step does: only
 for projects you trust.
 """
@@ -186,12 +190,16 @@ def prepare(project: Project, workdir: Path) -> tuple[Project, tuple[str, ...], 
     gate = dataclasses.replace(
         project, sources=(*sources, copy, *extra), include_dirs=(), parameters={}
     )
-    used = {
+    used: dict[str, Any] = {
         "netlist": project.rel(netlist),
         "sdf": project.rel(sdf) if sdf else None,
         "corner": corner or None,
         "delays": project.gate_sim.delays if sdf else None,
     }
+    if project.macros:
+        # With an SDF the SRAMs run on the PDK's timing models, whose clock to output the
+        # SDF sets; without one, on their functional models.
+        used["macro_models"] = "timing" if sdf is not None else "functional"
     return gate, args, used
 
 
@@ -226,6 +234,7 @@ def gls(project: Project, test_filter: str = "") -> StepResult:
             workdir=workdir / "sim",
             extra_args=args,
             env=env,
+            macro_timing=used["sdf"] is not None,
         )
     except SimUnavailable as exc:
         return StepResult("gls", "skipped", str(exc).splitlines()[0])

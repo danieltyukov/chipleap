@@ -262,3 +262,30 @@ def test_equivalence_compares_what_goes_into_a_macro_and_shares_what_comes_out(t
     r = equiv.check_pair(p, "rtl-synth", gate_netlist=gate)
     assert r["status"] == "differs", r
     assert any("u_mem__A_WEN" in n for n in r["unproven"]), r["unproven"]
+
+
+# Gate-level simulation: the SRAM on the PDK's model.
+
+
+def _gls_ready() -> bool:
+    from chipleap.rtl.gls import icarus_major
+    from chipleap.rtl.sim import cocotb_python
+    from chipleap.verify.tools import iverilog
+
+    return (
+        icarus_major(iverilog()) >= 13
+        and cocotb_python() is not None
+        and liberty_for("ihp-sg13g2") is not None
+    )
+
+
+@pytest.mark.skipif(not _gls_ready(), reason="needs Icarus 13 (CHIPLEAP_IVERILOG), cocotb, the PDK")
+def test_the_tests_pass_on_the_netlist_with_the_srams_functional_model(tmp_path):
+    from chipleap.rtl.gls import gls
+
+    root = sram_project(tmp_path / "sram", gate_sim={"netlist": "synth"})
+    r = gls(load_project(root))
+    assert r.status == "pass", r.summary
+    assert r.data["macro_models"] == "functional"
+    m = (root / "build" / "gls" / "sim" / "manifest.json").read_text()
+    assert '"FUNCTIONAL": 1' in m and f"macros/{CELL}.v" in m
