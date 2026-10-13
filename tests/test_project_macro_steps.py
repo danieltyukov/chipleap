@@ -354,3 +354,75 @@ def test_dft_keeps_the_sram_off_the_chains_and_its_patterns_pass(tmp_path):
     tb = (root / "build" / "dft" / "sim" / "tb.v").read_text()
     assert "initial force dut.u_mem.A_DOUT = 0;" in tb
     assert "out of the test" in r.summary
+
+
+# UPF: a macro in its domain's area.
+
+WRAP = """\
+module wrap (
+    input  logic        clk_i,
+    input  logic        rst_ni,
+    input  logic        req_i,
+    input  logic        we_i,
+    input  logic [ 7:0] addr_i,
+    input  logic [31:0] wdata_i,
+    input  logic [ 3:0] be_i,
+    output logic [31:0] rdata_o,
+    output logic        rvalid_o,
+    output logic        parity_o
+);
+  scratchpad u_pad (.*);
+  always_ff @(posedge clk_i) parity_o <= ^rdata_o;
+endmodule
+"""
+
+
+def wrapped(root: Path, domain: list[str]) -> Path:
+    sram_project(
+        root,
+        top="wrap",
+        sources=["rtl/scratchpad.sv", "rtl/wrap.sv"],
+        macros=[{"instance": "u_pad/u_mem", "cell": CELL}],
+        tests={"dir": "test", "toplevel": "scratchpad"},
+        upf={"domains": [{"name": "core"}, {"name": "mem", "elements": domain}]},
+    )
+    (root / "rtl" / "wrap.sv").write_text(WRAP)
+    return root
+
+
+def test_a_macro_gets_room_in_its_domains_area_and_a_domain_of_macros_alone_is_refused(
+    tmp_path,
+):
+    from chipleap.rtl.upf import CellLib, Flat, UpfError, domain_areas
+
+    p = load_project(wrapped(tmp_path / "w", ["u_pad"]))
+    lib = CellLib({CELL: (416.64, 118.78), "inv": (2.0, 3.78)}, {})
+    flat = Flat()
+    flat.cells = [
+        ("u_pad/u_mem", CELL, "mem", {}),
+        *((f"u_pad/g{i}", "inv", "mem", {}) for i in range(10)),
+        *((f"g{i}", "inv", "core", {}) for i in range(40)),
+    ]
+    _, areas, core, sites = domain_areas(flat, lib, p, frozenset({CELL}))
+    (path, x, y), (x0, y0, x1, y1) = sites[0], areas["mem"]
+    assert path == "u_pad/u_mem" and len(sites) == 1
+    # Inside its domain's strip, which is as wide as the macro, and the core has room
+    # left for the top domain after counting the macro twice, as OpenROAD does.
+    assert x0 < x and x + 416.64 < x1 and y0 < y and y + 118.78 < y1
+    assert core > (x1 - x0) + 12
+    flat.cells = [c for c in flat.cells if c[2] == "core" or c[0] == "u_pad/u_mem"]
+    with pytest.raises(UpfError, match="mem holds only hard macros"):
+        domain_areas(flat, lib, p, frozenset({CELL}))
+
+
+@pytest.mark.skipif(
+    __import__("os").environ.get("CHIPLEAP_RUN_IMPL") != "1", reason="set CHIPLEAP_RUN_IMPL=1"
+)
+def test_openroad_places_the_sram_inside_its_power_domain(tmp_path):
+    from chipleap.rtl.upf import upf
+
+    r = upf(load_project(wrapped(tmp_path / "w", ["u_pad"])))
+    assert r.status == "pass", r.summary
+    mem = next(d for d in r.data["domains"] if d["name"] == "mem")
+    # Three standard cells and the SRAM, all inside the domain's area.
+    assert mem["cells"] == 4 and mem["placed_inside"] == 4 and mem["placed_outside"] == 0
