@@ -77,23 +77,23 @@ FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical cor
 #   product). ACCEL_LANE_NS per doubling of lanes bounds both from above.
 # - More ports make the engine larger and its wires longer: the GEMV 1 x 8 engine took
 #   9.11 ns with one port, 10.09 ns with eight (weight unpacking, then the DMA's setup of
-#   each port's start address at 9.74 ns) and 11.25 ns with sixteen (at 35 % core
-#   utilisation). ACCEL_PORT_NS is the line a + b x ports through one and sixteen ports;
-#   eight lie under it. Each port has an address generator of its own, so the DMA no longer
-#   hands words to the ports one after another; with that chain the GEMV 2 x 8 engine with
-#   four ports took 14.02 ns, and now 9.63 ns.
+#   each port's start address at 9.74 ns) and 10.41 ns with sixteen (at 35 % core
+#   utilisation; the activation read address into an operand register). ACCEL_PORT_NS is
+#   the line a + b x ports through one and eight ports; sixteen lie 0.8 ns under it. Each
+#   port has an address generator of its own, so the DMA no longer hands words to the ports
+#   one after another; with that chain the GEMV 2 x 8 engine with four ports took 14.02 ns,
+#   and now 9.63 ns.
 # - The core reads its tile descriptor from a register loaded a cycle ahead, not through a
 #   select by the buffer slot. With the select, the slot's net and its buffer tree led into
 #   the GEMV engine's operand registers and accumulators, and set the period of the 4 x 8
-#   engine with two ports (10.27 ns) and the 1 x 8 with eight (11.18 ns). The sixteen-port
-#   run above is from before that change, limited by the same path, so it bounds the period
-#   from above.
+#   engine with two ports (10.27 ns) and the 1 x 8 with eight (11.18 ns) and sixteen
+#   (11.25 ns).
 # The model is at or above every routed period, so it errs on the safe side.
 # docs/verification.md lists the routed designs.
 ACCEL_ROUTED_NS = 9.33
 ACCEL_SIGNOFF_FACTOR = ACCEL_ROUTED_NS / (ACCEL_DELAY_NS["gemv"] + FLOP_OVERHEAD_NS)
 ACCEL_LANE_NS = 0.30
-ACCEL_PORT_NS = (8.97, 0.143)
+ACCEL_PORT_NS = (8.966, 0.1413)
 
 
 def accel_delay_ns(dataflow: str, cols: int, ports: int) -> float:
