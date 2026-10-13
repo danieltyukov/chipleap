@@ -16,7 +16,6 @@ import hashlib
 import math
 import struct
 from array import array
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
@@ -80,6 +79,10 @@ class GdsLibrary:
     def labels(self, cell: str) -> list[str]:
         """Text strings placed directly in a cell."""
         return list(self.cells[cell].labels)
+
+    def children(self, cell: str) -> list[str]:
+        """The cells a cell places, each once, in the order of its references."""
+        return list(dict.fromkeys(r.cell for r in self.cells[cell].refs))
 
     def bbox(self, cell: str) -> Box | None:
         """The cell's bounding box through its hierarchy, or None when it is empty.
@@ -495,29 +498,49 @@ def _finish(
         )
 
 
-def structure_digests(data: bytes) -> Iterator[tuple[bytes, str]]:
+def structure_identities(data: bytes) -> list[tuple[bytes, str]]:
     """Each structure of a GDS stream: its name as written (one NUL pads an odd length)
-    and the SHA-256 of its records from STRNAME to ENDSTR, each with its four-byte
-    header. Two structures with the same digest are identical, for macro/v1's
-    ``pdk.cell_name`` and for a chip's merges (``chipleap.chip.merge``); BGNSTR, which
-    holds the dates, is not compared. Raises :class:`GdsError` when a record runs past
-    the end of the stream."""
+    and its identity, what macro/v1's ``pdk.cell_name`` and a chip's merges
+    (``chipleap.chip.merge``) compare. The identity is the file's UNITS record and the
+    SHA-256 of the structure's records from BGNSTR to ENDSTR, each with its four-byte
+    header, BGNSTR's body (the dates) left out: every other record a tool reads, its
+    STRCLASS, properties and the order of its elements, counts. In a file whose UNITS
+    record is not its only one, before its first structure, every identity is "",
+    which matches nothing. Raises :class:`GdsError` when a record runs past the end of
+    the stream."""
     pos, n = 0, len(data)
+    units: list[bytes] = []
+    units_first = False  # the first UNITS record came before any BGNSTR
+    started = False  # a BGNSTR was seen
+    out: list[tuple[bytes, str]] = []
+    h = None
     name: bytes | None = None
-    start = 0
     while pos + 4 <= n:
         length, rtype = (data[pos] << 8) | data[pos + 1], data[pos + 2]
         if length < 4 or pos + length > n:
             raise GdsError(f"bad record length {length} at byte {pos}")
-        if rtype == 0x06:  # STRNAME
-            body = data[pos + 4 : pos + length]
-            name, start = (body[:-1] if body.endswith(b"\0") else body), pos
+        record = data[pos : pos + length]
         pos += length
-        if rtype == 0x07 and name is not None:  # ENDSTR
-            yield name, hashlib.sha256(data[start:pos]).hexdigest()
-            name = None
+        if rtype == 0x03:  # UNITS
+            units_first = units_first or (not units and not started)
+            units.append(record)
+        elif rtype == 0x05:  # BGNSTR
+            h, name, started = hashlib.sha256(record[:4]), None, True
+            continue
+        if h is not None:
+            h.update(record)
+            if rtype == 0x06 and name is None:  # STRNAME
+                body = record[4:]
+                name = body[:-1] if body.endswith(b"\0") else body
+            if rtype == 0x07:  # ENDSTR
+                if name is not None:
+                    out.append((name, h.hexdigest()))
+                h = None
         if rtype == 0x04:  # ENDLIB
-            return
+            break
+    if len(units) != 1 or not units_first:
+        return [(name, "") for name, _ in out]
+    return [(name, f"{units[0].hex()}:{digest}") for name, digest in out]
 
 
 def read_gds(path: str | Path, limits: Limits = LIMITS) -> GdsLibrary:

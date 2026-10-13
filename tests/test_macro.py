@@ -26,8 +26,8 @@ from chipleap.macro import (
     schema,
     write_evidence,
 )
-from chipleap.macro.gds import structure_digests
-from chipleap.macro.layer import pdk_libs
+from chipleap.macro.gds import structure_identities
+from chipleap.macro.layer import _pdk_libs, pdk_libs
 from chipleap.macro.manifest import read_toml
 from chipleap.macro.schema import validate_def
 from chipleap.macro.text import fmt_g
@@ -40,9 +40,9 @@ EXPECTED = json.loads((FIXTURES / "expected.json").read_text())
 # The contract both repositories share. aispice pins the same hashes in
 # crates/aispice-core/tests/macro_contract.rs; change both together (CONTRIBUTING.md).
 CONTRACT = {
-    "docs/macro-package.md": "e626f078629cfd2b9023a22ac038d7046026d12de2b226bff62eae5f8977e1ef",
+    "docs/macro-package.md": "a6e93e8bc36471af1e913e9b0d04a82dbbd030837732db125fb40f39b8449b04",
     "src/chipleap/macro/macro-v1.schema.json": "01fadd5205677b27ef3dcc5a00c086aaf00f2dba63d398d17fc046dd67254327",
-    "tests/fixtures/macro/SHA256SUMS": "1868d302d0c4efec6708215b100ce253446bb6a1095712ce1bb2ba79c7899a8e",
+    "tests/fixtures/macro/SHA256SUMS": "3170942c1f149c7e5781d5ee0571b9d86debd09ce7c19f647600481c9fc660ae",
 }
 
 
@@ -573,30 +573,32 @@ def _counter(tmp_path: Path, name: str, tap: str = "") -> Path:
     return dest
 
 
+STAND_IN = FIXTURES / "pdk" / "ihp-sg13g2"
+UNSHOWN = ", and without the PDK's libraries cannot be shown to be the PDK's own"
+
+
 def test_a_package_named_in_the_pdks_name_space_is_refused(tmp_path):
     pkg = _counter(tmp_path, "sg13g2_counter")
+    name = 'name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do'
+    tap = 'GDS cell "sg13g2_counter_tap" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do'
+    # Without the PDK's libraries its tap cell cannot be shown to be the PDK's: refused.
     report = check_package(pkg)
-    # Its tap cell, sg13g2_counter_tap, cannot be compared without the PDK's libraries.
-    assert [(f.rule, f.severity, f.file) for f in report.findings] == [
-        ("pdk.cell_name", "error", "macro.toml"),
-        ("pdk.cell_name", "warning", "sg13g2_counter.gds"),
+    assert [(f.severity, f.file, f.message) for f in report.findings] == [
+        ("error", "macro.toml", name),
+        ("error", "sg13g2_counter.gds", tap + UNSHOWN),
     ]
-    assert report.findings[0].message == (
-        'name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do'
+    report = check_package(pkg, pdk_libs=pdk_libs(STAND_IN))
+    assert [(f.severity, f.message) for f in report.findings] == [("error", name), ("error", tap)]
+
+
+def test_the_top_cell_is_never_the_pdks_own(tmp_path):
+    """A package named like a standard cell is refused by its name, whatever its top
+    cell holds: the exception is for the cells it places."""
+    report = check_package(_counter(tmp_path, "sg13g2_inv_1"), pdk_libs=pdk_libs(STAND_IN))
+    assert (report.findings[0].file, report.findings[0].message) == (
+        "macro.toml",
+        'name "sg13g2_inv_1" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do',
     )
-    # With them, it is no cell of the PDK's: an error.
-    report = check_package(pkg, pdk_libs=pdk_libs(FIXTURES / "pdk" / "ihp-sg13g2"))
-    assert [(f.severity, f.message) for f in report.findings] == [
-        (
-            "error",
-            'name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do',
-        ),
-        (
-            "error",
-            'GDS cell "sg13g2_counter_tap" begins with "sg13g2", as the cells of PDK '
-            '"ihp-sg13g2" do',
-        ),
-    ]
 
 
 def test_case_does_not_hide_a_pdk_cell_name(tmp_path):
@@ -605,33 +607,79 @@ def test_case_does_not_hide_a_pdk_cell_name(tmp_path):
     assert [f.message for f in report.findings] == [
         'GDS cell "RM_IHPSG13_tap" begins with "rm_ihpsg13", as the cells of PDK "ihp-sg13g2" do'
     ]
-    # A PDK cell's name in another case is not its name.
+    # A standard cell's name in another case is not its name.
     pkg = _counter(tmp_path / "upper", "counter", tap="SG13G2_INV_1")
-    report = check_package(pkg, pdk_libs=pdk_libs(FIXTURES / "pdk" / "ihp-sg13g2"))
+    report = check_package(pkg, pdk_libs=pdk_libs(STAND_IN))
     assert [f.message for f in report.findings] == [
         'GDS cell "SG13G2_INV_1" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do'
     ]
 
 
-def test_a_pdk_cell_is_compared_without_the_dates_of_its_structure():
-    """A package's copy of the PDK's inverter differs from the PDK's only in BGNSTR, and
-    the chip's merges (chipleap.chip.merge) compare structures the same way."""
+def _records(data: bytes) -> list[bytes]:
+    out, i = [], 0
+    while i + 4 <= len(data):
+        n = (data[i] << 8) | data[i + 1]
+        out.append(data[i : i + n])
+        i += n
+    return out
+
+
+def _inv(data: bytes) -> str:
+    return dict(structure_identities(data))[b"sg13g2_inv_1"]
+
+
+def test_identity_covers_every_record_but_the_dates():
+    """The package's copy of the inverter differs from the PDK's only in BGNSTR's dates:
+    the same identity. A property, the order of its elements or the file's units make
+    another, and the chip's merges compare the same identity."""
     from chipleap.chip.merge import gds_names
 
-    lib = FIXTURES / "pdk" / "ihp-sg13g2" / "libs.ref" / "sg13g2_stdcell" / "gds"
-    pdk_gds = (lib / "sg13g2_stdcell.gds").read_bytes()
-    pkg_gds = (
-        FIXTURES / "broken" / "std-cell-identical" / "tiny_counter.macro" / "tiny_counter.gds"
-    ).read_bytes()
-    assert pdk_gds.count(b"\x07\xe9") and not pkg_gds.count(b"\x07\xe9")  # 2025, 2026
-    pdk = dict(structure_digests(pdk_gds))
-    pkg = dict(structure_digests(pkg_gds))
-    assert pdk[b"sg13g2_inv_1"] == pkg[b"sg13g2_inv_1"]
-    assert gds_names(pdk_gds)["sg13g2_inv_1"] == pdk[b"sg13g2_inv_1"]
-    modified = (
-        FIXTURES / "broken" / "std-cell-modified" / "tiny_counter.macro" / "tiny_counter.gds"
-    ).read_bytes()
-    assert dict(structure_digests(modified))[b"sg13g2_inv_1"] != pdk[b"sg13g2_inv_1"]
+    pdk = (STAND_IN / "libs.ref" / "sg13g2_stdcell" / "gds" / "sg13g2_stdcell.gds").read_bytes()
+    same = (FIXTURES / "broken/std-cell-identical/tiny_counter.macro/tiny_counter.gds").read_bytes()
+    assert pdk.count(b"\x07\xe9") and not same.count(b"\x07\xe9")  # 2025, 2026
+    assert _inv(pdk) == _inv(same) != ""
+    assert gds_names(pdk)["sg13g2_inv_1"] == _inv(pdk)
+    recs = _records(same)
+    start = recs.index(next(r for r in recs if r[2] == 0x06 and r[4:] == b"sg13g2_inv_1"))
+    ends = [k for k in range(start, len(recs)) if recs[k][2] == 0x11]  # ENDEL
+    # A property on the first element.
+    prop = struct.pack(">HBBh", 6, 0x2B, 0x02, 1) + struct.pack(">HBB", 6, 0x2C, 0x06) + b"x\0"
+    with_prop = [*recs[: ends[0]], prop, *recs[ends[0] :]]
+    assert _inv(b"".join(with_prop)) != _inv(same)
+    # The first two elements swapped.
+    first, second = recs[start + 1 : ends[0] + 1], recs[ends[0] + 1 : ends[1] + 1]
+    swapped = recs[: start + 1] + second + first + recs[ends[1] + 1 :]
+    assert len(swapped) == len(recs) and _inv(b"".join(swapped)) != _inv(same)
+    # A second UNITS record, or one after the first structure: no identity at all.
+    units = next(r for r in recs if r[2] == 0x03)
+    k = recs.index(units)
+    assert _inv(b"".join([*recs[: k + 1], units, *recs[k + 1 :]])) == ""
+    first_str = next(i for i, r in enumerate(recs) if r[2] == 0x05)
+    moved = [*recs[:k], *recs[k + 1 : first_str + 1], units, *recs[first_str + 1 :]]
+    assert _inv(b"".join(moved)) == ""
+
+
+def test_only_the_standard_cell_gds_holds_the_pdks_own(tmp_path):
+    """A copy of the inverter in another library's GDS, or a standard-cell GDS that
+    defines it twice, makes no standard cell of it."""
+    pdk_gds = (STAND_IN / "libs.ref" / "sg13g2_stdcell" / "gds" / "sg13g2_stdcell.gds").read_bytes()
+    root = tmp_path / "ihp-sg13g2"
+    (root / "libs.ref" / "sg13g2_pr" / "gds").mkdir(parents=True)
+    (root / "libs.ref" / "sg13g2_pr" / "gds" / "sg13g2_pr.gds").write_bytes(pdk_gds)
+    libs = pdk_libs(root)
+    assert "sg13g2_inv_1" in libs.names and not libs.std_cells
+    pkg = FIXTURES / "broken" / "std-cell-identical" / "tiny_counter.macro"
+    assert check_package(pkg, pdk_libs=libs).errors == 2
+    recs = _records(pdk_gds)
+    inv = next(r for r in recs if r[2] == 0x06 and r[4:] == b"sg13g2_inv_1")
+    begin = recs.index(inv) - 1
+    end = next(i for i in range(begin, len(recs)) if recs[i][2] == 0x07)
+    twice = recs[: end + 1] + recs[begin : end + 1] + recs[end + 1 :]
+    std = root / "libs.ref" / "sg13g2_stdcell" / "gds"
+    std.mkdir(parents=True)
+    (std / "sg13g2_stdcell.gds").write_bytes(b"".join(twice))
+    _pdk_libs.cache_clear()
+    assert list(pdk_libs(root).std_cells) == ["sg13g2_buf_1"]
 
 
 def test_a_cell_of_the_pdks_libraries_is_refused_when_the_validator_has_them(tmp_path):
@@ -650,10 +698,10 @@ def test_other_pdks_have_no_name_space_of_ihps(tmp_path):
     assert "pdk.cell_name" not in rules
 
 
-def test_the_pdks_libraries_hold_names_and_gds_digests():
-    libs = pdk_libs(FIXTURES / "pdk" / "ihp-sg13g2")
-    assert libs.names == {"sg13g2_inv_1"}
-    assert list(libs.gds) == ["sg13g2_inv_1"] and len(libs.gds["sg13g2_inv_1"]) == 1
+def test_the_pdks_libraries_hold_names_and_standard_cells():
+    libs = pdk_libs(STAND_IN)
+    assert libs.names == {"sg13g2_inv_1", "sg13g2_buf_1", "sg13g2_corner"}
+    assert sorted(libs.std_cells) == ["sg13g2_buf_1", "sg13g2_inv_1"]
 
 
 def test_the_cli_reads_the_pdks_libraries(tmp_path, capsys):

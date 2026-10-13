@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from chipleap.macro.check import PdkLibs, Report, check_package
-from chipleap.macro.gds import GdsError, structure_digests
+from chipleap.macro.gds import GdsError, structure_identities
 from chipleap.macro.limits import LIMITS
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, load_manifest
 from chipleap.rtl import builddir
@@ -167,6 +167,10 @@ GENERATED = (
     "TM2_FILL_CELL",
 )
 NAMES_FILE_MAX = 512 << 20
+# The standard cells' GDS, under libs.ref: the file LibreLane merges them from (its
+# CELL_GDS), which chipleap.chip.merge trusts, and the only one a package's cell may be
+# identical to.
+STD_CELL_GDS = "sg13g2_stdcell/gds/sg13g2_stdcell.gds"
 
 
 @dataclass(frozen=True)
@@ -223,8 +227,8 @@ def pdk_cell_names(pdk: Path) -> frozenset[str]:
 
 def pdk_libs(pdk: Path) -> PdkLibs:
     """The cells of the PDK's libraries in ``pdk``, as macro/v1's ``pdk.cell_name``
-    compares a package with them: every name case-folded, and the digest of each GDS
-    cell by its name."""
+    compares a package with them: every name case-folded, and the identity of each cell
+    of the standard-cell GDS by its name."""
     return _pdk_libs(str(pdk))
 
 
@@ -236,7 +240,7 @@ def _pdk_names(pdk: str) -> frozenset[str]:
 def _pdk_libs(pdk: str) -> PdkLibs:
     root = Path(pdk) / "libs.ref"
     names: set[str] = set()
-    gds: dict[str, set[str]] = {}
+    std_cells: dict[str, list[str]] = {}
     if not root.is_dir():
         raise MacroImportError(f"{pdk} has no libs.ref directory")
     for f in sorted(root.glob("*/lef/*.lef")) + sorted(root.glob("*/cdl/*.cdl")):
@@ -245,17 +249,23 @@ def _pdk_libs(pdk: str) -> PdkLibs:
         text = f.read_text(errors="replace")
         pattern = r"^\s*MACRO\s+(\S+)" if f.suffix == ".lef" else r"^\s*\.SUBCKT\s+(\S+)"
         names.update(m.casefold() for m in re.findall(pattern, text, re.M | re.I))
+    std = root / STD_CELL_GDS
     for f in sorted(root.glob("*/gds/*.gds")):
         if f.stat().st_size > NAMES_FILE_MAX:
             raise MacroImportError(f"{f.name} of the PDK is larger than ChipLeap reads")
         try:
-            for raw, digest in structure_digests(f.read_bytes()):
-                name = raw.decode("ascii", "replace")
-                names.add(name.casefold())
-                gds.setdefault(name, set()).add(digest)
+            cells = structure_identities(f.read_bytes())
         except GdsError as exc:
             raise MacroImportError(f"{f.name} of the PDK: {exc}") from None
-    return PdkLibs(frozenset(names), {k: frozenset(v) for k, v in gds.items()})
+        for raw, identity in cells:
+            name = raw.decode("ascii", "replace")
+            names.add(name.casefold())
+            if f == std:
+                std_cells.setdefault(name, []).append(identity)
+    # A name the standard-cell GDS defines more than once is no standard cell.
+    return PdkLibs(
+        frozenset(names), {k: v[0] for k, v in std_cells.items() if len(v) == 1 and v[0]}
+    )
 
 
 # Copying and checking

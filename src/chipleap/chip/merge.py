@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.macro.gds import GdsError, structure_digests
+from chipleap.macro.gds import GdsError, structure_identities
 from chipleap.macro.layer import GDS_NAME, MacroView
 
 FILE_MAX = 1 << 30
@@ -73,12 +73,13 @@ def _read(path: Path) -> bytes:
 
 
 def gds_names(data: bytes) -> dict[str, str]:
-    """Each structure of a GDS stream with a digest of its records (its name and
-    elements, not the dates in its header), as macro/v1 defines identical structures
-    (``chipleap.macro.gds.structure_digests``). A name that is not plain is an error."""
+    """Each structure of a GDS stream with its identity (its records and the file's
+    units, not the dates in its header), as macro/v1 defines identical structures
+    (``chipleap.macro.gds.structure_identities``). A name that is not plain is an error,
+    and so is one defined twice, differently, in one file."""
     out: dict[str, str] = {}
     try:
-        for raw, digest in structure_digests(data):
+        for raw, digest in structure_identities(data):
             if not GDS_NAME.fullmatch(raw):
                 raise MergeError(f"GDS cell name {raw[:40]!r} is not plain")
             current = raw.decode()
