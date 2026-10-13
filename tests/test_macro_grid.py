@@ -31,7 +31,19 @@ def sram(
             MacroPin("A_DIN[0]", "input", "signal", (("Metal2", (40.0, 0.0, 40.2, 1.0)),)),
         )
     return MacroView(
-        cell, "memory", 416.64, height, pins, p, p, p, p, (cell,), (cell,), None, "pdk", False
+        cell,
+        "memory",
+        416.64,
+        height,
+        pins,
+        p,
+        p,
+        p,
+        p,
+        (cell,),
+        (cell,),
+        source="pdk",
+        supply_hookup=False,
     )
 
 

@@ -146,6 +146,25 @@ class Prepared:
     pdk_spec: str
 
 
+def import_macros(project: Project, pdk: Path, spec: str, flow_dir: Path) -> layer.Imported:
+    """The chip's macro packages, copied, checked against ``spec`` with the libraries of
+    ``pdk`` and converted. Without the libraries the step stops (MacroImportError): a
+    package's standard cells could not be shown to be the PDK's own. After LibreLane
+    runs, ``chipleap.chip.merge`` compares them again with the standard cells it
+    merged, under its own PDK_ROOT."""
+    chip = _cfg(project)
+    libs = layer.pdk_libs(pdk)
+    return layer.import_packages(
+        [(m.instance, m.package) for m in chip.macros],
+        project.files_in,
+        project.read,
+        flow_dir,
+        spec,
+        layer.reserved_names(pdk, (chip.name, project.top)),
+        libs=libs,
+    )
+
+
 def prepare(project: Project, pdk: Path) -> Prepared:
     """Everything before LibreLane runs: the ports, the macros, the nets, the floorplan
     and the files of the flow."""
@@ -154,19 +173,11 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     cells = io.read_lef(io.lef_path(pdk).read_text())
     commit = io.pdk_commit(pdk)
     spec = f"ihp-sg13g2@{commit}" if commit else "ihp-sg13g2"
+    flow_dir = builddir.work_dir(work, "flow")
+    imported = import_macros(project, pdk, spec, flow_dir)
     ports_dir = builddir.work_dir(work, "ports")
     ports = netlist.core_ports(project, ports_dir)
-    flow_dir = builddir.work_dir(work, "flow")
     verilog = verilog_config(project, flow_dir)
-    reserved = layer.reserved_names(pdk, (chip.name, project.top))
-    imported = layer.import_packages(
-        [(m.instance, m.package) for m in chip.macros],
-        project.files_in,
-        project.read,
-        flow_dir,
-        spec,
-        reserved,
-    )
     clocks = {c.port: c.period_ns for c in project.clocks}
     binding = netlist.bind(chip, ports, imported.views, imported.cells, clocks, project.top)
     sizes = {
