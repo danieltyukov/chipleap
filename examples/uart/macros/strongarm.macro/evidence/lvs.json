@@ -28,7 +28,7 @@
   "inputs": [
     {
       "path": "strongarm.gds",
-      "sha256": "c1da3801ba455aa531b50cb66096428d5146b04e36a094f85a9edeed92a0c391"
+      "sha256": "20c4f90d53740c877f95122f923a43fa562c3dcefdf97d43604915e1bac84148"
     },
     {
       "path": "strongarm.spice",
