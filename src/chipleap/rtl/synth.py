@@ -151,6 +151,11 @@ def front(project: Project, files: list[Path], raw: bool, flatten: bool = True) 
     return [*read_commands(project, files, raw), synth]
 
 
+# IHP SG13G2's tie cells and their outputs.
+TIE_HI = "sg13g2_tiehi L_HI"
+TIE_LO = "sg13g2_tielo L_LO"
+
+
 def _script(
     project: Project,
     files: list[Path],
@@ -188,6 +193,14 @@ def _script(
             f"dfflibmap -liberty {lib}",
             # ChipLeap's own text, no project data: ";" inside quotes stays in the word.
             f'abc -liberty {lib} -script "{abc}"',
+            # A hard macro's pins tied to a constant (an SRAM's A_DLY and BIST port) get tie
+            # cells, as LibreLane's synthesis gives them: OpenROAD reads a bare constant on
+            # an instance as nets (one_, zero_) that it then writes without declaring them.
+            *(
+                [f"hilomap -singleton -hicell {TIE_HI} -locell {TIE_LO}", "opt_clean"]
+                if project.macros and project.tech == "ihp-sg13g2"
+                else []
+            ),
             "opt_clean",
             f"stat -liberty {lib}",
             f"write_verilog -noattr {q.yosys(netlist)}",

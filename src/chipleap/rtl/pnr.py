@@ -177,6 +177,9 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
     if project.dft is not None and project.dft.insert:
         src = builddir.work_dir(workdir, "src", empty=True)
         cfg.update(_scan_netlist(project, workdir, src))
+        # The scan netlist instantiates the hard macros as the RTL does.
+        if project.macros:
+            cfg.update(macro_config(project, workdir))
         return _finish(project, workdir, cfg)
     cfg.update(verilog_config(project, workdir))
     if project.parameters:
