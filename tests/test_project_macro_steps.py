@@ -1,0 +1,484 @@
+"""The steps after synthesis on a project with hard macros: each treats a macro as a box
+with its ports, and a check that would need what the macro does says so or fails."""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+import pytest
+import yaml
+
+from chipleap.rtl import formal
+from chipleap.rtl.project import load_project
+from chipleap.rtl.synth import liberty_for
+from chipleap.verify.tools import sby, yosys, z3
+
+ROOT = Path(__file__).resolve().parents[1]
+EXAMPLE = ROOT / "examples" / "sram"
+CELL = "RM_IHPSG13_1P_256x32_c2_bm_bist"
+
+needs_yosys = pytest.mark.skipif(not yosys().found, reason="needs Yosys")
+needs_sby = pytest.mark.skipif(
+    not sby().found or not z3().found, reason="needs SymbiYosys (CHIPLEAP_SBY) and z3"
+)
+
+
+def sram_project(root: Path, rtl_extra: str = "", **changes: object) -> Path:
+    """The SRAM example in ``root``, with ``rtl_extra`` before its ``endmodule``."""
+    shutil.copytree(EXAMPLE, root, ignore=shutil.ignore_patterns("build", "__pycache__"))
+    rtl = root / "rtl" / "scratchpad.sv"
+    text = rtl.read_text()
+    head, _, tail = text.rpartition("endmodule")
+    rtl.write_text(head + rtl_extra + "endmodule" + tail)
+    f = root / "project.yaml"
+    data = yaml.safe_load(f.read_text())
+    data.update(changes)
+    f.write_text(yaml.safe_dump(data))
+    return root
+
+
+# Formal: each macro is a cut point.
+
+PROPERTIES = """
+`ifdef FORMAL
+  logic past_valid = 1'b0;
+  always_ff @(posedge clk_i) past_valid <= 1'b1;
+  always_comb if (!past_valid) assume (!rst_ni);
+  // The logic around the macro: rvalid_o follows a read request.
+  always_ff @(posedge clk_i)
+    if (past_valid && $past(rst_ni) && rst_ni) assert (rvalid_o == $past(req_i && !we_i));
+  // What the macro does: its output holds between reads. True of IHP's SRAM, unknown of
+  // a box.
+  always_ff @(posedge clk_i)
+    if (past_valid && !$past(req_i)) assert ($stable(rdata_o));
+`endif
+"""
+
+
+@needs_sby
+def test_formal_proves_the_logic_around_a_macro_and_leaves_the_macro_free(tmp_path):
+    root = sram_project(
+        tmp_path / "sram",
+        PROPERTIES,
+        formal={"checks": [{"name": "bmc", "mode": "bmc", "depth": 6}]},
+    )
+    p = load_project(root)
+    boxes, cuts = formal.macro_cuts(p)
+    assert [b.name for b in boxes] == [f"{CELL}.v"] and cuts == [f"cutpoint t:{CELL}"]
+    r = formal.formal(p)
+    assert r.status == "fail", r.summary
+    (check,) = r.data["checks"]
+    failures = check["failures"]
+    # Only the property about the macro's output fails: the macro is a cut point, and
+    # rdata_o changes without a read in the counterexample.
+    assert len(failures) == 1 and failures[0]["line"] == text_line(root, "$stable(rdata_o)")
+    values = failures[0]["values"]["signals"]
+    assert "rdata_o" in values
+
+
+def text_line(root: Path, needle: str) -> int:
+    lines = (root / "rtl" / "scratchpad.sv").read_text().splitlines()
+    return next(i for i, line in enumerate(lines, 1) if needle in line)
+
+
+# CDC: a macro is a state element of the clock its port samples on.
+
+TWO_CLOCKS = [{"port": "clk_a", "period_ns": 10}, {"port": "clk_b", "period_ns": 7}]
+CROSSING = f"""
+module top (
+    input  logic       clk_a,
+    input  logic       clk_b,
+    input  logic       rst_ni,
+    input  logic [7:0] addr_i,
+    output logic [31:0] q_o,
+    output logic       bit_o
+);
+  logic [7:0] addr_q;
+  logic [31:0] dout;
+  logic s1, s2;
+  always_ff @(posedge clk_a or negedge rst_ni)
+    if (!rst_ni) addr_q <= '0; else addr_q <= addr_i;
+  {CELL} u_mem (
+      .A_CLK(clk_b), .A_MEN(1'b1), .A_WEN(1'b0), .A_REN(1'b1), .A_ADDR(addr_q),
+      .A_DIN(32'd0), .A_DLY(1'b1), .A_DOUT(dout), .A_BM(32'd0), .A_BIST_CLK(1'b0),
+      .A_BIST_EN(1'b0), .A_BIST_MEN(1'b0), .A_BIST_WEN(1'b0), .A_BIST_REN(1'b0),
+      .A_BIST_ADDR(8'd0), .A_BIST_DIN(32'd0), .A_BIST_BM(32'd0)
+  );
+  // The word straight into clk_a, and one bit of it through two flip-flops.
+  always_ff @(posedge clk_a) q_o <= dout;
+  always_ff @(posedge clk_a) begin
+    s1 <= dout[0];
+    s2 <= s1;
+  end
+  assign bit_o = s2;
+endmodule
+"""
+
+
+def crossing_project(root: Path) -> Path:
+    (root / "rtl").mkdir(parents=True)
+    (root / "rtl" / "top.sv").write_text(CROSSING)
+    data = {
+        "top": "top",
+        "sources": ["rtl/top.sv"],
+        "clocks": TWO_CLOCKS,
+        "resets": [{"port": "rst_ni"}],
+        "macros": [{"instance": "u_mem", "cell": CELL}],
+    }
+    (root / "project.yaml").write_text(yaml.safe_dump(data))
+    return root
+
+
+def test_an_sram_samples_its_port_on_its_clock_and_bist_on_its_own():
+    from chipleap.macro.sram import Sram
+    from chipleap.rtl import cdc, macros
+
+    p = load_project(EXAMPLE)
+    (box,) = cdc.macro_boxes(p).values()
+    assert box.outputs == ("A_DOUT",) and box.outputs_on == "A_CLK"
+    assert "A_ADDR" in box.sampled["A_CLK"] and "A_BIST_ADDR" not in box.sampled["A_CLK"]
+    assert box.sampled["A_BIST_CLK"][0] == "A_BIST_EN"
+    assert macros.cells(p) == [Sram(CELL, 256, 32, 0.0, 0.0, True)]
+
+
+@needs_yosys
+def test_cdc_takes_the_sram_into_its_clock_and_finds_crossings_through_it(tmp_path):
+    from chipleap.rtl import cdc
+
+    r = cdc.cdc(load_project(crossing_project(tmp_path / "x")))
+    assert r.status == "fail"
+    assert r.data["macros"] == {"u_mem": "clk_b"}
+    errors = {
+        (f["rule"], f["from"], f["to"]) for f in r.data["findings"] if f["severity"] == "error"
+    }
+    # Into the macro: clk_a's address sampled on clk_b. Out of it: the word into clk_a.
+    assert errors == {("unsynchronized", "addr_q", "u_mem"), ("unsynchronized", "u_mem", "q_o")}
+    # One bit of the word through two clk_a flip-flops is a synchronizer.
+    assert any(a["rule"] == "synchronizer" and a["from"] == "u_mem" for a in r.data["accepted"])
+
+
+@needs_yosys
+def test_the_sram_example_has_one_domain_with_its_macro(tmp_path):
+    from chipleap.rtl import cdc
+
+    root = sram_project(tmp_path / "sram")
+    r = cdc.cdc(load_project(root))
+    assert r.status == "pass", r.summary
+    assert r.data["macros"] == {"u_mem": "clk_i"}
+
+
+COMPARATOR = """\
+module top (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic inp_i,
+    input  logic inm_i,
+    output logic outp_o,
+    output logic outn_o
+);
+  logic outp;
+  strongarm u_cmp (.clk(clk_i), .inp(inp_i), .inm(inm_i), .outp(outp), .outn(outn_o));
+  always_ff @(posedge clk_i) outp_o <= outp;
+endmodule
+"""
+STRONGARM = ROOT / "examples" / "uart" / "macros" / "strongarm.macro"
+
+
+def comparator_project(root: Path, clocked: bool) -> Path:
+    shutil.copytree(STRONGARM, root / "macros" / "strongarm.macro")
+    if not clocked:  # the same block, its clock pin a plain signal
+        toml = root / "macros" / "strongarm.macro" / "macro.toml"
+        text = toml.read_text()
+        toml.write_text(text.replace('kind = "clock"', 'kind = "signal"', 1))
+    (root / "rtl").mkdir()
+    (root / "rtl" / "top.sv").write_text(COMPARATOR)
+    data = {
+        "top": "top",
+        "sources": ["rtl/top.sv"],
+        "clocks": [{"port": "clk_i", "period_ns": 10}],
+        "resets": [{"port": "rst_ni"}],
+        "macros": [{"instance": "u_cmp", "package": "macros/strongarm.macro"}],
+    }
+    (root / "project.yaml").write_text(yaml.safe_dump(data))
+    return root
+
+
+@needs_yosys
+def test_a_clocked_package_is_in_its_clocks_domain_and_an_unclocked_one_is_asynchronous(
+    tmp_path,
+):
+    from chipleap.rtl import cdc
+
+    p = load_project(comparator_project(tmp_path / "clocked", clocked=True))
+    (box,) = cdc.macro_boxes(p).values()
+    assert box.outputs_on == "clk" and box.sampled == {"clk": ()}  # its inputs are analog
+    r = cdc.cdc(p)
+    assert r.status == "pass", r.summary
+    assert r.data["macros"] == {"u_cmp": "clk_i"}
+    # Without a clock its outputs change on their own: sampling one once is an error.
+    r = cdc.cdc(load_project(comparator_project(tmp_path / "free", clocked=False)))
+    assert r.status == "fail"
+    assert r.data["macros"] == {"u_cmp": "async:u_cmp"}
+    errors = [
+        (f["rule"], f["from"], f["to"]) for f in r.data["findings"] if f["severity"] == "error"
+    ]
+    assert errors == [("unsynchronized", "u_cmp", "outp_o")]
+
+
+# Equivalence: a macro's pins are ports on both sides.
+
+needs_liberty = pytest.mark.skipif(
+    not yosys().found or liberty_for("ihp-sg13g2") is None,
+    reason="needs Yosys and IHP SG13G2's liberty",
+)
+
+
+@needs_liberty
+@pytest.mark.parametrize("engine", ["yosys", "eqy"])
+def test_equivalence_compares_what_goes_into_a_macro_and_shares_what_comes_out(tmp_path, engine):
+    from chipleap.rtl import equiv
+    from chipleap.rtl.synth import synthesize
+    from chipleap.verify.tools import eqy
+
+    if engine == "eqy" and not eqy().found:
+        pytest.skip("needs EQY (CHIPLEAP_EQY)")
+    section = {"engine": engine, "checks": ["rtl-synth"]}
+    p = load_project(sram_project(tmp_path / "sram", equivalence=section))
+    r = equiv.check_pair(p, "rtl-synth")
+    assert r["status"] == "proved", r
+    # The macro's pins are matched points: its write enable, its address and its word.
+    work = p.root / "build" / "equiv" / "rtl-synth"
+    script = (work / ("rtl-synth.eqy" if engine == "eqy" else "equiv.ys")).read_text()
+    assert f"expose -evert -sep __ t:{CELL}" in script
+    # A netlist of an RTL that writes when it should read: the write enable into the
+    # macro differs. With the macro left as a box on both sides this proved equal.
+    bad = sram_project(tmp_path / "bad")
+    rtl = bad / "rtl" / "scratchpad.sv"
+    rtl.write_text(rtl.read_text().replace(".A_WEN(req_i & we_i)", ".A_WEN(req_i & ~we_i)"))
+    netlist = synthesize(load_project(bad)).netlist
+    gate = p.root / "gate.v"
+    gate.write_bytes(netlist.read_bytes())
+    r = equiv.check_pair(p, "rtl-synth", gate_netlist=gate)
+    assert r["status"] == "differs", r
+    assert any("u_mem__A_WEN" in n for n in r["unproven"]), r["unproven"]
+
+
+# Gate-level simulation: the SRAM on the PDK's model.
+
+
+def _gls_ready() -> bool:
+    from chipleap.chip import io
+    from chipleap.rtl.gls import icarus_major
+    from chipleap.rtl.sim import cocotb_python
+    from chipleap.verify.tools import iverilog
+
+    return (
+        icarus_major(iverilog()) >= 13
+        and cocotb_python() is not None
+        and liberty_for("ihp-sg13g2") is not None
+        and io.pdk_dir() is not None  # the SRAM's own model
+    )
+
+
+@pytest.mark.skipif(
+    not _gls_ready(), reason="needs Icarus 13 (CHIPLEAP_IVERILOG), cocotb, the PDK's SRAMs"
+)
+def test_the_tests_pass_on_the_netlist_with_the_srams_functional_model(tmp_path):
+    from chipleap.rtl.gls import gls
+
+    root = sram_project(tmp_path / "sram", gate_sim={"netlist": "synth"})
+    r = gls(load_project(root))
+    assert r.status == "pass", r.summary
+    assert r.data["macro_models"] == "functional"
+    m = (root / "build" / "gls" / "sim" / "manifest.json").read_text()
+    assert '"FUNCTIONAL": 1' in m and f"macros/{CELL}.v" in m
+
+
+# DFT: macros stay off the chains and out of the test.
+
+CUT = """\
+module top
+(
+  clk_i,
+  a_i,
+  q_o,
+  _1_,
+  \\_1_.d ,
+  \\u_core.u_mem.A_ADDR.d ,
+  \\u_core.u_mem.A_DOUT ,
+  \\u_core.u_mem.A_WEN.d
+);
+  input clk_i;
+  input [7:0] a_i;
+  output [31:0] q_o;
+  input _1_;
+  output \\_1_.d ;
+  output [7:0] \\u_core.u_mem.A_ADDR.d ;
+  input [31:0] \\u_core.u_mem.A_DOUT ;
+  output [0:0] \\u_core.u_mem.A_WEN.d ;
+  assign \\u_core.u_mem.A_ADDR.d  = a_i;
+  assign q_o = \\u_core.u_mem.A_DOUT ;
+endmodule
+"""
+
+
+def test_a_cut_macro_is_taken_out_of_the_test():
+    from chipleap.rtl.dft import seal_macros
+
+    text, unobserved, tied = seal_macros(CUT, ["u_core.u_mem"])
+    assert unobserved == ["\\u_core.u_mem.A_ADDR.d", "\\u_core.u_mem.A_WEN.d"]
+    assert tied == ["\\u_core.u_mem.A_DOUT"]
+    header = text[text.index("(") : text.index(");")]
+    # The flip-flop's cut ports stay; the macro's go, its last port without a comma too.
+    assert "\\_1_.d" in header and "u_mem" not in header
+    assert "  wire [7:0] \\u_core.u_mem.A_ADDR.d ;" in text
+    assert "  wire [31:0] \\u_core.u_mem.A_DOUT ;" in text
+    assert "  assign \\u_core.u_mem.A_DOUT = 0;\nendmodule" in text
+    assert "input [31:0] \\u_core.u_mem" not in text and "output [7:0] \\u_core" not in text
+    # Another instance's names are left as they are.
+    _, none_unobserved, none_tied = seal_macros(CUT, ["u_other"])
+    assert none_unobserved == [] and none_tied == []
+
+
+@pytest.mark.skipif(
+    __import__("os").environ.get("CHIPLEAP_RUN_IMPL") != "1", reason="set CHIPLEAP_RUN_IMPL=1"
+)
+def test_dft_keeps_the_sram_off_the_chains_and_its_patterns_pass(tmp_path):
+    from chipleap.rtl.dft import dft
+
+    root = sram_project(tmp_path / "sram", dft={})
+    r = dft(load_project(root))
+    assert r.status == "pass", r.summary
+    assert r.data["flops"] == 1 and r.data["scanned"] == 1
+    atpg = r.data["atpg"]
+    assert atpg["macro_outputs_held_at_0"] == 1 and atpg["macro_inputs_not_observed"] == 16
+    assert 0 < atpg["coverage_pct"] < 100
+    assert r.data["simulation"]["errors"] == 0 and r.data["simulation"]["patterns"] > 0
+    tb = (root / "build" / "dft" / "sim" / "tb.v").read_text()
+    assert "initial force dut.u_mem.A_DOUT = 0;" in tb
+    assert "out of the test" in r.summary
+
+
+# UPF: a macro in its domain's area.
+
+WRAP = """\
+module wrap (
+    input  logic        clk_i,
+    input  logic        rst_ni,
+    input  logic        req_i,
+    input  logic        we_i,
+    input  logic [ 7:0] addr_i,
+    input  logic [31:0] wdata_i,
+    input  logic [ 3:0] be_i,
+    output logic [31:0] rdata_o,
+    output logic        rvalid_o,
+    output logic        parity_o
+);
+  scratchpad u_pad (.*);
+  always_ff @(posedge clk_i) parity_o <= ^rdata_o;
+endmodule
+"""
+
+
+def wrapped(root: Path, domain: list[str]) -> Path:
+    sram_project(
+        root,
+        top="wrap",
+        sources=["rtl/scratchpad.sv", "rtl/wrap.sv"],
+        macros=[{"instance": "u_pad/u_mem", "cell": CELL}],
+        tests={"dir": "test", "toplevel": "scratchpad"},
+        upf={"domains": [{"name": "core"}, {"name": "mem", "elements": domain}]},
+    )
+    (root / "rtl" / "wrap.sv").write_text(WRAP)
+    return root
+
+
+def test_a_macro_gets_room_in_its_domains_area_and_a_domain_of_macros_alone_is_refused(
+    tmp_path,
+):
+    from chipleap.rtl.upf import CellLib, Flat, UpfError, domain_areas
+
+    p = load_project(wrapped(tmp_path / "w", ["u_pad"]))
+    lib = CellLib({CELL: (416.64, 118.78), "inv": (2.0, 3.78)}, {})
+    flat = Flat()
+    flat.cells = [
+        ("u_pad/u_mem", CELL, "mem", {}),
+        *((f"u_pad/g{i}", "inv", "mem", {}) for i in range(10)),
+        *((f"g{i}", "inv", "core", {}) for i in range(40)),
+    ]
+    _, areas, core, sites = domain_areas(flat, lib, p, frozenset({CELL}))
+    (path, x, y), (x0, y0, x1, y1) = sites[0], areas["mem"]
+    assert path == "u_pad/u_mem" and len(sites) == 1
+    # Inside its domain's strip, which is as wide as the macro, and the core has room
+    # left for the top domain after counting the macro twice, as OpenROAD does.
+    assert x0 < x and x + 416.64 < x1 and y0 < y and y + 118.78 < y1
+    assert core > (x1 - x0) + 12
+    flat.cells = [c for c in flat.cells if c[2] == "core" or c[0] == "u_pad/u_mem"]
+    with pytest.raises(UpfError, match="mem holds only hard macros"):
+        domain_areas(flat, lib, p, frozenset({CELL}))
+
+
+@pytest.mark.skipif(
+    __import__("os").environ.get("CHIPLEAP_RUN_IMPL") != "1", reason="set CHIPLEAP_RUN_IMPL=1"
+)
+def test_openroad_places_the_sram_inside_its_power_domain(tmp_path):
+    from chipleap.rtl.upf import upf
+
+    r = upf(load_project(wrapped(tmp_path / "w", ["u_pad"])))
+    assert r.status == "pass", r.summary
+    mem = next(d for d in r.data["domains"] if d["name"] == "mem")
+    # Three standard cells and the SRAM, all inside the domain's area.
+    assert mem["cells"] == 4 and mem["placed_inside"] == 4 and mem["placed_outside"] == 0
+
+
+# ECO: the routed run's macros are passed on as ChipLeap wrote them; its PDN script is not.
+
+
+def test_an_eco_passes_on_the_macros_chipleap_recorded_and_never_the_pdn_script(counter_project):
+    from chipleap.rtl import eco as E
+    from chipleap.rtl.pnr import seal_routed
+    from test_project_eco import routed
+
+    routed(counter_project)
+    pnr = counter_project / "build" / "pnr"
+    views = pnr / "macros" / CELL
+    views.mkdir(parents=True)
+    for name in (f"{CELL}.lef", f"{CELL}.gds", f"{CELL}_typ_1p20V_25C.lib"):
+        (views / name).write_text("x\n")
+    (pnr / "pdn.tcl").write_text("source $::env(SCRIPTS_DIR)/openroad/common/pdn_cfg.tcl\n")
+    seal_routed(pnr, with_macros=True)
+    p = load_project(counter_project)
+    _, sealed, _, _ = E.base(p)
+    at = f"dir::macros/{CELL}"
+    entry = {
+        "gds": [f"{at}/{CELL}.gds"],
+        "lef": [f"{at}/{CELL}.lef"],
+        "lib": {"*_typ_*": [f"{at}/{CELL}_typ_1p20V_25C.lib"]},
+        "instances": {"u_mem": {"location": [60.48, 20.0], "orientation": "N"}},
+        "spef": {},
+        "sdf": {},
+        "json_h": None,
+    }
+    good = {"DESIGN_NAME": "counter", "CORE_AREA": [0, 0, 100, 100], "MACROS": {CELL: entry}}
+    out = E._settings(p, {**good, "PDN_CFG": "dir::pdn.tcl"}, sealed)
+    assert out == good  # the grid is built before the state an ECO resumes from
+    for bad, why in [
+        ({"PDN_CFG": "dir::src/evil.tcl"}, "PDN_CFG"),
+        ({"lef": ["dir::src/counter.v"]}, "not a view ChipLeap copied"),
+        ({"lef": [f"{at}/other.lef"]}, "not a file ChipLeap recorded"),
+        ({"lef": [f"dir::macros/../../../etc/{CELL}.lef"]}, "not a view ChipLeap copied"),
+        ({"lib": {"nom_*": [f"{at}/{CELL}.lef"]}}, "not by corner"),
+        ({"instances": {"u_mem": {"location": [1, 2], "orientation": "R90"}}}, "oddly"),
+        ({"instances": {"u mem;": {"location": [1, 2], "orientation": "N"}}}, "tool script"),
+        ({"nl": ["expr::[exec touch pwned]"]}, "tool script"),
+        ({"spef": {"*": [f"{at}/{CELL}.lef"]}}, "sets spef"),
+        ({"pnr_hook": 1}, "sets pnr_hook"),
+    ]:
+        cfg = dict(good)
+        if "PDN_CFG" in bad:
+            cfg.update(bad)
+        else:
+            cfg["MACROS"] = {CELL: {**entry, **bad}}
+        with pytest.raises(E.EcoError, match=why):
+            E._settings(p, cfg, sealed)

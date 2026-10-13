@@ -39,6 +39,13 @@ crossing into a flip-flop whose asynchronous reset does not include every reset 
 source is a ``reset_crossing`` (error): asserting that reset alone changes the source
 while the destination keeps sampling. Destinations without a reset are not checked.
 
+Hard macros (``macros``) are state elements: an IHP SRAM samples its port on ``A_CLK``
+(and its BIST port, when that clock is not tied off, on ``A_BIST_CLK``) and its word
+changes on ``A_CLK``, so a signal of another domain into it and its word into another
+domain are crossings like any other. A package with one clock input is the same on that
+clock, its analog inputs unchecked; the outputs of any other package change on their
+own, a domain of their own as asynchronous inputs are.
+
 Not checked: reconvergence of separately synchronized signals, pulse widths across clock
 ratios and glitch-free clock multiplexers.
 """
@@ -69,12 +76,25 @@ PASS_THROUGH = ("$_BUF_", "$_NOT_")
 _INDEX_RE = re.compile(r"^(.*)\[(\d+)\]$")
 
 
+@dataclass(frozen=True)
+class Box:
+    """A hard macro as the checker sees it: the input pins each of its clock pins samples,
+    and the clock its outputs change on. Outputs without one (an analog block, or a
+    block with no clock or several) are asynchronous sources, a domain of their own, and
+    its inputs are not checked."""
+
+    sampled: dict[str, tuple[str, ...]]
+    outputs: tuple[str, ...]
+    outputs_on: str | None
+
+
 @dataclass
 class State:
-    """A flip-flop or latch (one bit), a memory, or a clocked memory read port."""
+    """A flip-flop or latch (one bit), a memory, a clocked memory read port, or a hard
+    macro's pins that one of its clocks samples (``macro``)."""
 
     name: str  # the cell
-    kind: str  # flop | latch | memory | readport
+    kind: str  # flop | latch | memory | readport | macro
     clock: list[int]  # the clock (or latch enable) bits
     data: dict[str, list[int]]  # input pins that are data: D, E, synchronous R ...
     asyncs: dict[str, list[int]]  # asynchronous set, reset and load pins
@@ -151,12 +171,15 @@ def _param(value: Any) -> int:
     return int(s, 2) if set(s) <= {"0", "1"} and s else 0
 
 
-def _states(net: Netlist) -> dict[str, State]:
-    """Every state element, keyed by cell name."""
+def _states(net: Netlist, boxes: dict[str, Box]) -> dict[str, State]:
+    """Every state element, keyed by cell name; a hard macro's are keyed by the instance
+    and its clock pin, or by the instance alone for asynchronous outputs."""
     out: dict[str, State] = {}
     for name, c in net.cells.items():
         t, conn = c["type"], c.get("connections", {})
-        if t.startswith(("$_DFF", "$_SDFF", "$_ALDFF", "$_DLATCH", "$_SR_", "$_FF_")):
+        if t in boxes:
+            out.update(_macro_states(name, conn, boxes[t]))
+        elif t.startswith(("$_DFF", "$_SDFF", "$_ALDFF", "$_DLATCH", "$_SR_", "$_FF_")):
             latch = t.startswith("$_DLATCH")
             sync = t.startswith("$_SDFF")
             clock = conn.get("E" if latch else "C", [])
@@ -191,6 +214,24 @@ def _states(net: Netlist) -> dict[str, State]:
                     rp.label = net.label(rp.out[0]) if rp.out else rp.name
                     out[rp.name] = rp
     return out
+
+
+def _macro_states(name: str, conn: dict[str, list[Any]], box: Box) -> dict[str, State]:
+    outs = [b for pin in box.outputs for b in conn.get(pin, [])]
+    states: dict[str, State] = {}
+    for clk, pins in box.sampled.items():
+        bits = conn.get(clk, [])
+        if clk != box.outputs_on and not any(isinstance(b, int) for b in bits):
+            continue  # a second clock tied off (a BIST port): the pins it samples are unused
+        data = {p: conn[p] for p in pins if p in conn}
+        s = State(f"{name}#{clk}", "macro", bits, data, {}, outs if clk == box.outputs_on else [])
+        s.label = f"{name}.{clk}" if clk != box.outputs_on else name
+        states[s.name] = s
+    if box.outputs_on is None and outs:
+        s = State(name, "macro", [], {}, {}, outs)
+        s.label = name
+        states[name] = s
+    return states
 
 
 def _slice(bits: list[Any], ports: int, i: int) -> list[Any]:
@@ -298,9 +339,9 @@ class Graph:
         return []
 
 
-def build(module: dict[str, Any]) -> Graph:
+def build(module: dict[str, Any], boxes: dict[str, Box] | None = None) -> Graph:
     net = Netlist(module)
-    states = _states(net)
+    states = _states(net, boxes or {})
     by_out = {b: s.name for s in states.values() for b in s.out if isinstance(b, int)}
     reads: dict[int, tuple[str, list[int]]] = {}
     for name, c in net.cells.items():
@@ -402,6 +443,8 @@ class Checker:
                 s.domain = dom
                 if warn and s.kind != "memory":
                     self._clock_warning(s, warn)
+            elif s.kind == "macro":
+                s.domain = f"async:{s.label}"
 
     def _clock_warning(self, s: State, rule: str) -> None:
         text = {
@@ -918,7 +961,7 @@ def netlist(project: Project, workdir: Path) -> dict[str, Any]:
 def check(project: Project) -> dict[str, Any]:
     """Domains, crossings, accepted structures and findings, as data."""
     workdir = project.work_dir("cdc", empty=True)
-    g = build(netlist(project, workdir))
+    g = build(netlist(project, workdir), macro_boxes(project))
     c = Checker(g, project)
     c.run()
     _waive(c.findings, project)
@@ -940,7 +983,43 @@ def check(project: Project) -> dict[str, Any]:
         "waived": sum(bool(f.waived) for f in findings),
         "findings": [f.to_dict() for f in findings],
         "accepted": sorted(c.accepted, key=lambda a: (a["rule"], a["from"], a["to"])),
+        **(
+            {"macros": {s.label: s.domain for s in g.states.values() if s.kind == "macro"}}
+            if project.macros
+            else {}
+        ),
     }
+
+
+def macro_boxes(project: Project) -> dict[str, Box]:
+    """Each macro cell of the project as the checker sees it: an IHP SRAM samples its
+    port on ``A_CLK`` and its BIST port on ``A_BIST_CLK``, and its word changes on
+    ``A_CLK``; a package with one clock input samples its digital inputs on it and its
+    outputs change on it, and any other package's outputs are asynchronous."""
+    from chipleap.macro.sram import ports
+    from chipleap.rtl import macros
+
+    out: dict[str, Box] = {}
+    for sram in macros.cells(project):
+        inputs = [n for n, d, _ in ports(sram) if d == "input" and n not in ("A_CLK", "A_BIST_CLK")]
+        bist = tuple(n for n in inputs if n.startswith("A_BIST_"))
+        main = tuple(n for n in inputs if not n.startswith("A_BIST_"))
+        sampled = {"A_CLK": main, **({"A_BIST_CLK": bist} if bist else {})}
+        out[sram.cell] = Box(sampled, ("A_DOUT",), "A_CLK")
+    for m in macros.packages(project):
+        assert m.package is not None
+        man = macros.manifest(project, m.package)
+        pins = [p for p in man.pins if not p.is_supply]
+        clocks = [p.name for p in pins if p.kind == "clock" and p.direction == "input"]
+        outputs = tuple(p.name for p in pins if p.direction != "input")
+        if len(clocks) == 1:
+            # An analog input is no digital signal of a domain: it is not checked.
+            data = (p.name for p in pins if p.direction == "input" and p.kind == "signal")
+            sampled = {clocks[0]: tuple(data)}
+            out[man.name] = Box(sampled, outputs, clocks[0])
+        else:
+            out[man.name] = Box({}, outputs, None)
+    return out
 
 
 @runs_tools

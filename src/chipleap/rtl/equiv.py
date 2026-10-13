@@ -30,6 +30,12 @@ from reset instead: a miter of the two designs, reset in the first cycle, compar
 back as a counterexample from reset; none means the pair is equal for that many cycles,
 which the result states rather than calling it proved.
 
+A project's hard macros (``macros``) are boxes on both sides, read from their black boxes
+on a netlist side too. Once a side is flat, each instance becomes ports named after it
+and its pins: what goes into a macro is compared, and what comes out is an input both
+sides share. Kept as boxes, Yosys compared nothing at a macro's inputs, and a netlist that
+wrote an SRAM when it should read proved equal.
+
 Yosys and EQY run under ``chipleap.rtl.confine``, from scripts whose every path and name
 is quoted (``chipleap.rtl.quote``).
 """
@@ -87,6 +93,20 @@ class Side:
     label: str  # what the side is, for people
     script: list[str]  # Yosys commands that leave the side's top module in the design
     shown: list[str]  # the files it is made from, relative to the project
+    boxes: tuple[str, ...] = ()  # the hard macros' cells, turned into ports once flat
+
+
+def macro_boxes(project: Project) -> tuple[list[Path], tuple[str, ...]]:
+    """The project's hard macros: their black boxes, which a netlist side reads before the
+    netlist, and their cells. Once a side is flat, ``expose -evert`` turns every instance
+    of those cells into ports named after the instance and pin: its inputs become outputs
+    that are compared, its outputs inputs both sides share. Left as boxes, Yosys's
+    equivalence passes compare nothing at a macro's inputs: a design with a changed write
+    enable in front of an SRAM proved equal."""
+    from chipleap.rtl import macros
+
+    stubs = macros.stubs(project)
+    return stubs, tuple(s.stem for s in stubs)
 
 
 def _librelane_synth(project: Project) -> Path | None:
@@ -114,9 +134,10 @@ def _copy_in(project: Project, netlist: Path, workdir: Path, name: str) -> Path:
     return builddir.write_bytes(workdir, name, project.read(netlist))
 
 
-def _netlist(liberty: Path, netlist: Path) -> list[str]:
+def _netlist(liberty: Path, netlist: Path, boxes: list[Path] | None = None) -> list[str]:
     return [
         f"read_liberty -ignore_miss_func {q.yosys(liberty)}",
+        *(f"read_verilog -sv {q.yosys(b)}" for b in boxes or []),
         f"read_verilog {q.yosys(netlist)}",
     ]
 
@@ -137,6 +158,7 @@ def sides(
             "EQY 0.33 compares two netlists of liberty cells unsoundly (it proved a changed "
             "gate equal); use equivalence.engine: yosys for this pair"
         )
+    stubs, cells = macro_boxes(project)
     if pair == "rtl-synth":
         if gate_netlist is None:
             try:
@@ -146,7 +168,7 @@ def sides(
         files, raw = prepare_verilog(project, workdir)
         shown = [project.rel(s) for s in project.sources]
         if engine == "eqy":
-            gold = Side("the RTL", read_commands(project, files, raw), shown)
+            gold = Side("the RTL", read_commands(project, files, raw), shown, cells)
         else:
             gold = Side(
                 "the RTL, synthesized up to the liberty mapping",
@@ -156,11 +178,13 @@ def sides(
                     f"read_liberty -ignore_miss_func {q.yosys(liberty)}",
                 ],
                 shown,
+                cells,
             )
         gate = Side(
             "ChipLeap's synthesized netlist",
-            _netlist(liberty, _copy_in(project, gate_netlist, workdir, "gate.v")),
+            _netlist(liberty, _copy_in(project, gate_netlist, workdir, "gate.v"), stubs),
             [project.rel(gate_netlist)],
+            cells,
         )
         return gold, gate
     if pair == "synth-pnr":
@@ -173,8 +197,9 @@ def sides(
         final = run / "final" / "nl" / f"{project.top}.nl.v"
         gold = Side(
             "LibreLane's synthesized netlist",
-            _netlist(liberty, _copy_recorded(project, synth, workdir, "gold.v")),
+            _netlist(liberty, _copy_recorded(project, synth, workdir, "gold.v"), stubs),
             [project.rel(synth)],
+            cells,
         )
         gate_file = (
             _copy_in(project, gate_netlist, workdir, "gate.v")
@@ -183,11 +208,16 @@ def sides(
         )
         gate = Side(
             "the routed netlist",
-            _netlist(liberty, gate_file),
+            _netlist(liberty, gate_file, stubs),
             [project.rel(gate_netlist or final)],
+            cells,
         )
         return gold, gate
     raise ValueError(f"unknown pair {pair!r}; pairs: {', '.join(PAIRS)}")
+
+
+def _evert(side: Side) -> list[str]:
+    return [f"expose -evert -sep __ t:{q.plain(c)}" for c in side.boxes]
 
 
 def _stash(side: Side, top: str, name: str) -> list[str]:
@@ -195,6 +225,7 @@ def _stash(side: Side, top: str, name: str) -> list[str]:
         *side.script,
         f"prep -flatten -top {top}",
         "async2sync",
+        *_evert(side),
         f"rename {top} {name}",
         f"design -stash {name}",
     ]
@@ -236,11 +267,13 @@ def eqy_text(gold: Side, gate: Side, top: str) -> str:
             *gold.script,
             f"prep -top {t}",
             "async2sync",
+            *(["flatten", *_evert(gold)] if gold.boxes else []),
             "",
             "[gate]",
             *gate.script,
             f"prep -top {t}",
             "async2sync",
+            *(["flatten", *_evert(gate)] if gate.boxes else []),
             "",
             "[match *]",
             *nomatch,

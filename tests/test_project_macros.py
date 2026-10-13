@@ -198,6 +198,7 @@ def test_place_and_route_sizes_the_die_around_the_macro(
     assert entry["instances"]["u_mem"]["orientation"] == "N"
     assert set(entry["lib"]) == {"*_typ_*", "*_slow_*", "*_fast_*"}
     assert cfg["PDN_CFG"] == "dir::pdn.tcl"
+    assert cfg["RUN_POST_GRT_DESIGN_REPAIR"] is True
     script = (work / "pdn.tcl").read_text()
     assert "-inst_pattern {^u_mem$} -pin_pattern {^VDDARRAY!$} -power" in script
     x = entry["instances"]["u_mem"]["location"][0]
@@ -249,14 +250,10 @@ def test_a_die_of_the_projects_own_places_each_macro_where_it_says(
 
 
 @pytest.mark.parametrize(
-    "step", ["formal", "cdc", "equiv", "gls", "dft", "power", "ir_drop", "chip"]
+    "step", ["formal", "cdc", "equiv", "gls", "eco", "dft", "power", "ir_drop", "upf", "chip"]
 )
-def test_steps_without_a_macro_model_say_so(sram_project, step):
-    from chipleap.rtl.verify import run_step
-
-    r = run_step(load_project(sram_project), step)
-    assert r.status == "skipped"
-    assert r.summary.startswith(f"{step} does not model hard macros yet") and "u_mem" in r.summary
+def test_the_steps_after_synthesis_model_the_macros(sram_project, step):
+    assert macros.unsupported(load_project(sram_project), step) is None
 
 
 def test_commercial_tools_say_so_too(sram_project):
@@ -280,13 +277,9 @@ def test_the_example_simulates_with_the_pdks_model(sram_project):
 
 def test_the_assistants_tools_say_so_too(sram_project):
     from chipleap import mcp_server
-    from chipleap.mcp_server import ToolError
 
-    out = mcp_server.prove_rtl(str(sram_project))
+    out = mcp_server.synthesize_rtl(str(sram_project), tool="genus")
     assert out["status"] == "skipped" and "does not model hard macros" in out["summary"]
-    assert mcp_server.cdc_rtl(str(sram_project))["status"] == "skipped"
-    with pytest.raises(ToolError, match="does not model hard macros"):
-        mcp_server.eco_rtl(str(sram_project), ["repair:setup"])
 
 
 # A macro/v1 package beside an SRAM, named as a chip's macros are

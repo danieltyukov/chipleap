@@ -1,0 +1,71 @@
+# A 256-byte memory chip: one of IHP's SRAM macros as its core, inside a pad ring.
+# chipleap verify examples/memchip --steps chip
+schema: project/v1
+name: memchip
+description: A 256-byte memory chip, its core one of IHP's SRAM macros inside a pad
+  ring.
+top: memcore
+sources:
+- rtl/memcore.sv
+clocks:
+- port: clk_i
+  period_ns: 20
+resets:
+- port: rst_ni
+  active: low
+  sync: false
+tech: ihp-sg13g2
+macros:
+- instance: u_mem
+  cell: RM_IHPSG13_1P_256x8_c3_bm_bist
+chip:
+  name: memchip
+  pad_pitch_um: 100
+  core_um:
+  - 400
+  - 400
+  pads:
+    south:
+    - addr_i[0]
+    - addr_i[1]
+    - addr_i[2]
+    - vdd
+    - vss
+    - clk_i
+    - rst_ni
+    - req_i
+    - we_i
+    - null
+    east:
+    - addr_i[3]
+    - addr_i[4]
+    - addr_i[5]
+    - iovdd
+    - iovss
+    - addr_i[6]
+    - addr_i[7]
+    - rvalid_o
+    - null
+    - null
+    north:
+    - wdata_i[0]
+    - wdata_i[1]
+    - wdata_i[2]
+    - vdd
+    - vss
+    - wdata_i[3]
+    - wdata_i[4]
+    - wdata_i[5]
+    - wdata_i[6]
+    - wdata_i[7]
+    west:
+    - rdata_o[0]
+    - rdata_o[1]
+    - rdata_o[2]
+    - iovdd
+    - iovss
+    - rdata_o[3]
+    - rdata_o[4]
+    - rdata_o[5]
+    - rdata_o[6]
+    - rdata_o[7]
