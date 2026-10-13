@@ -92,7 +92,18 @@ TEMPLATE_KEYS = {
     "GRT_RESIZER_SETUP_SLACK_MARGIN": "number",
     "GRT_RESIZER_HOLD_SLACK_MARGIN": "number",
     "KLAYOUT_DRC_THREADS": "number",
+    # A project with hard macros (chipleap.rtl.pnr.macro_config).
+    "CORE_AREA": "number",
+    "FP_MACRO_HORIZONTAL_HALO": "number",
+    "FP_MACRO_VERTICAL_HALO": "number",
+    "MACROS": "macros",
+    "PDN_CFG": "pdn",
 }
+# The entries of a hard macro in MACROS that name files, and the corners of its liberty.
+MACRO_FILES = ("gds", "lef", "vh", "spice", "nl", "pnl")
+MACRO_LIB_PATTERNS = ("*", "*_typ_*", "*_slow_*", "*_fast_*")
+MACROS_MAX = 64
+ORIENTATIONS = ("N", "S", "FN", "FS", "E", "W", "FE", "FW")
 # Names of variables that run or locate code, whatever the project says.
 SCRIPT_KEY_RE = re.compile(
     r"SCRIPT|HOOK|PLUGIN|TCL|CFG|CONFIG|FILE|DIR|PATH|CMD|COMMAND|EXTRA|META"
@@ -371,8 +382,20 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
     """The routed run's configuration as an ECO passes it on: only ``TEMPLATE_KEYS`` and
     the project's own numeric or boolean ``pnr.librelane`` settings, each with a plain
     value, and every file it names one the run recorded beside it, unchanged."""
+    out = dict(cfg)
     for key, value in cfg.items():
         kind = TEMPLATE_KEYS.get(key)
+        if kind == "macros":
+            _macros(value, sealed)
+            continue
+        if kind == "pdn":
+            # ChipLeap's power grid script: the ECO resumes after the grid is built, so it
+            # is not passed on, and a script is never run from a configuration.
+            if value != "dir::pdn.tcl":
+                raise EcoError(f"the routed run's configuration sets PDN_CFG to {value!r}")
+            _check(sealed, sealed.root / "pdn.tcl", key)
+            del out[key]
+            continue
         if kind is None:
             own = project.pnr.librelane
             if key not in own or own[key] != value or SCRIPT_KEY_RE.search(key):
@@ -394,7 +417,66 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
                 raise EcoError(
                     f"the routed run's configuration sets {key} to {item!r}, not a number"
                 )
-    return dict(cfg)
+    return out
+
+
+def _macros(value: Any, sealed: Sealed) -> None:
+    """LibreLane's MACROS as ChipLeap wrote it: each cell a plain name, its files views
+    ChipLeap copied into ``macros/`` and the run recorded, its liberty by corner, and its
+    instances plain names with a location and an orientation."""
+    if not isinstance(value, dict) or not value or len(value) > MACROS_MAX:
+        raise EcoError("the routed run's MACROS is not a mapping of up to 64 macros")
+    for cell, entry in value.items():
+        _plain_text("MACROS", cell)
+        if not isinstance(entry, dict):
+            raise EcoError(f"the routed run's MACROS entry for {cell} is not a mapping")
+        for key, item in entry.items():
+            if key in MACRO_FILES:
+                for f in item if isinstance(item, list) else [item]:
+                    _macro_file(cell, f, sealed)
+            elif key == "lib":
+                if not isinstance(item, dict) or not set(item) <= set(MACRO_LIB_PATTERNS):
+                    raise EcoError(f"the routed run's MACROS lib of {cell} is not by corner")
+                for files in item.values():
+                    for f in files if isinstance(files, list) else [files]:
+                        _macro_file(cell, f, sealed)
+            elif key == "instances":
+                if not isinstance(item, dict) or not item:
+                    raise EcoError(f"the routed run's MACROS names no instance of {cell}")
+                for name, where in item.items():
+                    _plain_text("MACROS", name)
+                    loc = where.get("location") if isinstance(where, dict) else None
+                    if (
+                        not isinstance(loc, list)
+                        or len(loc) != 2
+                        or not all(isinstance(v, (int, float)) for v in loc)
+                        or where.get("orientation") not in ORIENTATIONS
+                        or set(where) - {"location", "orientation"}
+                    ):
+                        raise EcoError(f"the routed run's MACROS places {name} oddly: {where!r}")
+            elif key in ("spef", "sdf"):
+                if item:
+                    raise EcoError(f"the routed run's MACROS sets {key} for {cell}")
+            elif key == "json_h":
+                if item is not None:
+                    raise EcoError(f"the routed run's MACROS sets json_h for {cell}")
+            else:
+                raise EcoError(f"the routed run's MACROS sets {key} for {cell}")
+
+
+def _macro_file(cell: str, item: Any, sealed: Sealed) -> None:
+    text = _plain_text("MACROS", item.removeprefix("dir::") if isinstance(item, str) else item)
+    rel = Path(text)
+    if (
+        not item.startswith("dir::")
+        or rel.is_absolute()
+        or ".." in rel.parts
+        or rel.parts[:1] != ("macros",)
+    ):
+        raise EcoError(
+            f"the routed run's MACROS names {item!r} for {cell}, not a view ChipLeap copied"
+        )
+    _check(sealed, sealed.root / rel, "MACROS")
 
 
 def _recorded(key: str, item: Any, kind: str, sealed: Sealed) -> None:

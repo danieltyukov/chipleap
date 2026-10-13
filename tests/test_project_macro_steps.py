@@ -426,3 +426,55 @@ def test_openroad_places_the_sram_inside_its_power_domain(tmp_path):
     mem = next(d for d in r.data["domains"] if d["name"] == "mem")
     # Three standard cells and the SRAM, all inside the domain's area.
     assert mem["cells"] == 4 and mem["placed_inside"] == 4 and mem["placed_outside"] == 0
+
+
+# ECO: the routed run's macros are passed on as ChipLeap wrote them; its PDN script is not.
+
+
+def test_an_eco_passes_on_the_macros_chipleap_recorded_and_never_the_pdn_script(counter_project):
+    from chipleap.rtl import eco as E
+    from chipleap.rtl.pnr import seal_routed
+    from test_project_eco import routed
+
+    routed(counter_project)
+    pnr = counter_project / "build" / "pnr"
+    views = pnr / "macros" / CELL
+    views.mkdir(parents=True)
+    for name in (f"{CELL}.lef", f"{CELL}.gds", f"{CELL}_typ_1p20V_25C.lib"):
+        (views / name).write_text("x\n")
+    (pnr / "pdn.tcl").write_text("source $::env(SCRIPTS_DIR)/openroad/common/pdn_cfg.tcl\n")
+    seal_routed(pnr, with_macros=True)
+    p = load_project(counter_project)
+    _, sealed, _, _ = E.base(p)
+    at = f"dir::macros/{CELL}"
+    entry = {
+        "gds": [f"{at}/{CELL}.gds"],
+        "lef": [f"{at}/{CELL}.lef"],
+        "lib": {"*_typ_*": [f"{at}/{CELL}_typ_1p20V_25C.lib"]},
+        "instances": {"u_mem": {"location": [60.48, 20.0], "orientation": "N"}},
+        "spef": {},
+        "sdf": {},
+        "json_h": None,
+    }
+    good = {"DESIGN_NAME": "counter", "CORE_AREA": [0, 0, 100, 100], "MACROS": {CELL: entry}}
+    out = E._settings(p, {**good, "PDN_CFG": "dir::pdn.tcl"}, sealed)
+    assert out == good  # the grid is built before the state an ECO resumes from
+    for bad, why in [
+        ({"PDN_CFG": "dir::src/evil.tcl"}, "PDN_CFG"),
+        ({"lef": ["dir::src/counter.v"]}, "not a view ChipLeap copied"),
+        ({"lef": [f"{at}/other.lef"]}, "not a file ChipLeap recorded"),
+        ({"lef": [f"dir::macros/../../../etc/{CELL}.lef"]}, "not a view ChipLeap copied"),
+        ({"lib": {"nom_*": [f"{at}/{CELL}.lef"]}}, "not by corner"),
+        ({"instances": {"u_mem": {"location": [1, 2], "orientation": "R90"}}}, "oddly"),
+        ({"instances": {"u mem;": {"location": [1, 2], "orientation": "N"}}}, "tool script"),
+        ({"nl": ["expr::[exec touch pwned]"]}, "tool script"),
+        ({"spef": {"*": [f"{at}/{CELL}.lef"]}}, "sets spef"),
+        ({"pnr_hook": 1}, "sets pnr_hook"),
+    ]:
+        cfg = dict(good)
+        if "PDN_CFG" in bad:
+            cfg.update(bad)
+        else:
+            cfg["MACROS"] = {CELL: {**entry, **bad}}
+        with pytest.raises(E.EcoError, match=why):
+            E._settings(p, cfg, sealed)
