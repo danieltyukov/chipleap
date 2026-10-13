@@ -29,6 +29,7 @@ from chipleap.chip.floorplan import BOND_UM, HALO_UM, Floorplan
 from chipleap.chip.io import IO, IoCell, chip_lef, lef_path, liberty
 from chipleap.chip.netlist import Binding
 from chipleap.macro.layer import Imported, librelane_config
+from chipleap.macro.sram import SramViews, librelane_macros
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.verify.pnr import PnrError, run_librelane, signoff
@@ -74,10 +75,15 @@ def config(
     verilog: Mapping[str, Any],
     clock_period: float,
     flow_dir: Path,
+    srams: Mapping[str, SramViews] | None = None,
 ) -> dict[str, Any]:
-    """The LibreLane configuration; the files it names are in ``flow_dir``."""
-    placed = [(m.inst, m.cell, m.x, m.y, m.orient) for m in plan.macros]
-    macros, macro_cdls = librelane_config(imported.views, placed, flow_dir)
+    """The LibreLane configuration; the files it names are in ``flow_dir``. ``srams``
+    are the core's SRAMs' added views: their liberty at every corner and black boxes."""
+    placed = [(m.inst, m.cell, m.x, m.y, m.orient) for m in plan.every_macro()]
+    if srams:
+        macros, macro_cdls = librelane_macros(srams, placed, flow_dir, imported.views)
+    else:
+        macros, macro_cdls = librelane_config(imported.views, placed, flow_dir)
     first_clock = next(iter(binding.clocks), None)
     cfg: dict[str, Any] = {
         "meta": {

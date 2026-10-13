@@ -281,6 +281,10 @@ def core_ports(project: Project, workdir: Path) -> dict[str, Port]:
     return parse_ports(json.loads(out.read_text()), project.top)
 
 
+# The core's instance in the chip top; its own macros are inside it, as u_core.<path>.
+CORE_INST = "u_core"
+
+
 # Binding
 
 
@@ -544,7 +548,7 @@ def _check_names(b: Binding, config: ChipConfig, cells: set[str], top: str) -> N
     """Every name the chip top declares is a Verilog identifier, no keyword, and names
     one thing; a macro's cell is a module name of its own."""
     owners: dict[str, str] = {}
-    instances = {*b.io, *(m.instance for m in config.macros), "u_core"}
+    instances = {*b.io, *(m.instance for m in config.macros), CORE_INST}
     for kind, names in (
         ("port", b.chip_ports),
         ("net", b.nets()),
@@ -595,7 +599,7 @@ def chip_top(
     for p in b.ports.values():
         nets = [b.core_nets[bit] for bit in p.bits()]
         core.append(f".{p.name}({nets[0] if len(nets) == 1 else '{' + ', '.join(nets) + '}'})")
-    lines.append(f"  {top} {'#(' + params + ') ' if params else ''}u_core (")
+    lines.append(f"  {top} {'#(' + params + ') ' if params else ''}{CORE_INST} (")
     lines.append(",\n".join(f"    {c}" for c in core))
     lines.append("  );")
     for m in plan.macros:
@@ -721,4 +725,5 @@ def pins_def(config: ChipConfig, b: Binding, plan: Floorplan, pad_size: tuple[fl
 
 def placement(plan: Floorplan) -> str:
     """LibreLane's MACRO_PLACEMENT_CFG: every ring cell and macro, fixed."""
-    return "".join(f"{c.inst} {c.x:.3f} {c.y:.3f} {c.orient}\n" for c in (*plan.ring, *plan.macros))
+    cells = (*plan.ring, *plan.every_macro())
+    return "".join(f"{c.inst} {c.x:.3f} {c.y:.3f} {c.orient}\n" for c in cells)

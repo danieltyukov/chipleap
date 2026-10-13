@@ -758,7 +758,7 @@ def assemble_chip(project: str) -> dict[str, Any]:
     from chipleap.chip.assemble import chip
 
     p = _project(project)
-    return _guarded("chip", lambda: chip(p))
+    return _guarded("chip", lambda: chip(p), p)
 
 
 def coverage_gaps(

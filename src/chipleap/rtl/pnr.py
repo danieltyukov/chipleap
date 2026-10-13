@@ -36,7 +36,7 @@ from chipleap.rtl.openroad import ECO_MANIFEST, PNR_MANIFEST, RUN_TAG
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
-from chipleap.verify.pnr import PnrError, PnrResult, parse, run_librelane, signoff
+from chipleap.verify.pnr import MACRO_REPAIR, PnrError, PnrResult, parse, run_librelane, signoff
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane
 
@@ -177,6 +177,9 @@ def config(project: Project, workdir: Path) -> dict[str, Any]:
     if project.dft is not None and project.dft.insert:
         src = builddir.work_dir(workdir, "src", empty=True)
         cfg.update(_scan_netlist(project, workdir, src))
+        # The scan netlist instantiates the hard macros as the RTL does.
+        if project.macros:
+            cfg.update(macro_config(project, workdir))
         return _finish(project, workdir, cfg)
     cfg.update(verilog_config(project, workdir))
     if project.parameters:
@@ -279,6 +282,7 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
         views,
     )
     return {
+        **MACRO_REPAIR,
         "FP_SIZING": "absolute",
         "DIE_AREA": [0, 0, *fp.die],
         "CORE_AREA": list(fp.core),

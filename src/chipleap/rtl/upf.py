@@ -31,6 +31,7 @@ from chipleap.rtl.openroad import (
     OpenroadError,
     OpenroadUnavailable,
     failure,
+    macro_views,
     pdk_views,
     read_limited,
 )
@@ -44,6 +45,8 @@ ROW_UM = 3.78
 CORE_SPACE_UM = 5.0
 # What OpenROAD keeps clear around a domain's region; measured on the UART, 10 to 12 um.
 HALO_UM = 12.0
+# The space between a hard macro and its region's edge, or the macro below it.
+MACRO_MARGIN_UM = 4.0
 CROSSINGS_SHOWN = 10
 
 
@@ -196,45 +199,119 @@ def crossings(flat: Flat, lib: CellLib, domains: tuple[PowerDomain, ...]) -> lis
 
 
 def domain_areas(
-    flat: Flat, lib: CellLib, project: Project
-) -> tuple[dict[str, float], dict[str, tuple[float, float, float, float]], float]:
-    """Each domain's cell area, the areas the UPF gives, and the side of the square core.
-    A domain without an area gets a strip of the core's full height, as wide as its share
-    of the cells, so every domain is placed at the project's utilisation. OpenROAD keeps
-    about ``HALO_UM`` clear around a region, so the core grows by that much per domain."""
+    flat: Flat, lib: CellLib, project: Project, macros: frozenset[str] = frozenset()
+) -> tuple[
+    dict[str, float],
+    dict[str, tuple[float, float, float, float]],
+    float,
+    list[tuple[str, float, float]],
+]:
+    """Each domain's cell area, the areas the UPF gives, the side of the square core and
+    where each hard macro (a cell of ``macros``) goes. A domain without an area gets a
+    strip of the core's full height, as wide as its share of the standard cells and at
+    least as wide as its widest macro, so every domain is placed at the project's
+    utilisation. Each macro sits in its domain's strip, the top domain's to the right of
+    the strips, one above another. OpenROAD keeps about ``HALO_UM`` clear around a
+    region, so the core grows by that much per domain."""
     upf = project.upf
     assert upf is not None
     cell_area: dict[str, float] = {d.name: 0.0 for d in upf.domains}
-    for _, cell, dom, _ in flat.cells:
+    std_area: dict[str, float] = {d.name: 0.0 for d in upf.domains}
+    placed: dict[str, list[tuple[str, float, float]]] = {d.name: [] for d in upf.domains}
+    for path, cell, dom, _ in flat.cells:
         w, h = lib.sizes.get(cell, (0.0, 0.0))
         cell_area[dom] += w * h
-    total = sum(cell_area.values())
+        if cell in macros:
+            placed[dom].append((path, w, h))
+        else:
+            std_area[dom] += w * h
+    total = sum(std_area.values())
     side = math.sqrt(total / (project.pnr.utilisation / 100)) if total else 10.0
     others = [d for d in upf.domains if d.elements]
-    core = side + HALO_UM * len(others) + 2
+    for d in others:
+        if placed[d.name] and not std_area[d.name]:
+            # Its region would hold nothing to place, and OpenROAD's global placement
+            # diverges on such a region.
+            raise UpfError(
+                f"power domain {d.name} holds only hard macros "
+                f"({', '.join(p for p, _, _ in placed[d.name])}); OpenROAD places a domain by "
+                "its standard cells: put the macros in a domain with logic"
+            )
+    top = next(d.name for d in upf.domains if not d.elements)
+
+    def stack(name: str) -> tuple[float, float]:
+        boxes = placed[name]
+        if not boxes:
+            return 0.0, 0.0
+        width = max(w for _, w, _ in boxes) + 2 * MACRO_MARGIN_UM
+        return width, sum(h + MACRO_MARGIN_UM for _, _, h in boxes) + MACRO_MARGIN_UM
+
+    widths: dict[str, float] = {}
+    for d in others:
+        share = side * std_area[d.name] / total if total else 1.0
+        widths[d.name] = max(share, stack(d.name)[0])
+    top_width, _ = stack(top)
+    tall = max((stack(d.name)[1] for d in upf.domains), default=0.0)
+    # Beside the strips, the top domain's own cells and macros need their share too.
+    rest = (side * std_area[top] / total if total else 1.0) + top_width
+    # OpenROAD's global placement counts a macro inside a region twice for the top level,
+    # as part of the region (with a halo all round) and as a fixed cell, so the square
+    # core's area must hold the strips (S wide with their halos, the core's height and
+    # two halos), every macro and the top domain's cells: c * c >= S * (c + 2 H) + M + T.
+    strips = sum(w + 2 * HALO_UM for w in widths.values())
+    fixed = sum(w * h for boxes in placed.values() for _, w, h in boxes)
+    own = std_area[top] / (project.pnr.utilisation / 100)
+    need = 2 * HALO_UM * strips + fixed + own
+    square = (strips + math.sqrt(strips * strips + 4 * need)) / 2
+    core = max(
+        side + HALO_UM * len(others) + 2,
+        sum(widths.values()) + HALO_UM * len(others) + rest + 2,
+        square + 2,
+        tall + 2 * ROW_UM + 2,
+    )
     areas: dict[str, tuple[float, float, float, float]] = {}
+    sites: list[tuple[str, float, float]] = []
     x = CORE_SPACE_UM
     y0, y1 = CORE_SPACE_UM + ROW_UM, CORE_SPACE_UM + core - ROW_UM
+
+    def put(name: str, x0: float) -> None:
+        y = y0 + MACRO_MARGIN_UM
+        for path, _, h in placed[name]:
+            sites.append((path, round(x0 + MACRO_MARGIN_UM, 2), round(y, 2)))
+            y += h + MACRO_MARGIN_UM
+
     for d in others:
         if d.area_um is not None:
             areas[d.name] = d.area_um
+            put(d.name, d.area_um[0])
             continue
-        width = side * cell_area[d.name] / total if total else 1.0
+        width = widths[d.name]
         areas[d.name] = (round(x, 2), round(y0, 2), round(x + width, 2), round(y1, 2))
+        put(d.name, x)
         x += width + HALO_UM
-    return cell_area, areas, round(core, 2)
+    if placed[top]:
+        put(top, CORE_SPACE_UM + core - top_width)
+    return cell_area, areas, round(core, 2), sites
 
 
 def upf_script(
-    project: Project, files: dict[str, Any], netlist: str, upf_file: str, core: float
+    project: Project,
+    files: dict[str, Any],
+    netlist: str,
+    upf_file: str,
+    core: float,
+    sites: list[tuple[str, float, float]] | None = None,
 ) -> str:
     density = project.pnr.density / 100
     cs = CORE_SPACE_UM
     die = round(core + 2 * cs, 2)
+    macro = files.get("macros", {"lefs": [], "liberty": {}})
     lines = [
         f"read_lef {q.tcl(files['tech_lef'])}",
         *(f"read_lef {q.tcl(f)}" for f in files["cell_lefs"]),
+        *(f"read_lef {q.tcl(f)}" for f in macro["lefs"]),
         f"read_liberty {q.tcl(files['liberty']['typ'])}",
+        *(f"read_liberty {q.tcl(f)}" for f in macro["liberty"].get("typ", [])),
         f"read_verilog {q.tcl(netlist)}",
         f"link_design -hier {q.tcl(project.top)}",
         f"read_upf -file {q.tcl(upf_file)}",
@@ -242,6 +319,17 @@ def upf_script(
         f"-core_area {{{q.number(cs)} {q.number(cs)} {q.number(cs + core)} {q.number(cs + core)}}} "
         f"-site {q.tcl(SITE)}",
         "make_tracks",
+        # The hard macros, fixed where their domains have room, and no row under them.
+        *(
+            f"place_macro -macro_name {q.tcl(path)} -location "
+            f"{{{q.number(x)} {q.number(y)}}} -orientation R0"
+            for path, x, y in sites or []
+        ),
+        *(
+            [f"cut_rows -halo_width_x {q.number(2.0)} -halo_width_y {q.number(2.0)}"]
+            if sites
+            else []
+        ),
         "place_pins -hor_layers Metal3 -ver_layers Metal2",
         f"global_placement -skip_io -density {q.number(density)}",
         "detailed_placement",
@@ -308,13 +396,16 @@ def analyze(project: Project) -> UpfResult:
     except SynthError as exc:
         raise UpfError(f"synthesis failed: {exc}") from exc
     nl = read_netlist([synth.netlist])
-    lib = read_lef("\n".join(read_limited(p) for p in views.cell_lefs))
+    boxes = macro_views(project, work=builddir.work_dir(work, "macro_views"))
+    macro_lib = read_lef("\n".join(read_limited(p) for p in boxes.lefs))
+    lib = read_lef("\n".join(read_limited(p) for p in (*views.cell_lefs, *boxes.lefs)))
     flat = flatten(nl, project.top, upf.domains)
-    cell_area, areas, core = domain_areas(flat, lib, project)
+    cell_area, areas, core, sites = domain_areas(flat, lib, project, frozenset(macro_lib.sizes))
     upf_file = builddir.write_text(work, f"{project.top}.upf", write_upf(upf, areas))
     job = Job(work, "upf")
     files = views.stage_all(job)
-    script = upf_script(project, files, job.stage(synth.netlist), job.stage(upf_file), core)
+    files["macros"] = boxes.stage_all(job)
+    script = upf_script(project, files, job.stage(synth.netlist), job.stage(upf_file), core, sites)
     log, code = job.run(script)
     if code != 0 or "CHIPLEAP-UPF end" not in log:
         raise failure("OpenROAD with the UPF", log, code)

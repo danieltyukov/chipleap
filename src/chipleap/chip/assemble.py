@@ -28,7 +28,7 @@ from chipleap.chip.merge import MergeError
 from chipleap.chip.netlist import NetlistError
 from chipleap.chip.pdn import PdnError
 from chipleap.chip.run import ToolError, klayout, plain, private_dir, python_with_klayout, run
-from chipleap.macro import layer
+from chipleap.macro import layer, sram
 from chipleap.macro.layer import MacroImportError
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, parse_toml
 from chipleap.rtl import builddir, macros
@@ -119,7 +119,23 @@ def plan_chip(project: Project) -> dict[str, Any]:
     if pdk is None:
         raise ChipError(missing_pdk())
     cells = io.read_lef(io.lef_path(pdk).read_text())
-    plan = floorplan.plan(chip, cells, manifest_sizes(project))
+    sizes = manifest_sizes(project)
+    # The core's SRAMs at their sizes in the PDK's LEF, its packages at their manifests'.
+    srams = macros.available(project, pdk) if macros.srams(project) else {}
+    for m in project.macros:
+        inst = f"{netlist.CORE_INST}.{m.flat}"
+        if m.package is None:
+            s = srams[m.cell]
+            sizes[inst] = (s.cell, s.width_um, s.height_um)
+        else:
+            man = macros.manifest(project, m.package)
+            sizes[inst] = (man.name, man.width_um, man.height_um)
+    inner = [(f"{netlist.CORE_INST}.{m.flat}", m.at_um, m.orientation) for m in project.macros]
+    # An SRAM is under pdngen's macro grid; a package's supply pins are strapped.
+    gridded = frozenset(
+        f"{netlist.CORE_INST}.{m.flat}" for m in project.macros if m.package is None
+    )
+    plan = floorplan.plan(chip, cells, sizes, core_macros=inner, gridded=gridded)
     return {"name": chip.name, **plan.to_dict()}
 
 
@@ -180,18 +196,27 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     verilog = verilog_config(project, flow_dir)
     clocks = {c.port: c.period_ns for c in project.clocks}
     binding = netlist.bind(chip, ports, imported.views, imported.cells, clocks, project.top)
+    # The core's own hard macros (its macros section): views of their own, in flow/core,
+    # each instance inside the core's (u_core.<path>), placed with the chip's macros.
+    core_views, srams, core_cells = core_macros(project, flow_dir)
+    clash = sorted(set(core_views) & set(imported.views))
+    if clash:
+        raise NetlistError(f"macro {clash[0]} is both one of the chip's and one of the core's")
+    every = layer.Imported({**imported.views, **core_views}, {**imported.cells, **core_cells})
     sizes = {
-        inst: (cell, imported.views[cell].width, imported.views[cell].height)
-        for inst, cell in imported.cells.items()
+        inst: (cell, every.views[cell].width, every.views[cell].height)
+        for inst, cell in every.cells.items()
     }
-    plan = floorplan.plan(chip, cells, sizes, binding.directions)
+    inner = [(f"{netlist.CORE_INST}.{m.flat}", m.at_um, m.orientation) for m in project.macros]
+    gridded = frozenset(i for i, c in every.cells.items() if not every.views[c].supply_hookup)
+    plan = floorplan.plan(chip, cells, sizes, binding.directions, inner, gridded)
     if any(not c.cell for c in plan.ring):
         raise NetlistError("a pad has no IO cell")
     try:
         core = macros.rtl_modules(project, builddir.work_dir(work, "modules"))
     except macros.MacroStepError as exc:
         raise NetlistError(str(exc)) from None
-    merge.check_modules(core, imported.views, chip.name, sorted({c.cell for c in plan.ring}))
+    merge.check_modules(core, every.views, chip.name, sorted({c.cell for c in plan.ring}))
     flow.write_io(flow_dir, pdk, cells, sorted({c.cell for c in plan.ring}))
     pad = cells[io.PAD_CELLS["in"]]
     if f"dir::src/{chip.name}.v" in verilog.get("VERILOG_FILES", []):
@@ -206,19 +231,34 @@ def prepare(project: Project, pdk: Path) -> Prepared:
         flow_dir, "pins.def", netlist.pins_def(chip, binding, plan, (pad.width, pad.height))
     )
     builddir.write_text(flow_dir, "macro_placement.cfg", netlist.placement(plan))
-    placed = {m.inst: (m, imported.views[m.cell]) for m in plan.macros}
+    placed = {m.inst: (m, every.views[m.cell]) for m in plan.every_macro()}
     builddir.write_text(flow_dir, "pdn.tcl", pdn.script(placed, plan.core[1]))
     clk = project.fastest_clock
     cfg = flow.config(
         chip,
         plan,
         binding,
-        imported,
+        every,
         verilog,
         clk.period_ns if clk else DEFAULT_PERIOD_NS,
         flow_dir,
+        srams,
     )
-    return Prepared(work, flow_dir, pdk, cells, imported, binding, plan, cfg, spec)
+    return Prepared(work, flow_dir, pdk, cells, every, binding, plan, cfg, spec)
+
+
+def core_macros(
+    project: Project, flow_dir: Path
+) -> tuple[dict[str, layer.MacroView], dict[str, sram.SramViews], dict[str, str]]:
+    """The core's hard macros in the chip: their views (in ``flow_dir/core``), each SRAM's
+    added views, and each instance's cell by its name in the chip (``u_core.<path>``)."""
+    if not project.macros:
+        return {}, {}, {}
+    try:
+        views, srams, cells = macros.views(project, builddir.work_dir(flow_dir, "core"))
+    except (macros.MacroStepError, MacroImportError) as exc:
+        raise NetlistError(f"the core's macros: {exc}") from None
+    return views, srams, {f"{netlist.CORE_INST}.{i}": c for i, c in cells.items()}
 
 
 def run_script(script: str, plan_file: Path, cwd: Path, read: list[Path], log: str) -> None:
@@ -281,13 +321,24 @@ def lvs(p: Prepared, nofill: Path, outs: dict[str, Path], name: str) -> dict[str
     """IHP's LVS deck on the chip without its IO cells."""
     lvs_dir = builddir.work_dir(p.work, "lvs", empty=True)
     io_cdl = (p.flow_dir / "io" / f"{io.IO}.cdl").read_text()
+    # IHP's SRAMs are compared as boxes, as the IO cells are: IHP's LVS deck does not
+    # match IHP's own SRAM at transistor level (the dummy delay cell's metal resistor),
+    # so what is checked is every net that reaches each of their pins.
+    abstract = abstract_macros(p)
     extra = [flow.std_cell_cdl(outs["resolved"]).read_text()]
-    extra += [v.spice.read_text() for v in p.imported.views.values()]
-    inputs = checks.lvs_inputs(outs["cdl"].read_text(), io_cdl, p.plan, p.cells, extra)
+    extra += [
+        v.spice.read_text()
+        for v in p.imported.views.values()
+        if v.cell not in {a.placed.cell for a in abstract.values()}
+    ]
+    inputs = checks.lvs_inputs(outs["cdl"].read_text(), io_cdl, p.plan, p.cells, extra, abstract)
     netlist_file = builddir.write_text(lvs_dir, f"{name}_lvs.cdl", inputs.netlist)
     view = lvs_dir / f"{name}_lvs.gds"
+    cells = [a.placed.cell for a in abstract.values()]
     plan_file = builddir.write_text(
-        lvs_dir, "lvs_view.json", checks.dump(checks.lvs_plan(p.plan, name, inputs, nofill, view))
+        lvs_dir,
+        "lvs_view.json",
+        checks.dump(checks.lvs_plan(p.plan, name, inputs, nofill, view, cells)),
     )
     run_script("lvs_view.py", plan_file, lvs_dir, [nofill.parent], "lvs_view.log")
     log = run_lvs(p.pdk, lvs_dir, view, netlist_file, name)
@@ -298,7 +349,24 @@ def lvs(p: Prepared, nofill: Path, outs: dict[str, Path], name: str) -> dict[str
         "instances": inputs.instances,
         "view": _rel(p, view),
         "netlist": _rel(p, netlist_file),
+        **({"macros_as_boxes": sorted(abstract)} if abstract else {}),
     }
+
+
+def abstract_macros(p: Prepared) -> dict[str, checks.Abstract]:
+    """The macros the chip's LVS compares as boxes: the PDK's own (IHP's SRAMs), by
+    instance."""
+    out: dict[str, checks.Abstract] = {}
+    for m in p.plan.every_macro():
+        view = p.imported.views[m.cell]
+        if view.source != "pdk":
+            continue
+        ports = checks.subckt_ports(view.spice.read_text(errors="replace")).get(view.cell)
+        if not ports:
+            raise CheckError(f"{view.cell}'s netlist has no subcircuit {view.cell}")
+        pins = {pin.name: list(pin.shapes) for pin in view.pins}
+        out[m.inst] = checks.Abstract(m, pins, (view.width, view.height), ports)
+    return out
 
 
 def _rel(p: Prepared, path: Path) -> str:
@@ -413,10 +481,13 @@ def drc(p: Prepared, final: Path, name: str) -> checks.DrcResult:
         ],
         (),
     )
-    return drc_result(drc_dir, name, code, log)
+    pdk_cells = {v.cell for v in p.imported.views.values() if v.source == "pdk"}
+    return drc_result(drc_dir, name, code, log, frozenset(pdk_cells))
 
 
-def drc_result(drc_dir: Path, name: str, code: int, log: str) -> checks.DrcResult:
+def drc_result(
+    drc_dir: Path, name: str, code: int, log: str, pdk_cells: frozenset[str] = frozenset()
+) -> checks.DrcResult:
     """The violations of a DRC run, after checking it ran: run_drc.py exits 0 when clean
     and 1 with violations, and merges the tables into one report; every expected table's
     log must be there and the code must agree with the report."""
@@ -426,8 +497,8 @@ def drc_result(drc_dir: Path, name: str, code: int, log: str) -> checks.DrcResul
         what = f"no {', '.join(missing)} table" if missing else f"exit {code}"
         raise ToolError(f"IHP's DRC did not finish ({what}): {_last(log)}")
     result = checks.DrcResult()
-    checks.read_lyrdb(report, result)
-    if (code == 1) != (result.total > 0):
+    checks.read_lyrdb(report, result, pdk_cells)
+    if (code == 1) != (result.total + sum(result.in_pdk_macros.values()) > 0):
         raise ToolError(
             f"IHP's DRC exited {code} with {result.total} violations in its report; one of "
             "them is wrong"
@@ -496,7 +567,7 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
                 "orientation": m.orient,
                 "warnings": p.imported.views[m.cell].warnings,
             }
-            for m in p.plan.macros
+            for m in p.plan.every_macro()
         ],
         "warnings": p.binding.warnings,
         "merged_names": merged,
@@ -513,6 +584,11 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
             "violations": drc_result.total,
             "rules": dict(sorted(drc_result.violations.items())),
             "recommended_rules": "not checked",
+            **(
+                {"pin_markers_in_pdk_macros": dict(sorted(drc_result.in_pdk_macros.items()))}
+                if drc_result.in_pdk_macros
+                else {}
+            ),
         },
         "supply_hookup": hookup,
         "precheck": pre,
@@ -570,9 +646,16 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
         slow = next((c for c in io_t["corners"] if c["corner"] == "slow"), None)
         if slow is not None and slow["setup_slack_ns"] is not None:
             timing = f", timing met through the pads ({slow['setup_slack_ns']:+.3f} ns at the slow corner)"
+    boxes = data["lvs"].get("macros_as_boxes", [])
+    lvs = "LVS clean on IHP's deck"
+    if boxes:
+        lvs += f" ({', '.join(boxes)} compared as {'boxes' if len(boxes) > 1 else 'a box'})"
+    markers = sum(data["drc"].get("pin_markers_in_pdk_macros", {}).values())
+    pdk = f"; {markers} pin markers off the grid inside the PDK's own macros" if markers else ""
     return True, (
-        f"{head}; LVS clean on IHP's deck, DRC clean on IHP's deck (density included, "
-        f"recommended rules not checked), supplies reach the ring, precheck passed{timing}"
+        f"{head}; {lvs}, DRC clean on IHP's deck (density included, "
+        f"recommended rules not checked{pdk}), supplies reach the ring, precheck "
+        f"passed{timing}"
     )
 
 

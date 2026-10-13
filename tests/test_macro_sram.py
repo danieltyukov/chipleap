@@ -204,3 +204,14 @@ def test_the_model_lints_clean(tmp_path):
             text=True,
         )
         assert out.returncode == 0, out.stderr
+
+
+def test_the_models_catalog_is_the_pdks():
+    """The model prices buffers from IHP_1P without the PDK; it must be what the PDK has."""
+    from chipleap.chip import io
+    from chipleap.macro.sram import IHP_1P, catalog
+
+    pdk = io.pdk_dir()
+    if pdk is None:
+        pytest.skip("no IHP PDK")
+    assert catalog(pdk) == list(IHP_1P)
