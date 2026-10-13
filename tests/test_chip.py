@@ -235,6 +235,29 @@ def test_macros_are_placed_in_the_core_apart_by_their_halos():
         floorplan.plan(chip(macros=near), CELLS, {"m1": ("a", 20.0, 40.0), "m2": ("a", 20.0, 40.0)})
 
 
+def test_the_cores_macros_are_placed_with_the_chips_but_stay_inside_the_core():
+    m = [ChipMacro("m1", Path("x"))]
+    sizes = {"m1": ("a", 20.0, 40.0), "u_core.u_mem": ("ram", 100.0, 60.0)}
+    inner = [("u_core.u_mem", (40.0, 20.0), "N")]
+    plan = floorplan.plan(chip(macros=m), CELLS, sizes, core_macros=inner)
+    # The chip top instantiates its own macros; the core's are inside u_core.
+    assert [x.inst for x in plan.macros] == ["m1"]
+    (mem,) = plan.core_macros
+    assert mem.inst == "u_core.u_mem" and mem.cell == "ram"
+    assert mem.x == pytest.approx(plan.core[0] + 40.32) and mem.y >= plan.core[1] + 20.0
+    assert [x.inst for x in plan.every_macro()] == ["m1", "u_core.u_mem"]
+    assert "u_core.u_mem" in netlist.placement(plan)
+    assert plan.to_dict()["macros"][1]["instance"] == "u_core.u_mem"
+    # Kept apart from the chip's by the same halos.
+    with pytest.raises(FloorplanError, match="halo"):
+        floorplan.plan(
+            chip(macros=[ChipMacro("m1", Path("x"), at_um=(0.0, 0.0))]),
+            CELLS,
+            sizes,
+            core_macros=[("u_core.u_mem", (25.0, 0.0), "N")],
+        )
+
+
 def test_a_library_without_a_cell_is_refused():
     cells = dict(CELLS)
     del cells["sg13g2_Filler200"]

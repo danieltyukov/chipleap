@@ -28,7 +28,7 @@ from chipleap.chip.merge import MergeError
 from chipleap.chip.netlist import NetlistError
 from chipleap.chip.pdn import PdnError
 from chipleap.chip.run import ToolError, klayout, plain, private_dir, python_with_klayout, run
-from chipleap.macro import layer
+from chipleap.macro import layer, sram
 from chipleap.macro.layer import MacroImportError
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, parse_toml
 from chipleap.rtl import builddir, macros
@@ -119,7 +119,19 @@ def plan_chip(project: Project) -> dict[str, Any]:
     if pdk is None:
         raise ChipError(missing_pdk())
     cells = io.read_lef(io.lef_path(pdk).read_text())
-    plan = floorplan.plan(chip, cells, manifest_sizes(project))
+    sizes = manifest_sizes(project)
+    # The core's SRAMs at their sizes in the PDK's LEF, its packages at their manifests'.
+    srams = macros.available(project, pdk) if macros.srams(project) else {}
+    for m in project.macros:
+        inst = f"{netlist.CORE_INST}.{m.flat}"
+        if m.package is None:
+            s = srams[m.cell]
+            sizes[inst] = (s.cell, s.width_um, s.height_um)
+        else:
+            man = macros.manifest(project, m.package)
+            sizes[inst] = (man.name, man.width_um, man.height_um)
+    inner = [(f"{netlist.CORE_INST}.{m.flat}", m.at_um, m.orientation) for m in project.macros]
+    plan = floorplan.plan(chip, cells, sizes, core_macros=inner)
     return {"name": chip.name, **plan.to_dict()}
 
 
@@ -169,18 +181,26 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     )
     clocks = {c.port: c.period_ns for c in project.clocks}
     binding = netlist.bind(chip, ports, imported.views, imported.cells, clocks, project.top)
+    # The core's own hard macros (its macros section): views of their own, in flow/core,
+    # each instance inside the core's (u_core.<path>), placed with the chip's macros.
+    core_views, srams, core_cells = core_macros(project, flow_dir)
+    clash = sorted(set(core_views) & set(imported.views))
+    if clash:
+        raise NetlistError(f"macro {clash[0]} is both one of the chip's and one of the core's")
+    every = layer.Imported({**imported.views, **core_views}, {**imported.cells, **core_cells})
     sizes = {
-        inst: (cell, imported.views[cell].width, imported.views[cell].height)
-        for inst, cell in imported.cells.items()
+        inst: (cell, every.views[cell].width, every.views[cell].height)
+        for inst, cell in every.cells.items()
     }
-    plan = floorplan.plan(chip, cells, sizes, binding.directions)
+    inner = [(f"{netlist.CORE_INST}.{m.flat}", m.at_um, m.orientation) for m in project.macros]
+    plan = floorplan.plan(chip, cells, sizes, binding.directions, inner)
     if any(not c.cell for c in plan.ring):
         raise NetlistError("a pad has no IO cell")
     try:
         core = macros.rtl_modules(project, builddir.work_dir(work, "modules"))
     except macros.MacroStepError as exc:
         raise NetlistError(str(exc)) from None
-    merge.check_modules(core, imported.views, chip.name, sorted({c.cell for c in plan.ring}))
+    merge.check_modules(core, every.views, chip.name, sorted({c.cell for c in plan.ring}))
     flow.write_io(flow_dir, pdk, cells, sorted({c.cell for c in plan.ring}))
     pad = cells[io.PAD_CELLS["in"]]
     if f"dir::src/{chip.name}.v" in verilog.get("VERILOG_FILES", []):
@@ -195,19 +215,34 @@ def prepare(project: Project, pdk: Path) -> Prepared:
         flow_dir, "pins.def", netlist.pins_def(chip, binding, plan, (pad.width, pad.height))
     )
     builddir.write_text(flow_dir, "macro_placement.cfg", netlist.placement(plan))
-    placed = {m.inst: (m, imported.views[m.cell]) for m in plan.macros}
+    placed = {m.inst: (m, every.views[m.cell]) for m in plan.every_macro()}
     builddir.write_text(flow_dir, "pdn.tcl", pdn.script(placed, plan.core[1]))
     clk = project.fastest_clock
     cfg = flow.config(
         chip,
         plan,
         binding,
-        imported,
+        every,
         verilog,
         clk.period_ns if clk else DEFAULT_PERIOD_NS,
         flow_dir,
+        srams,
     )
-    return Prepared(work, flow_dir, pdk, cells, imported, binding, plan, cfg, spec)
+    return Prepared(work, flow_dir, pdk, cells, every, binding, plan, cfg, spec)
+
+
+def core_macros(
+    project: Project, flow_dir: Path
+) -> tuple[dict[str, layer.MacroView], dict[str, sram.SramViews], dict[str, str]]:
+    """The core's hard macros in the chip: their views (in ``flow_dir/core``), each SRAM's
+    added views, and each instance's cell by its name in the chip (``u_core.<path>``)."""
+    if not project.macros:
+        return {}, {}, {}
+    try:
+        views, srams, cells = macros.views(project, builddir.work_dir(flow_dir, "core"))
+    except (macros.MacroStepError, MacroImportError) as exc:
+        raise NetlistError(f"the core's macros: {exc}") from None
+    return views, srams, {f"{netlist.CORE_INST}.{i}": c for i, c in cells.items()}
 
 
 def run_script(script: str, plan_file: Path, cwd: Path, read: list[Path], log: str) -> None:
@@ -485,7 +520,7 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
                 "orientation": m.orient,
                 "warnings": p.imported.views[m.cell].warnings,
             }
-            for m in p.plan.macros
+            for m in p.plan.every_macro()
         ],
         "warnings": p.binding.warnings,
         "merged_names": merged,
