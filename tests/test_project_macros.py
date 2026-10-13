@@ -172,7 +172,20 @@ def test_a_cell_the_pdk_lacks_is_refused(sram_project, stand_in_pdk):
 # Place and route
 
 
-def test_place_and_route_sizes_the_die_around_the_macro(sram_project, stand_in_pdk, monkeypatch):
+@pytest.fixture
+def module_check(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """The module check place and route asks for, recorded instead of run: it needs Yosys
+    and has tests of its own, and the configuration tests run without it."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        macros, "check_modules", lambda project, work, views: calls.append(sorted(views))
+    )
+    return calls
+
+
+def test_place_and_route_sizes_the_die_around_the_macro(
+    sram_project, stand_in_pdk, monkeypatch, module_check
+):
     from chipleap.rtl import pnr
 
     monkeypatch.setattr(pnr, "_cell_area", lambda project, workdir: 20000.0)
@@ -189,10 +202,11 @@ def test_place_and_route_sizes_the_die_around_the_macro(sram_project, stand_in_p
     assert "-inst_pattern {^u_mem$} -pin_pattern {^VDDARRAY!$} -power" in script
     x = entry["instances"]["u_mem"]["location"][0]
     assert x >= cfg["CORE_AREA"][0] + 40
+    assert module_check == [[CELL]]
 
 
 def test_a_die_of_the_projects_own_places_each_macro_where_it_says(
-    sram_project, stand_in_pdk, monkeypatch
+    sram_project, stand_in_pdk, monkeypatch, module_check
 ):
     from chipleap.rtl import pnr
     from chipleap.verify.pnr import PnrError
@@ -355,7 +369,9 @@ def test_simulation_adds_the_packages_model(mixed_project, stand_in_pdk):
     assert "macros/strongarm.v" in m["sources"] and f"macros/{CELL}.v" in m["sources"]
 
 
-def test_place_and_route_takes_the_package_as_a_chip_does(mixed_project, stand_in_pdk, monkeypatch):
+def test_place_and_route_takes_the_package_as_a_chip_does(
+    mixed_project, stand_in_pdk, monkeypatch, module_check
+):
     from chipleap.rtl import pnr
 
     monkeypatch.setattr(pnr, "_cell_area", lambda project, workdir: 20000.0)
