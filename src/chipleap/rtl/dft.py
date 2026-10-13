@@ -86,6 +86,8 @@ SCAN_IN_PIN, SCAN_ENABLE_PIN, SCAN_OUT_PINS = "SCD", "SCE", ("Q",)
 # Buffers place and route puts on a chain: followed when tracing a routed netlist.
 BUFFERS = {"sg13g2_buf_": ("A", "X"), "sg13g2_dlygate4sd": ("A", "X")}
 # What Fault's cut removes: the flip-flops, with their data, output and clock pins.
+TIE_HI = "sg13g2_tiehi/L_HI"  # IHP SG13G2's tie cells, as LibreLane's synthesis names them
+TIE_LO = "sg13g2_tielo/L_LO"
 FAULT_SCL = {
     "dffMatches": [
         {"name": "sg13g2_dfrbpq_*", "d": "D", "q": "Q", "clk": "CLK"},
@@ -220,6 +222,17 @@ def scan_script(project: Project, files: dict[str, Any], netlist: str, cfg: DftC
         "} else {",
         "    insert_dft",
         "}",
+        # A hard macro's pins tied to a constant (an SRAM's A_DLY and BIST port) are
+        # constants in the netlist, which OpenROAD writes as nets (one_, zero_) it never
+        # declares; tie cells drive them instead, as LibreLane's own synthesis does.
+        *(
+            [
+                f"insert_tiecells {q.tcl(TIE_HI)} -prefix TIE_ONE_",
+                f"insert_tiecells {q.tcl(TIE_LO)} -prefix TIE_ZERO_",
+            ]
+            if project.macros
+            else []
+        ),
         f"write_verilog {q.tcl(project.top + '.scan.v')}",
     ]
     return "\n".join(lines) + "\n"
