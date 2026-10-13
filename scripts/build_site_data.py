@@ -1,7 +1,18 @@
 """Build the website's data and generated content from real ChipLeap runs.
 
     python scripts/build_site_data.py [--verify BUNDLE] [--hero RENDER.png --callouts C.json
-                                       --hero-floorplan FP.json]
+                                       --hero-floorplan FP.json] [--og]
+                                      [--rtl-project PROJECT [--rtl-verify VERIFY.json]]
+
+The RTL flow and chip sections come from one RTL project with a chip section, run through
+every step first (KLayout and the IHP PDK draw the chip):
+
+    chipleap verify examples/uart --steps all
+    python scripts/build_site_data.py --rtl-project examples/uart
+
+A step run again on its own (gate-level simulation with another Icarus, say) is passed
+with --rtl-verify and replaces that step's row. Without --verify, the accelerator's
+published results are kept as they are.
 
 The hero render is made in three steps, and --hero-floorplan refuses a render whose
 floorplan no longer matches what the model gives for the design:
@@ -19,7 +30,13 @@ Everything the site shows comes from here, so the page cannot drift from the too
   nodes that can host each interface
 * the verification band: `chipleap verify` results for a bundle
 * the hero images and callouts: a Blender render from scripts/render_die.py
+* the RTL flow and the chip: `chipleap verify PROJECT --steps all` results for an RTL
+  project with a chip section (--rtl-project examples/uart), the chip's layout drawn from
+  its GDS with scripts/render_gds.py and callouts placed from its floorplan
 * content hashes on the styles.css and app.js links, so run it after editing either
+
+Only ChipLeap's built-in technologies are used: technologies added on this machine with
+`chipleap tech add` (a licensed PDK, say) never reach the page.
 """
 
 from __future__ import annotations
@@ -29,11 +46,15 @@ import base64
 import hashlib
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+# Before chipleap is imported: its technology table loads the user's own technologies.
+os.environ["CHIPLEAP_TECH_DIR"] = ""
 
 from chipleap import __version__, mcp_server
 from chipleap.explore import explore
@@ -564,6 +585,483 @@ def layout_html(rows: list[dict[str, Any]]) -> str:
     )
 
 
+# The RTL flow and the chip, from an RTL project's `chipleap verify --steps all`
+
+
+def _n(v: float) -> str:
+    """A number as the page prints it: no trailing zeros."""
+    return f"{v:g}"
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def _lint(r: dict[str, Any]) -> tuple[str, str]:
+    t = r.get("tools") or {}
+    names = {"verilator": "Verilator", "slang": "slang"}
+    tools = ", ".join(f"{names.get(k, k)} {str(v).split('+')[0]}" for k, v in t.items())
+    found = int(r.get("errors", 0)) + int(r.get("warnings", 0))
+    return tools, "no warnings" if not found else _plural(found, "message")
+
+
+def _sim(r: dict[str, Any]) -> tuple[str, str]:
+    sim = f"{str(r.get('simulator', '')).capitalize()} {r.get('simulator_version', '')}".strip()
+    total = int(r["passed"]) + int(r["failed"])
+    return f"cocotb on {sim}", f"{r['passed']} of {total} tests pass"
+
+
+def _coverage(r: dict[str, Any]) -> tuple[str, str]:
+    k = r["kinds"]
+    text = ", ".join(f"{kind} {_n(k[kind]['percent'])} %" for kind in ("line", "branch", "toggle"))
+    left = int(r.get("uncovered_total", 0))
+    if left:
+        text += f"; {_plural(left, 'point')} no test reaches"
+    return f"Verilator {r.get('simulator_version', '')}", text
+
+
+def _formal(r: dict[str, Any]) -> tuple[str, str]:
+    checks = r["checks"]
+    engines = sorted({str(c["engine"]) for c in checks})
+    proved = [c for c in checks if c["status"] == "pass" and c["mode"] == "prove"]
+    if len(proved) == len(checks):
+        text = (
+            "the design's assertions proved for every cycle"
+            if len(checks) == 1
+            else f"all {len(checks)} checks proved for every cycle"
+        )
+    else:
+        text = f"{len(proved)} of {len(checks)} checks proved for every cycle"
+    return f"SymbiYosys, {', '.join(engines)}", text
+
+
+def _cdc(r: dict[str, Any]) -> tuple[str, str]:
+    acc = r.get("accepted") or []
+    text = f"{_plural(int(r['crossings']), 'crossing')}, " + (
+        "all synchronized" if not r["errors"] else f"{r['errors']} unsafe"
+    )
+    sync = [a for a in acc if a.get("rule") == "synchronizer"]
+    if sync:
+        text += f" ({sync[0]['stages']}-flop synchronizer on {sync[0]['from']})"
+    said = {"reset_release": "the reset is released asynchronously"}
+    warned = [f for f in r.get("findings") or [] if f.get("severity") == "warning"]
+    for f in warned[:1]:
+        text += f"; a warning: {said.get(str(f.get('rule')), str(f.get('rule')))}"
+    return "ChipLeap's checker on Yosys's netlist", text
+
+
+def _synth(r: dict[str, Any]) -> tuple[str, str]:
+    return (
+        "Yosys and ABC on IHP's cells",
+        f"{r['cells']} cells, {r['flops']} flip-flops, {r['area_um2'] / 1e6:.4f} mm², "
+        f"critical path {r['critical_path_ns']:.2f} ns",
+    )
+
+
+def _equiv(r: dict[str, Any]) -> tuple[str, str]:
+    parts = []
+    for p in r["pairs"]:
+        what = {"rtl-synth": "RTL to netlist", "synth-pnr": "netlist to layout"}.get(
+            str(p["pair"]), str(p["pair"])
+        )
+        if p["proved"] == p["points"]:
+            parts.append(f"{what}: all {p['points']} points proved")
+        else:
+            parts.append(
+                f"{what}: {p['proved']} of {p['points']} proved, the rest equal for "
+                f"{p['depth']} cycles"
+            )
+    return "Yosys equivalence", "; ".join(parts)
+
+
+def _pnr(r: dict[str, Any]) -> tuple[str, str]:
+    clean = not (r["drc_errors"] or r["lvs_errors"] or r["antenna_nets"])
+    return (
+        "LibreLane (OpenROAD, KLayout), signed off at the slow corner",
+        f"{r['cells']} cells on a {r['core_um2'] / 1e6:.4f} mm\u00b2 core; {_n(r['clock_mhz'])} "
+        f"MHz met at 125 \u00b0C (about {r['fmax_worst_mhz']:.0f} MHz there); "
+        + ("DRC, LVS and antenna clean" if clean else "DRC, LVS or antenna violations"),
+    )
+
+
+def _gls(r: dict[str, Any]) -> tuple[str, str]:
+    sim = f"{str(r.get('simulator', '')).capitalize()} {r.get('simulator_version', '')}".strip()
+    total = int(r["passed"]) + int(r["failed"])
+    where = "the routed netlist with SDF delays" if r.get("sdf") else "the synthesized netlist"
+    return f"cocotb on {sim}, IHP's cell models", f"{r['passed']} of {total} tests pass on {where}"
+
+
+def _dft(r: dict[str, Any]) -> tuple[str, str]:
+    chains = r["chains"]
+    lengths = sorted({c["length"] for c in chains})
+    of = str(lengths[0]) if len(lengths) == 1 else f"{lengths[0]} to {lengths[-1]}"
+    text = f"{_plural(len(chains), 'chain')} of {of} flip-flops"
+    tools = "OpenROAD scan insertion"
+    a = r.get("atpg")
+    if a:
+        tools += ", " + str(a["tool"])
+        text += f", {a['coverage_pct']:.1f} % stuck-at coverage with {a['patterns']} patterns"
+    sims = [k for k in ("simulation", "simulation_routed") if r.get(k)]
+    if sims and all((r[k] or {}).get("status", "pass") == "pass" for k in sims):
+        text += ", which pass through the chains" + (
+            " of the routed netlist" if "simulation_routed" in sims else ""
+        )
+    return tools, text
+
+
+def _power(r: dict[str, Any]) -> tuple[str, str]:
+    c = next((c for c in r["corners"] if c["corner"] == "typ"), r["corners"][0])
+    if c.get("vcd_mw") is not None:
+        text = (
+            f"{c['vcd_mw']:.3g} mW at the typical corner from the tests' activity "
+            f"({c['vectorless_mw']:.3g} mW vectorless)"
+        )
+    else:
+        text = f"{c['vectorless_mw']:.3g} mW vectorless at the typical corner"
+    return "OpenROAD with the project's own tests", text
+
+
+def _ir_drop(r: dict[str, Any]) -> tuple[str, str]:
+    worst = max(r["nets"], key=lambda n: n["worst_mv"])
+    return (
+        "OpenROAD PDNSim on the routed grid",
+        f"{worst['worst_mv']:.2g} mV at worst, {worst['worst_pct']:.2g} % of {_n(r['supply_v'])} V",
+    )
+
+
+def _upf(r: dict[str, Any]) -> tuple[str, str]:
+    doms = r["domains"]
+    nets = sum(int(c["nets"]) for c in r["crossings"])
+    inside = [d["name"] for d in doms if d.get("placed_inside")]
+    text = f"{_plural(len(doms), 'domain')}"
+    if inside:
+        text += f", {', '.join(inside)} placed in its own region"
+    text += f"; {nets} signals between them"
+    return "UPF read and placed by OpenROAD", text
+
+
+def _summary(r: dict[str, Any]) -> tuple[str, str]:
+    return "", str(r["summary"]).split("; ")[0]
+
+
+RTL_GROUPS: list[tuple[str, list[tuple[str, str, Any]]]] = [
+    (
+        "Check the RTL",
+        [
+            ("lint", "Lint", _lint),
+            ("sim", "Simulation", _sim),
+            ("coverage", "Coverage", _coverage),
+            ("formal", "Formal", _formal),
+            ("cdc", "Clock and reset crossings", _cdc),
+        ],
+    ),
+    (
+        "Implement",
+        [
+            ("synth", "Synthesis", _synth),
+            ("pnr", "Place and route", _pnr),
+            ("equiv", "Equivalence", _equiv),
+            ("gls", "Gate-level simulation", _gls),
+            ("eco", "ECO", _summary),
+        ],
+    ),
+    (
+        "After the layout",
+        [
+            ("dft", "Design for test", _dft),
+            ("power", "Power", _power),
+            ("ir_drop", "IR drop", _ir_drop),
+            ("upf", "Power intent", _upf),
+        ],
+    ),
+]
+
+
+def rtl_rows(project: Path, extra: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    """The project's last `chipleap verify` results, by step; a step in a later ``extra``
+    verify.json (a step run again on its own) replaces the same step's row."""
+    rows: dict[str, dict[str, Any]] = {}
+    for f in [project / "build" / "verify" / "verify.json", *(Path(e) for e in extra or [])]:
+        for r in json.loads(Path(f).read_text())["steps"]:
+            rows[str(r["step"])] = r
+    return rows
+
+
+def chip_data(project: Path) -> dict[str, Any]:
+    return json.loads((project / "build" / "chip" / "chip.json").read_text())
+
+
+def chip_rows(
+    chip: dict[str, Any], macros: dict[str, dict[str, Any]]
+) -> list[tuple[str, str, str]]:
+    """The chip group of the flow: (step, tools, result) from chip.json."""
+    o = chip["outline_um"]
+    side = (o[2] - o[0]) / 1000
+    io = chip.get("io_timing") or {}
+    slow = next((c for c in io.get("corners", []) if c["corner"] == "slow"), None)
+    blocks = ", ".join(
+        f"{i['producer']}'s {i['cell']}, {_n(i['size'][0])} x {_n(i['size'][1])} um"
+        for i in macros.values()
+    )
+    rows = [
+        ("Macros", "macro/v1 packages, checked, their views rewritten", blocks or "none"),
+        (
+            "Chip assembly",
+            "LibreLane with IHP's pad ring; bond pads, seal ring and fill in KLayout",
+            f"{chip['pads']} pads on a {side:.2f} x {side:.2f} mm die",
+        ),
+    ]
+    if slow is not None and slow["setup_slack_ns"] is not None:
+        rows.append(
+            (
+                "Timing at the ports",
+                "OpenSTA through IHP's IO cells, every corner",
+                f"{slow['setup_slack_ns']:+.3f} ns of setup slack at the slow corner "
+                f"({chip['setup_slack_ns']:+.3f} ns at the core's side of the pads)",
+            )
+        )
+    lvs = "LVS match" if chip["lvs"]["result"] == "pass" else f"LVS {chip['lvs']['result']}"
+    rows.append(
+        (
+            "Signoff",
+            "IHP's DRC and LVS decks, antenna",
+            f"{chip['drc']['violations']} DRC violations, {lvs}, "
+            f"{chip['antenna_nets']} antenna violations",
+        )
+    )
+    return rows
+
+
+def rtl_flow_html(rows: dict[str, dict[str, Any]], chip: list[tuple[str, str, str]]) -> str:
+    groups = []
+    for title, steps in RTL_GROUPS:
+        items = []
+        for key, name, fmt in steps:
+            r = rows.get(key)
+            if r is None:
+                continue
+            if r["status"] == "skipped":
+                tools, res, cls = "", f"not run here: {r['summary']}", "res skip"
+            else:
+                tools, res = fmt(r)
+                cls = "res" if r["status"] == "pass" else "res warn"
+            items.append((name, tools, res, cls))
+        groups.append((title, items))
+    groups.append(("The chip", [(n, t, res, "res") for n, t, res in chip]))
+    out = []
+    for title, items in groups:
+        lis = "".join(
+            f"<li><b>{html.escape(n)}</b>"
+            + (f'<span class="tool">{html.escape(t)}</span>' if t else "")
+            + f'<span class="{c}">{html.escape(res)}</span></li>'
+            for n, t, res, c in items
+        )
+        out.append(
+            f'<details class="rtl-group" open><summary>{html.escape(title)}'
+            f"<small>{_plural(len(items), 'step')}</small></summary><ol>{lis}</ol></details>"
+        )
+    return '<div class="rtl-flow">' + "".join(out) + "</div>"
+
+
+def rtl_intro(where: str, description: str, clock_mhz: float) -> str:
+    what = description.rstrip(".")
+    if what[:1].isupper() and not what[1:2].isupper():
+        what = what[0].lower() + what[1:]
+    return (
+        "<p>Point ChipLeap at a directory of Verilog or SystemVerilog with cocotb tests and it "
+        "runs what a tape-out asks of RTL, on open tools and the IHP SG13G2 PDK. Below is what "
+        f"each step reported for <code>{html.escape(where)}</code>, {html.escape(what)}, at "
+        f"{_n(clock_mhz)} MHz.</p>"
+    )
+
+
+def chip_images(src: Path) -> None:
+    from PIL import Image
+
+    im = Image.open(src).convert("RGB")
+    out = SITE / "img"
+    out.mkdir(exist_ok=True)
+    for w in (1000, 1400):
+        r = im.resize((w, round(im.height * w / im.width)), Image.LANCZOS) if im.width != w else im
+        r.save(out / f"chip-{w}.webp", quality=72 if w == 1000 else 55, method=6)
+        if w == 1000:
+            r.save(out / "chip-1000.jpg", quality=78, optimize=True, progressive=True)
+
+
+def render_chip(project: Path, chip: dict[str, Any], dest: Path) -> None:
+    """The chip before fill, drawn from its GDS in IHP's layer colours, cropped to its
+    outline so floorplan coordinates map straight onto the image."""
+    from chipleap.chip import io
+
+    pdk = io.pdk_dir()
+    klayout = shutil.which("klayout")
+    if pdk is None or klayout is None:
+        raise SystemExit("rendering the chip needs KLayout and the IHP PDK")
+    name = str(chip["name"])
+    gds = project / "build" / "chip" / "finish" / f"{name}_nofill.gds"
+    o = chip["outline_um"]
+    subprocess.run(
+        [
+            klayout,
+            "-zz",
+            "-r",
+            str(ROOT / "scripts" / "render_gds.py"),
+            "-rd",
+            f"gds={gds}",
+            "-rd",
+            f"lyp={pdk / 'libs.tech' / 'klayout' / 'tech' / 'sg13g2.lyp'}",
+            "-rd",
+            f"out={dest}",
+            "-rd",
+            "width=2000",
+            "-rd",
+            "bg=#0d1512",
+            "-rd",
+            f"box={o[0]},{o[1]},{o[2]},{o[3]}",
+        ],
+        check=True,
+    )
+
+
+def chip_callouts(
+    project: Path, chip: dict[str, Any], macros: dict[str, dict[str, Any]]
+) -> list[tuple[str, str, float, float, int, int]]:
+    """(head, sub, x, y, tag dx, tag dy) for the chip picture, from its floorplan: x and y
+    as fractions of the image, which spans the outline."""
+    from chipleap.chip import assemble, floorplan
+    from chipleap.chip import io as chip_io
+    from chipleap.rtl.project import load_project
+
+    proj = load_project(project)
+    pdk = chip_io.pdk_dir()
+    assert pdk is not None and proj.chip is not None
+    cells = chip_io.read_lef(chip_io.lef_path(pdk).read_text())
+    plan = floorplan.plan(proj.chip, cells, assemble.manifest_sizes(proj))
+    o = chip["outline_um"]
+
+    def at(x: float, y: float) -> tuple[float, float]:
+        return (x - o[0]) / (o[2] - o[0]), 1 - (y - o[1]) / (o[3] - o[1])
+
+    bond = json.loads((project / "build" / "chip" / f"{chip['name']}.bondmap.json").read_text())
+    analog = next((b for b in bond if b["kind"] == "analog"), None)
+    south = [b for b in bond if b["side"] == "south" and b["kind"] == "signal"]
+    out = []
+    c = chip["core_um"]
+    cx, cy = at((c[0] + c[2]) / 2, (c[1] + c[3]) / 2)
+    out.append(("Core", f"{proj.top}, {chip['cells']} standard cells", cx, cy, 46, 34))
+    for m in chip["macros"][:1]:
+        info = macros[m["instance"]]
+        w, h = info["size"]
+        x, y = m["at_um"]
+        head = "Analog macro" if info["kind"] == "analog" else "Macro"
+        sub = f"{info['cell']}, from {info['producer']}"
+        out.append((head, sub, *at(x + w / 2, y + h / 2), 40, -100))
+    if analog is not None:
+        users = [i for i, info in macros.items() if analog["net"] in info["nets"].values()]
+        sub = f"{analog['net']}" + (f", into {macros[users[0]]['cell']}" if users else "")
+        out.append(("Analog pad", sub, *at(analog["x_um"], analog["y_um"]), 46, -60))
+    if south:
+        pad = south[len(south) // 2]
+        ring_y = plan.bond_um + plan.pad_depth / 2
+        sub = f"{chip['pads']} pads of IHP's sg13g2_io"
+        out.append(("IO ring", sub, *at(pad["x_um"], ring_y), -44, -70))
+    return out
+
+
+def chip_html(chip: dict[str, Any], marks: list[tuple[str, str, float, float, int, int]]) -> str:
+    o = chip["outline_um"]
+    side = (o[2] - o[0]) / 1000
+    io = chip.get("io_timing") or {}
+    slow = next((c for c in io.get("corners", []) if c["corner"] == "slow"), None)
+    callouts, keys = [], []
+    for i, (head, sub, x, y, tx, ty) in enumerate(marks, 1):
+        sidecls = "left" if tx < 0 else "right"
+        line = f'<svg width="1" height="1"><line x1="0" y1="0" x2="{tx}" y2="{ty + 18}"/></svg>'
+        callouts.append(
+            f'<div class="callout {sidecls}" style="--x:{x * 100:.1f}%;--y:{y * 100:.1f}%;'
+            f'--tx:{tx}px;--ty:{ty}px">{line}<span class="dot"><i>{i}</i></span>'
+            f'<span class="tag"><b>{html.escape(head)}</b>{html.escape(sub)}</span></div>'
+        )
+        keys.append(f"<li><b>{html.escape(head)}</b> {html.escape(sub)}</li>")
+    facts = [
+        ("Die with seal ring", f"{side:.2f} x {side:.2f}", "mm"),
+        ("Pads", str(chip["pads"]), ""),
+        ("DRC violations, IHP deck", str(chip["drc"]["violations"]), ""),
+        (
+            "LVS, IHP deck",
+            "match" if chip["lvs"]["result"] == "pass" else str(chip["lvs"]["result"]),
+            "",
+        ),
+    ]
+    if slow is not None and slow["setup_slack_ns"] is not None:
+        facts.append(
+            ("Setup slack at the ports, slow corner", f"{slow['setup_slack_ns']:+.3f}", "ns")
+        )
+        holds = [c["hold_slack_ns"] for c in io["corners"] if c["hold_slack_ns"] is not None]
+        if holds:
+            facts.append(("Hold slack at the ports, worst corner", f"{min(holds):+.3f}", "ns"))
+    dl = "".join(
+        f"<div><dt>{html.escape(k)}</dt><dd>{v}{f'<small>{u}</small>' if u else ''}</dd></div>"
+        for k, v, u in facts
+    )
+    worst = ((io.get("paths") or {}).get("core_to_pad_setup") or [None])[0]
+    timing = ""
+    if worst is not None and slow is not None and slow["setup_slack_ns"] is not None:
+        which = (
+            "the chip's worst path at the slow corner"
+            if abs(worst["slack_ns"] - slow["setup_slack_ns"]) < 1e-3
+            else "its worst path to an output pad at the slow corner"
+        )
+        timing = (
+            f"<p>Timed at its ports through IHP's IO cells, {which} spends "
+            f"{worst['pad_delay_ns']:.1f} ns inside the output pad, driving "
+            f"{_n(io['budget']['output_load_pf'])} pF: setup slack falls from "
+            f"{chip['setup_slack_ns']:+.3f} ns at the core's side of the pads to "
+            f"{slow['setup_slack_ns']:+.3f} ns at the ports.</p>"
+        )
+    alt = (
+        f"The {chip['name']} layout drawn from its GDS before fill: {chip['pads']} bond pads "
+        "and IHP's IO cells around the core, a comparator from aispice in the core, and the "
+        "seal ring"
+    )
+    return (
+        '<div class="chip-grid"><figure class="chip-art"><div class="chip-frame"><picture>'
+        '<source type="image/webp" srcset="img/chip-1000.webp 1000w, img/chip-1400.webp 1400w" '
+        'sizes="(max-width: 980px) 100vw, 640px">'
+        f'<img src="img/chip-1000.jpg" width="1000" height="1000" loading="lazy" alt="{html.escape(alt)}">'
+        "</picture>" + "".join(callouts) + "</div>"
+        f'<ol class="callout-key">{"".join(keys)}</ol>'
+        f"<figcaption>{html.escape(str(chip['name']))}, drawn from the GDS ChipLeap wrote, "
+        "before fill.</figcaption>"
+        f'</figure><div class="chip-facts"><dl>{dl}</dl>{timing}'
+        "<p>Every check is IHP's own: the DRC deck on the whole die with its density rules, the "
+        "LVS deck down to the macros' transistors. "
+        '<a href="https://github.com/danieltyukov/chipleap/blob/main/docs/chips.md">How a chip '
+        "is built and checked</a>.</p></div></div>"
+    )
+
+
+def macro_info(project: Path) -> dict[str, dict[str, Any]]:
+    """Each macro instance of the chip section: its cell, size, kind, producer and the
+    nets its pins connect to, from the project and its packages' manifests."""
+    from chipleap.macro.manifest import load_manifest
+    from chipleap.rtl.project import load_project
+
+    proj = load_project(project)
+    assert proj.chip is not None
+    out = {}
+    for m in proj.chip.macros:
+        man = load_manifest(m.package)
+        out[m.instance] = {
+            "cell": man.name,
+            "size": (man.width_um, man.height_um),
+            "kind": man.kind,
+            "producer": man.producer.tool,
+            "nets": dict(m.connect),
+        }
+    return out
+
+
 def layout_images(src: Path) -> None:
     from PIL import Image
 
@@ -636,6 +1134,31 @@ def images(hero: Path, callouts: dict[str, list[float]] | None) -> dict[str, lis
     return {k: [(x * W0 - box[0]) / cw, (y * H0 - box[1]) / ch] for k, (x, y) in callouts.items()}
 
 
+def og_base_from_site() -> None:
+    """The social card's background from the hero image already on the site, for a new
+    card without rendering the die again."""
+    from PIL import Image
+
+    im = Image.open(SITE / "img" / "die-1200.png").convert("RGBA")
+    card = Image.new("RGBA", (1200, 630), (246, 247, 245, 255))
+    art = im.resize((800, round(im.height * 800 / im.width)), Image.LANCZOS)
+    card.alpha_composite(art, (440, max(0, (630 - art.height) // 2)))
+    card.save(SITE / "og-base.png")
+
+
+def published_console_line(page: Path) -> str:
+    """The console's last line as the page has it, kept when no bundle is given."""
+    text = page.read_text()
+    m = re.search(
+        r'<!-- console:start -->.*<p class="c-out">(.*?)</p></div>\s*<!-- console:end -->',
+        text,
+        re.S,
+    )
+    return (
+        html.unescape(m.group(1)) if m else "Consistency, lint, simulation and X-HEEP checks pass."
+    )
+
+
 def og_card() -> None:
     exe = shutil.which("rsvg-convert")
     base = SITE / "og-base.png"
@@ -652,7 +1175,7 @@ def og_card() -> None:
 <text x="134" y="108" font-family="{font}" font-weight="600" font-size="36" fill="#0e1311">ChipLeap</text>
 <text x="72" y="290" font-family="{font}" font-weight="600" font-size="62" fill="#0e1311" letter-spacing="-2">Design the chip</text>
 <text x="72" y="360" font-family="{font}" font-weight="600" font-size="62" fill="#0e1311" letter-spacing="-2">your model needs.</text>
-<text x="72" y="430" font-family="{body}" font-size="24" fill="#57605b">Explore, generate, verify, down to the layout.</text>
+<text x="72" y="430" font-family="{body}" font-size="24" fill="#57605b">From a model or your RTL to a chip.</text>
 <text x="72" y="556" font-family="{body}" font-size="21" fill="#0b6340">Open source, MIT licensed</text>
 </svg>"""
     tmp = SITE / "og.svg"
@@ -672,6 +1195,18 @@ def main() -> None:
     ap.add_argument("--hero-floorplan", help="the floorplan JSON the hero was rendered from")
     ap.add_argument("--layout", help="KLayout render of the routed GDS (scripts/render_gds.py)")
     ap.add_argument(
+        "--rtl-project",
+        help="an RTL project with a chip section, after `chipleap verify PROJECT --steps all`",
+    )
+    ap.add_argument(
+        "--rtl-verify",
+        action="append",
+        help="a verify.json of steps run again on their own, replacing those rows (repeatable)",
+    )
+    ap.add_argument(
+        "--og", action="store_true", help="redraw the social card from the hero image on the site"
+    )
+    ap.add_argument(
         "--write-hero-floorplan", help="write the floorplan to render for the hero, then exit"
     )
     args = ap.parse_args()
@@ -682,6 +1217,9 @@ def main() -> None:
         return
 
     page = SITE / "index.html"
+    previous: dict[str, Any] = {}
+    if (SITE / "data.json").exists():
+        previous = json.loads((SITE / "data.json").read_text())
     t = trace()
     # The run time is shown rounded in the intro; leaving it out of data.json keeps rebuilds
     # from changing the file for timing noise.
@@ -722,7 +1260,45 @@ def main() -> None:
                 verify_line = joined[0].upper() + joined[1:] + " pass."
             else:
                 verify_line = "Verification did not pass."
+    if not args.verify:
+        # The accelerator's results stay as published until a bundle is given again.
+        if "verification" in previous:
+            data["verification"] = previous["verification"]
+        verify_line = previous.get("console_verify") or published_console_line(page)
+    data["console_verify"] = verify_line
     inject(page, "console", console_html(lines, verify_line))
+    if args.rtl_project:
+        project = Path(args.rtl_project)
+        rows = rtl_rows(project, args.rtl_verify)
+        chip = chip_data(project)
+        macros = macro_info(project)
+        from chipleap.rtl.project import load_project
+
+        proj = load_project(project)
+        clk = proj.fastest_clock
+        inject(
+            page,
+            "rtl-intro",
+            rtl_intro(
+                project.resolve().relative_to(ROOT).as_posix(),
+                proj.description or proj.name,
+                clk.mhz if clk else 100.0,
+            ),
+        )
+        inject(page, "rtl-flow", rtl_flow_html(rows, chip_rows(chip, macros)))
+        render = SITE / "chip-render.png"
+        render_chip(project, chip, render)
+        chip_images(render)
+        render.unlink()
+        inject(page, "chip", chip_html(chip, chip_callouts(project, chip, macros)))
+        data["rtl"] = {
+            "project": proj.name,
+            "steps": [
+                {k: r[k] for k in ("step", "status", "summary") if k in r} for r in rows.values()
+            ],
+        }
+    elif "rtl" in previous:
+        data["rtl"] = previous["rtl"]
     if args.hero_floorplan:
         rendered = json.loads(Path(args.hero_floorplan).read_text())
         current = hero_floorplan(hero_design)
@@ -735,6 +1311,9 @@ def main() -> None:
     pos = json.loads(Path(args.callouts).read_text()) if args.callouts else None
     if args.hero:
         pos = images(Path(args.hero), pos)
+        og_card()
+    elif args.og:
+        og_base_from_site()
         og_card()
     if pos:
         marks, key_html = callouts_html(pos, hero_design)

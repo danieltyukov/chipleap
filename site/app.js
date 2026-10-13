@@ -26,7 +26,7 @@
   }
 
   // Hero: callouts appear one by one, once; the render rises slightly as the page scrolls.
-  const callouts = $$('.callout');
+  const callouts = $$('.hero .callout');
   callouts.forEach((c, i) => setTimeout(() => c.classList.add('on'), reduce ? 0 : 700 + i * 380));
   const art = $('.art-frame');
   if (art && !reduce) {
@@ -46,6 +46,16 @@
   };
 
   onView($('#flow-line'), () => $('#flow-line').classList.add('run'));
+
+  // The chip: its callouts appear once it is in view.
+  onView($('.chip-frame'), () => {
+    $$('.chip-frame .callout').forEach((c, i) => setTimeout(() => c.classList.add('on'), reduce ? 0 : 200 + i * 300));
+  }, 0.3);
+
+  // The digital flow: on phones only the first group starts open.
+  if (window.matchMedia('(max-width: 640px)').matches) {
+    $$('.rtl-flow details').forEach((d, i) => { if (i > 0) d.open = false; });
+  }
 
   // Stats count up.
   onView($('.stats'), () => {
