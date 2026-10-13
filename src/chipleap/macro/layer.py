@@ -214,6 +214,12 @@ def reserved_names(pdk: Path, extra: Iterable[str] = ()) -> Reserved:
     return Reserved(frozenset(names), spaces=tuple(n.casefold() for n in extra))
 
 
+def pdk_cell_names(pdk: Path) -> frozenset[str]:
+    """The cells of the PDK's libraries (each ``libs.ref/*`` library's LEF macros, CDL
+    subcircuits and GDS cells) in ``pdk``, its ``ihp-sg13g2`` directory, case-folded."""
+    return _pdk_names(str(pdk))
+
+
 @lru_cache(maxsize=4)
 def _pdk_names(pdk: str) -> frozenset[str]:
     root = Path(pdk) / "libs.ref"

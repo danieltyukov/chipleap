@@ -328,13 +328,17 @@ def reserved_with(*names: str) -> Reserved:
 
 
 def test_a_package_named_like_the_pdk_cannot_replace_its_cells(proj):
+    # IHP's own name spaces are refused by macro/v1 itself (pdk.cell_name).
     pkg = counter_named(proj, "sg13g2", extra_cells=("sg13g2_inv_1",))
-    # Left unchecked, the package imports and its layout holds a cell named like IHP's
-    # inverter, which would replace the standard cell when the layouts merge.
-    unchecked = import_one(proj, pkg, reserved=NO_NAMES).views["sg13g2"]
-    assert "sg13g2_inv_1" in unchecked.gds_cells
+    with pytest.raises(MacroImportError, match=r"pdk\.cell_name"):
+        import_one(proj, pkg, reserved=NO_NAMES)
+    # A cell of the PDK's libraries outside them (IHP's ntap pcell): left unchecked, the
+    # package imports with a cell named like it, which would replace it when the layouts
+    # merge; the chip's reserved names refuse it.
+    pkg = counter_named(proj, "ntap")
+    assert "ntap" in import_one(proj, pkg, reserved=NO_NAMES).views["ntap"].gds_cells
     with pytest.raises(MacroImportError, match="a name the PDK or ChipLeap uses"):
-        import_one(proj, pkg, reserved=reserved_with("sg13g2_inv_1"))
+        import_one(proj, pkg, reserved=reserved_with("ntap"))
 
 
 def test_a_package_whose_name_space_holds_a_reserved_name_is_refused(proj):
