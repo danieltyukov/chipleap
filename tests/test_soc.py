@@ -4,6 +4,8 @@ layout itself runs with CHIPLEAP_RUN_SOC=1 (hours)."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from chipleap.gen import banks, soc
@@ -326,3 +328,24 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     # More standard cells, a larger core.
     _, small = soc_step.with_floorplan(cfg, prep, 1.0e6, work)
     assert small.core_um2 < fp.core_um2
+
+
+def _check_report(run: Path, text: str) -> None:
+    rpt = run / "02-yosys-synthesis" / "reports" / "chk.rpt"
+    rpt.parent.mkdir(parents=True)
+    rpt.write_text(text)
+
+
+def test_the_synthesized_netlist_must_pass_yosyss_check(tmp_path):
+    assert "no check report" in soc_step.netlist_problems(tmp_path)
+    _check_report(tmp_path, "Checking module chipleap_soc...\nFound and reported 0 problems.\n")
+    assert soc_step.netlist_problems(tmp_path) == ""
+
+
+def test_a_loop_in_the_synthesized_netlist_is_reported(tmp_path):
+    _check_report(
+        tmp_path,
+        "Warning: found logic loop in module chipleap_soc:\n    cell _1_\n"
+        "Found and reported 1 problems.\n",
+    )
+    assert soc_step.netlist_problems(tmp_path).startswith("1 problems: Warning: found logic loop")

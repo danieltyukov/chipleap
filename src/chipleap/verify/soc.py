@@ -22,6 +22,7 @@ LibreLane on IHP SG13G2.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Iterable
@@ -377,6 +378,12 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         "USE_SLANG": True,
         "SLANG_ARGUMENTS": list(SLANG_ARGUMENTS),
         "RUN_LINTER": False,
+        # LibreLane counts Yosys's check of the RTL, word by word, before synthesis: X-HEEP's
+        # flash controller with its cache off leaves its cache state machine's registers
+        # undriven and its unused word-level muxes in loops, and its OpenTitan SPI hosts'
+        # alert inputs are unconnected. ChipLeap checks the synthesized netlist instead,
+        # bit by bit (``netlist_problems``), and stops on any problem there.
+        "ERROR_ON_SYNTH_CHECKS": False,
         "CLOCK_PORT": "clk_i",
         "CLOCK_PERIOD": round(1000.0 / clock_mhz, 3),
         "PNR_SDC_FILE": f"dir::{SDC}",
@@ -450,6 +457,26 @@ def prepare(
     return config(sources, design.freq_mhz), Prepared(sources, instances, views)
 
 
+_CHECK_RE = re.compile(r"Found and reported (\d+) problems")
+
+
+def netlist_problems(run: Path) -> str:
+    """What Yosys's check of the synthesized netlist (``reports/chk.rpt``) found: combinational
+    loops and undriven wires, bit by bit; empty when it found nothing. A missing report is
+    a problem too."""
+    found = sorted(run.glob("*-yosys-synthesis/reports/chk.rpt"))
+    if not found:
+        return "nothing: LibreLane wrote no check report"
+    text = found[-1].read_text(errors="replace")
+    m = _CHECK_RE.search(text)
+    if m is None:
+        return "nothing it reported a count of"
+    if int(m.group(1)) == 0:
+        return ""
+    warnings = [ln.strip() for ln in text.splitlines() if ln.startswith("Warning:")][:5]
+    return f"{m.group(1)} problems: " + "; ".join(warnings)
+
+
 def place_and_route(
     design: Design, config_text: str, checkout: Path, work: Path, pdk: Path
 ) -> SocResult:
@@ -461,6 +488,8 @@ def place_and_route(
     first, _ = with_floorplan(cfg, prep, model_cells, work)
     pnr.run_librelane(work, first, to="Yosys.Synthesis")
     run = work / "runs" / "chipleap"
+    if problems := netlist_problems(run):
+        raise SocError(f"Yosys's check of the synthesized netlist found {problems}")
     synth = pnr.synth_area(run)
     if synth <= 0:
         raise SocError("LibreLane's synthesis reported no standard-cell area")
