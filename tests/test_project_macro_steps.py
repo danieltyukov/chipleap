@@ -272,14 +272,19 @@ def _gls_ready() -> bool:
     from chipleap.rtl.sim import cocotb_python
     from chipleap.verify.tools import iverilog
 
+    from chipleap.chip import io
+
     return (
         icarus_major(iverilog()) >= 13
         and cocotb_python() is not None
         and liberty_for("ihp-sg13g2") is not None
+        and io.pdk_dir() is not None  # the SRAM's own model
     )
 
 
-@pytest.mark.skipif(not _gls_ready(), reason="needs Icarus 13 (CHIPLEAP_IVERILOG), cocotb, the PDK")
+@pytest.mark.skipif(
+    not _gls_ready(), reason="needs Icarus 13 (CHIPLEAP_IVERILOG), cocotb, the PDK's SRAMs"
+)
 def test_the_tests_pass_on_the_netlist_with_the_srams_functional_model(tmp_path):
     from chipleap.rtl.gls import gls
 
