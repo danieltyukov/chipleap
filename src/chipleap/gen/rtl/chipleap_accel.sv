@@ -811,11 +811,21 @@ module chipleap_accel_core #(
       // at core_start for the tile's first chunk, and in each issue cycle for the next.
       // Its word is out of the bank in the cycle that issues it, which registers it in
       // xq and wq as the flop buffers' read is, and the schedule stays the same.
+      //
+      // Where the next chunk is read is kept in registers, a cycle ahead of its read: the
+      // row's next chunk is the last one read plus a chunk, the next row's first is this
+      // row's first plus the row stride. Between an issue and the banks' enables and
+      // addresses there are then only compares and a select; worked out in the issue
+      // cycle, the next chunk's address put two 32-bit adders there, and the routed
+      // design missed its clock at the slow corner on that path.
       localparam int unsigned SBI = NAB > 1 ? $clog2(NAB) : 1;
       localparam int unsigned WSI = $clog2(BANK_BITS);
       logic pf;  // a chunk is read this cycle
-      logic [31:0] pf_rowbase, pf_kc;  // its row and its place in the row
-      logic [31:0] xk, xa, wbit;
+      logic pf_row;  // the chunk read is the first of its row
+      logic [31:0] xa, wbit;  // its activation word, and its first bit in each weight row
+      logic [31:0] nx_xa_q, nx_wbit_q;  // the next chunk of the row
+      logic [31:0] row_xa_q;  // the first chunk of the next row
+      logic [31:0] kc_end_q, m_end_q;  // gkc of a row's last chunk, gm of the tile's last row
       logic [31:0] bw_dst;  // where the DMA's word goes, as a buffer address
       logic [SBI-1:0] xb_q;  // the activation bank read, and the slot of the weight banks
       logic cs_q;
@@ -823,30 +833,50 @@ module chipleap_accel_core #(
 
       always_comb begin
         pf = 1'b0;
-        pf_rowbase = g_rowbase;
-        pf_kc = gkc;
+        pf_row = 1'b0;
+        xa = nx_xa_q;
+        wbit = nx_wbit_q;
         if (core_start) begin
           pf = 1'b1;
-          pf_rowbase = a_base;
-          pf_kc = '0;
+          pf_row = 1'b1;
+          xa = a_base + (a_koff >> 2);
+          wbit = '0;
         end else if (issue) begin
           // The chunk after this one, as the issue below steps gm and gkc; none after the
           // tile's last.
-          if (gkc + 1 != nchunks) begin
+          if (gkc != kc_end_q) begin
             pf = 1'b1;
-            pf_kc = gkc + 1;
-          end else if (gm + 1 != cd.tm) begin
+          end else if (gm != m_end_q) begin
             pf = 1'b1;
-            pf_kc = '0;
-            pf_rowbase = g_rowbase + a_stride;
+            pf_row = 1'b1;
+            xa = row_xa_q;
+            wbit = '0;
           end
         end
       end
 
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          nx_xa_q <= '0;
+          nx_wbit_q <= '0;
+          row_xa_q <= '0;
+          kc_end_q <= '0;
+          m_end_q <= '0;
+        end else begin
+          if (core_start) begin
+            kc_end_q <= cd.tk / V - 1;
+            m_end_q <= cd.tm - 1;
+          end
+          if (pf) begin
+            // A chunk is V bytes at a word boundary: V / 4 words further on.
+            nx_xa_q <= xa + 32'(XW);
+            nx_wbit_q <= wbit + (32'(V) << (3 - fmt_shift));
+          end
+          if (pf_row) row_xa_q <= xa + a_stride;
+        end
+      end
+
       always_comb begin
-        xk = a_koff + pf_kc * V;
-        xa = pf_rowbase + (xk >> 2);
-        wbit = (pf_kc * V) << (3 - fmt_shift);
         bw_dst = 32'(fifo[int'(fifo_rp[0])]);
         abank_re_o = '0;
         abank_we_o = '0;
