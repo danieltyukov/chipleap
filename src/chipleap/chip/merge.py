@@ -12,7 +12,9 @@ defined twice, unless both definitions come from the same PDK file or are identi
 Three merges are checked: the Verilog modules (the core's own, the macros', the IO
 cells' and the chip top) before LibreLane runs, and after it the GDS structures and the
 SPICE subcircuits (case folded, as SPICE reads them), with the cells the stream-out
-itself makes (the chip top and its vias) counted as a source of their own.
+itself makes (the chip top and its vias) counted as a source of their own. An RTL
+project with macros (``chipleap.rtl.macros``) goes through the same checks, its top in
+the chip top's place and without IO cells.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.macro.layer import GDS_NAME, MacroView, gds_raw_name, gds_records
+from chipleap.macro.layer import GDS_NAME, gds_raw_name, gds_records
 
 FILE_MAX = 1 << 30
 MODULES_MAX = 100_000
@@ -118,29 +120,43 @@ def spice_source(label: str, path: Path) -> Source:
 # Verilog, before LibreLane
 
 
-def yosys_modules(text: str) -> list[str]:
-    """Module names from Yosys's ``ls``, as the source declares them: a parameterised
-    copy (``$paramod\\uart_tx\\W=4``) is its module."""
-    names = []
-    for line in text.splitlines()[1 : MODULES_MAX + 1]:
+# The Yosys command that lists every module of the sources it has read, black boxes and
+# empty modules (which read_verilog makes black boxes) included, and every member of
+# each as ``module/member``. It runs before ``hierarchy``, which removes the modules the
+# top does not instantiate: one of those named like a macro would still replace the
+# macro's black box where LibreLane reads both.
+LIST_MODULES = "select -list =*"
+
+
+def listed_modules(text: str) -> list[str]:
+    """Module names from ``LIST_MODULES``, as the source declares them. A member's line
+    has a slash; a module whose name has one is left out, and could not be named like a
+    macro, whose cell name is a plain identifier."""
+    names: list[str] = []
+    for line in text.splitlines():
         name = line.strip()
         if name.startswith("$paramod\\"):
             name = name.split("\\")[1]
         name = name.lstrip("\\")
-        if name and not name.startswith("$"):
+        if name and "/" not in name and not name.startswith("$"):
             names.append(name)
+            if len(names) > MODULES_MAX:
+                raise MergeError(f"the RTL has more than {MODULES_MAX} modules")
     return names
 
 
 def check_modules(
-    core: Iterable[str], chip_name: str, io_cells: Iterable[str], views: Mapping[str, MacroView]
+    core: Iterable[str],
+    views: Iterable[str],
+    chip_name: str = "",
+    io_cells: Iterable[str] = (),
 ) -> None:
-    """The chip top's modules: the core's, the chip's own, the IO cells' and each
-    macro's. A macro named like a module of the core would be bound to the core's RTL
-    instead of the macro, silently."""
+    """The modules of the design LibreLane synthesizes: the core's RTL, each macro's
+    (``views``, by cell), and for a chip the chip top and the IO cells. A macro named
+    like a module of the RTL would be bound to the RTL instead of the macro, silently."""
     sources = [
         Source("the core's RTL", dict.fromkeys(dict.fromkeys(core), "")),
-        Source("the chip top", {chip_name: ""}),
+        *([Source("the chip top", {chip_name: ""})] if chip_name else []),
         Source("the IO library", dict.fromkeys(io_cells, "")),
         *(Source(f"macro {cell}", {cell: ""}) for cell in views),
     ]

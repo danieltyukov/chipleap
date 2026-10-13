@@ -30,7 +30,7 @@ from chipleap.chip.run import ToolError, klayout, plain, private_dir, python_wit
 from chipleap.macro import layer
 from chipleap.macro.layer import MacroImportError
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, parse_toml
-from chipleap.rtl import builddir
+from chipleap.rtl import builddir, macros
 from chipleap.rtl.pnr import verilog_config
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS
@@ -172,12 +172,11 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     plan = floorplan.plan(chip, cells, sizes, binding.directions)
     if any(not c.cell for c in plan.ring):
         raise NetlistError("a pad has no IO cell")
-    merge.check_modules(
-        netlist.core_modules(ports_dir),
-        chip.name,
-        sorted({c.cell for c in plan.ring}),
-        imported.views,
-    )
+    try:
+        core = macros.rtl_modules(project, builddir.work_dir(work, "modules"))
+    except macros.MacroStepError as exc:
+        raise NetlistError(str(exc)) from None
+    merge.check_modules(core, imported.views, chip.name, sorted({c.cell for c in plan.ring}))
     flow.write_io(flow_dir, pdk, cells, sorted({c.cell for c in plan.ring}))
     pad = cells[io.PAD_CELLS["in"]]
     if f"dir::src/{chip.name}.v" in verilog.get("VERILOG_FILES", []):

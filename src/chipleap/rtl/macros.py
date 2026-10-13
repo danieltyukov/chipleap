@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 from chipleap.chip import io
@@ -58,6 +59,8 @@ UNSUPPORTED = (
 )
 OPEN_TOOLS = ("", "auto", "icarus", "verilator", "yosys", "librelane")
 MANIFEST_MAX = 1 << 20
+# Yosys lists every wire and cell too, so a large design's list is long.
+MODULE_LIST_MAX = 64 << 20
 
 
 class MacroStepError(RuntimeError):
@@ -251,12 +254,11 @@ def views(
     return all_views, by_sram, inst_cell
 
 
-def check_modules(project: Project, work: Path, cells: list[str]) -> None:
-    """Refuse a macro cell the project's RTL defines as a module of its own: LibreLane
-    would bind the instance to that RTL instead of the macro, silently. The RTL's modules
-    come from Yosys, reading the sources alone (``chipleap.chip.merge`` makes the same
-    check for a chip)."""
-    from chipleap.chip.merge import MergeError, Source, unique
+def rtl_modules(project: Project, work: Path) -> list[str]:
+    """Every module the project's sources define, black boxes and the modules its top
+    does not instantiate included, as Yosys reads the sources alone in ``work``
+    (``chipleap.chip.merge.LIST_MODULES``)."""
+    from chipleap.chip.merge import LIST_MODULES, MergeError, listed_modules
     from chipleap.rtl.synth import SynthError, prepare_verilog, source_reads
 
     tool = yosys()
@@ -266,9 +268,7 @@ def check_modules(project: Project, work: Path, cells: list[str]) -> None:
         files, raw = prepare_verilog(project, work)
     except SynthError as exc:
         raise MacroStepError(str(exc)) from exc
-    # Every module, a black box too: an empty module or a (* blackbox *) model of the
-    # macro is a definition all the same, and ls would leave it out.
-    script = [*source_reads(project, files, raw), "tee -q -o rtl_modules.txt select -list =*"]
+    script = [*source_reads(project, files, raw), f"tee -q -o rtl_modules.txt {LIST_MODULES}"]
     ys = builddir.write_text(work, "rtl_modules.ys", "\n".join(script) + "\n")
     cmd = [tool.path, "-q", "-l", "rtl_modules.log", ys.name]
     with confine.confined(cmd, [*project.roots, work]) as (argv, env):
@@ -290,26 +290,26 @@ def check_modules(project: Project, work: Path, cells: list[str]) -> None:
             proc.wait()
             raise
     listed = work / "rtl_modules.txt"
-    if proc.returncode != 0 or not listed.is_file() or listed.stat().st_size > MANIFEST_MAX:
+    if proc.returncode != 0 or not listed.is_file():
         errors = [ln for ln in (log or "").splitlines() if "ERROR" in ln]
         raise MacroStepError(f"Yosys could not read the RTL: {(errors or ['no output'])[0]}")
+    if listed.stat().st_size > MODULE_LIST_MAX:
+        raise MacroStepError("Yosys's list of the RTL's modules is larger than ChipLeap reads")
     try:
-        unique(
-            [
-                Source("the project's RTL", dict.fromkeys(_modules(listed.read_text()), "")),
-                *(Source(f"macro {cell}", {cell: ""}) for cell in cells),
-            ],
-            fold=False,
-            what="module",
-        )
+        return listed_modules(listed.read_text(errors="replace"))
     except MergeError as exc:
         raise MacroStepError(str(exc)) from None
 
 
-def _modules(text: str) -> list[str]:
-    """Module names from Yosys's ``select -list =*``: the lines without a member."""
-    return [
-        ln.strip().lstrip("\\")
-        for ln in text.splitlines()
-        if ln.strip() and "/" not in ln and not ln.strip().startswith("$")
-    ]
+def check_modules(project: Project, work: Path, views: Iterable[str]) -> None:
+    """Refuse a macro cell (``views``) the project's RTL defines as a module of its own:
+    LibreLane would bind the instance to that RTL instead of the macro, silently. The
+    check is a chip's (``chipleap.chip.merge.check_modules``), without a chip top or IO
+    cells."""
+    from chipleap.chip.merge import MergeError
+    from chipleap.chip.merge import check_modules as check
+
+    try:
+        check(rtl_modules(project, work), views)
+    except MergeError as exc:
+        raise MacroStepError(str(exc)) from None

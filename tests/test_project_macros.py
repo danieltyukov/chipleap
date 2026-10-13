@@ -391,3 +391,38 @@ def test_an_rtl_module_named_like_a_macro_is_refused(sram_project):
         macros.check_modules(p, p.work_dir("pnr/modules"), [CELL])
     p = load_project(edit(sram_project, sources=["rtl/scratchpad.sv"]))
     macros.check_modules(p, p.work_dir("pnr/modules"), [CELL])
+
+
+@pytest.mark.skipif(shutil.which("yosys") is None, reason="Yosys not installed")
+@pytest.mark.parametrize(
+    "model",
+    [
+        "module strongarm(input a); endmodule\n",  # empty: read_verilog makes it a black box
+        "(* blackbox *) module strongarm(input a); endmodule\n",
+        "module strongarm(input a, output y); assign y = a; endmodule\n",  # not instantiated
+    ],
+)
+def test_every_module_of_the_rtl_is_checked_boxes_and_unused_ones_too(sram_project, model):
+    import subprocess
+
+    # Verilog sources reach LibreLane as they are (SystemVerilog goes through sv2v, which
+    # keeps only what the top reaches, and LibreLane reads its output).
+    top = f"module scratchpad(input clk_i, output [31:0] q);\n  {CELL} u_mem (.A_CLK(clk_i), "
+    top += ".A_DOUT(q));\nendmodule\n"
+    (sram_project / "rtl" / "top.v").write_text(top)
+    (sram_project / "rtl" / "extra.v").write_text(model)
+    sources = ["rtl/top.v", "rtl/extra.v"]
+    p = load_project(edit(sram_project, sources=sources, resets=[], tests=None))
+    with pytest.raises(macros.MacroStepError, match="module strongarm is defined by macro"):
+        macros.check_modules(p, p.work_dir("pnr/modules"), [CELL, "strongarm"])
+    macros.check_modules(p, p.work_dir("pnr/modules"), [CELL, "comparator"])
+    # Listed after hierarchy, as a chip's check once listed them, none of these is there:
+    # the top does not instantiate it, and a black box is not listed. LibreLane reads the
+    # same sources beside the macro's black box, which a module of the RTL replaces.
+    from chipleap.macro.sram import Sram, stub
+
+    (sram_project / "box.v").write_text(stub(Sram(CELL, 256, 32, 0.0, 0.0, True)))
+    reads = "; ".join(f"read_verilog {f}" for f in ("box.v", *sources))
+    script = f"{reads}; hierarchy -top scratchpad; tee -q -o ls.txt ls"
+    subprocess.run(["yosys", "-q", "-p", script], cwd=sram_project, check=True)
+    assert "strongarm" not in (sram_project / "ls.txt").read_text()
