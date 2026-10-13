@@ -22,6 +22,7 @@ from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_logic_kge, get_tech
+from chipleap.model.evaluate import buffer_mm2
 from chipleap.rtl import builddir
 from chipleap.verify import backends, pnr, sim, synth, xheep
 from chipleap.verify.remote import Remote
@@ -178,7 +179,7 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         )
     a = design.accel
     model_cell = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports) * 1000 * ihp.ge_um2
-    model_buffers = (ihp.sram_mm2(a.abuf_kib) + ihp.sram_mm2(a.wbuf_kib)) * 1e6
+    model_buffers = buffer_mm2(a, ihp) * 1e6
     data = {
         "clock_mhz": clock,
         "die_um2": round(r.die_um2),
@@ -213,6 +214,15 @@ def place_route(design: Design, workdir: Path) -> StepResult:
             "model_um2": round(modelled),
             "model_area_error": round((modelled - measured) / measured, 4),
         }
+    # The model checked part by part: its macros against the layout's, its logic against
+    # LibreLane's synthesis, and what placement and timing repair add after synthesis,
+    # which the model leaves out.
+    if r.synth_cell_um2 > 0:
+        data |= {
+            "synth_cell_um2": round(r.synth_cell_um2),
+            "model_cell_error": round((model_cell - r.synth_cell_um2) / r.synth_cell_um2, 4),
+            "pnr_cell_growth": round(r.cell_um2 / r.synth_cell_um2 - 1, 4),
+        }
     # Signed off where the model's clock limit for the node is measured: setup at the slow
     # corner (1.08 V, 125 C), hold at every corner. The typical corner is reported beside it.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
@@ -227,10 +237,17 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     )
     if r.macros:
         msg += (
-            f"; buffers in {r.buffers.removeprefix('SRAM macros: ')}: cells and macros "
-            f"{measured / 1e6:.3f} mm2, the model {modelled / 1e6:.3f} mm2 "
-            f"({(modelled - measured) / measured * 100:+.0f}%)"
+            f"; buffers in {r.buffers.removeprefix('SRAM macros: ')}: macros "
+            f"{r.macro_um2 / 1e6:.3f} mm2, the model {model_buffers / 1e6:.3f} mm2"
         )
+        if r.synth_cell_um2 > 0:
+            msg += (
+                f"; standard cells: the model {model_cell / 1e6:.3f} mm2, synthesis "
+                f"{r.synth_cell_um2 / 1e6:.3f} mm2 "
+                f"({(model_cell - r.synth_cell_um2) / r.synth_cell_um2 * 100:+.1f}%), and "
+                f"place and route adds {(r.cell_um2 / r.synth_cell_um2 - 1) * 100:.0f}% "
+                f"({r.cell_um2 / 1e6:.3f} mm2)"
+            )
     elif r.buffers:
         msg += f"; {r.buffers}"
     return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)

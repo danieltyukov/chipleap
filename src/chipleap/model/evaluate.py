@@ -10,9 +10,10 @@ docs/model.md states every assumption.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 
 from chipleap.hw.cpu import CPUModel, get_cpu
-from chipleap.hw.design import Design
+from chipleap.hw.design import Accel, Design
 from chipleap.hw.memory import MEMORIES, ExternalMemory, get_memory
 from chipleap.hw.tech import AXI_ADAPTER_KGE, Technology, accel_logic_kge, get_tech
 from chipleap.model.accel import Bandwidth, TilingError, job_timing
@@ -403,6 +404,38 @@ def _requant(outputs: int, c: _Ctx) -> OpResult:
     return r
 
 
+def buffer_mm2(a: Accel, tech: Technology) -> float:
+    """The accelerator's activation and weight buffers. On IHP SG13G2 they are priced
+    with the PDK's own macros (``chipleap.macro.sram.IHP_1P``). A GEMV engine gets the
+    banks the layout gives a macro-backed build (``chipleap.gen.banks``: a bank of COLS
+    bytes per slot, and per lane for the weights), whatever its number of DMA ports,
+    since more ports read the same words; for a one-port build these are exactly the
+    macros the layout places. Any other build gets each slot of each buffer as the
+    macros of 32-bit words ``choose`` picks. Either way a 1 KiB slot of a double buffer
+    costs the macro that holds it, not 1 KiB of the largest macro's density. Other nodes
+    use ``Technology.sram_mm2``."""
+    if tech.key == "ihp-sg13g2":
+        return _ihp_buffer_mm2(a)
+    return tech.sram_mm2(a.abuf_kib) + tech.sram_mm2(a.wbuf_kib)
+
+
+@lru_cache(maxsize=4096)
+def _ihp_buffer_mm2(a: Accel) -> float:
+    from chipleap.gen import banks
+    from chipleap.macro.sram import IHP_1P, choose
+
+    banked = replace(a, ports=1)
+    if banks.unsupported(banked) is None:
+        return banks.plan(banked, IHP_1P).area_um2 / 1e6
+    slots = 2 if a.double_buffer else 1
+    total = 0.0
+    for kib in (a.abuf_kib, a.wbuf_kib):
+        words = int(kib * 1024) // 4 // slots
+        if words > 0:
+            total += slots * choose(IHP_1P, words, 32).area_um2
+    return total / 1e6
+
+
 def area_breakdown(
     d: Design, tech: Technology, cpu: CPUModel, mem: ExternalMemory | None
 ) -> dict[str, float]:
@@ -417,7 +450,7 @@ def area_breakdown(
         a = d.accel
         kge = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports)
         area["accelerator logic"] = tech.logic_mm2(kge)
-        area["accelerator buffers"] = tech.sram_mm2(a.abuf_kib) + tech.sram_mm2(a.wbuf_kib)
+        area["accelerator buffers"] = buffer_mm2(a, tech)
         if d.platform == "standalone":
             area["axi adapter"] = tech.logic_mm2(AXI_ADAPTER_KGE)
     if mem is not None:

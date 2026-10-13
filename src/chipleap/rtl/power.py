@@ -43,6 +43,7 @@ from chipleap.rtl.openroad import (
     OpenroadUnavailable,
     PdkViews,
     failure,
+    macro_views,
     pdk_views,
     read_limited,
     routed_run,
@@ -168,9 +169,13 @@ def gate_level_run(
         work, "chipleap_gl_aux.v", dump_module(scope.replace("/", "."), vcd, forced)
     )
     m = manifest(project, "icarus", work)
+    # The hard macros' models, which the manifest copied into the work directory (and
+    # defined FUNCTIONAL for), go on with the netlist in the RTL's place.
+    models = [s for s in m["sources"] if s.startswith("macros/")] if project.macros else []
     m["sources"] = [
         str(local),
         *(str(p) for p in views.models),
+        *(str(work / s) for s in models),
         str(aux),
         *(str(s) for s in project.tests.sources),
     ]
@@ -328,10 +333,13 @@ def power_script(
     vcd: str | None,
     scope: str,
 ) -> str:
+    macro = files.get("macros", {"lefs": [], "liberty": {}})
     lines = [
         f"read_lef {q.tcl(files['tech_lef'])}",
         *(f"read_lef {q.tcl(f)}" for f in files["cell_lefs"]),
+        *(f"read_lef {q.tcl(f)}" for f in macro["lefs"]),
         f"read_liberty {q.tcl(files['liberty'][corner])}",
+        *(f"read_liberty {q.tcl(f)}" for f in macro["liberty"].get(corner, [])),
         f"read_verilog {q.tcl(netlist)}",
         f"link_design {q.tcl(project.top)}",
         f"read_sdc {q.tcl(sdc)}",
@@ -424,12 +432,14 @@ def analyze(project: Project) -> PowerResult:
     if run is not None:
         views = routed_views(project, run)
         pdk = pdk_views(project, run)
+        boxes = macro_views(project, run)
         sealed = views.sealed
         netlist, sdc_src, spef = views.netlist, views.sdc, views.spef
         total = views.metrics.get("power__total")
         librelane_mw = float(total) * 1000 if isinstance(total, (int, float)) else None
     else:
         pdk = pdk_views(project)
+        boxes = macro_views(project, work=builddir.work_dir(work, "macro_views"))
         try:
             netlist = synthesize(project, work / "synth").netlist
         except SynthError as exc:
@@ -448,6 +458,7 @@ def analyze(project: Project) -> PowerResult:
     for corner in cfg.corners:
         job = Job(work, f"power_{corner}")
         files = pdk.stage_all(job, (corner,))
+        files["macros"] = boxes.stage_all(job, (corner,))
         script = power_script(
             project,
             files,

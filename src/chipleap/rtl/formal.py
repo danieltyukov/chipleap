@@ -14,6 +14,11 @@ SymbiYosys runs under the confinement of ``chipleap.rtl.confine``. A .sby file t
 names itself (``formal.sby``) runs as it is: it can hold Python and Yosys commands that run
 programs, so it is the project's code, like its tests.
 
+A project's hard macros (``macros``) are cut points: their black boxes are read with the
+sources and every output of every instance is a free value each step, so a property about
+the logic around a macro is proved for anything the macro could return, and one that needs
+what the macro stores fails. A project's own .sby file reads what it names.
+
 A check passes, fails (a counterexample from reset, or a cover never reached), is unknown
 (induction failed with no counterexample from reset: the property may hold but needs a
 stronger invariant or more depth) or errs. Each counterexample comes back as the failed
@@ -277,7 +282,10 @@ def run_check(
     if tool.path is None:
         raise RuntimeError(_no_sby(tool))
     srcs = files if files is not None else _sources(project)
-    text = sby_text(project, check, srcs, includes=includes, after=after)
+    boxes, cuts = macro_cuts(project)
+    text = sby_text(
+        project, check, [*boxes, *srcs], includes=includes, after=[*cuts, *(after or [])]
+    )
     config = builddir.write_text(workdir, f"{check.name}.sby", text)
     out = _run([tool.path, "-f", "-d", check.name, config.name], workdir, project, workdir, timeout)
     builddir.write_text(workdir, f"{check.name}.log", out)
@@ -291,6 +299,18 @@ def run_check(
         "top": check.top or project.top,
     }
     return {**head, **_with_traces(result, project)}
+
+
+def macro_cuts(project: Project) -> tuple[list[Path], list[str]]:
+    """The project's hard macros as formal cut points: each macro's black box, read with
+    the sources, and a ``cutpoint`` per macro cell after ``prep``, which drives every
+    output of every instance from a free value each step. A property then holds for
+    anything a macro could return, and one that needs what a macro stores fails with a
+    counterexample in which the macro's outputs are whatever breaks it."""
+    from chipleap.rtl import macros
+
+    boxes = macros.stubs(project)
+    return boxes, [f"cutpoint t:{q.plain(b.stem)}" for b in boxes]
 
 
 def _sources(project: Project) -> list[Path]:

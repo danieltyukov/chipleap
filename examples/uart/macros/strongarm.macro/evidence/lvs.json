@@ -13,26 +13,22 @@
       "M9",
       "M10",
       "pair_dummy1",
-      "pair_dummy2",
-      "latch_n_dummy1",
-      "latch_n_dummy2",
-      "latch_n_dummy3",
-      "latch_n_dummy4"
+      "pair_dummy2"
     ],
     "matched": true
   },
   "engineering": {
     "status": "pass",
-    "summary": "IHP KLayout LVS deck: the layout matches strongarm.spice (17 devices)"
+    "summary": "IHP KLayout LVS deck: the layout matches strongarm.spice (13 devices)"
   },
   "inputs": [
     {
       "path": "strongarm.gds",
-      "sha256": "20c4f90d53740c877f95122f923a43fa562c3dcefdf97d43604915e1bac84148"
+      "sha256": "4d79d2adc33db02f0fe71ea09f6298d89ff2af0356e53c3029f1712333a61eac"
     },
     {
       "path": "strongarm.spice",
-      "sha256": "b80dd5f78e9a6d5d7db113b1dc558e73f5afe3a27d88182a87ce9169770f2bac"
+      "sha256": "bf58de65f604ba2760cce854398a2ad05d70d083347f2dde49870e627cd6c61d"
     }
   ],
   "operation": "lvs",

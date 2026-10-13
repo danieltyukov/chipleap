@@ -16,7 +16,7 @@ library (strongarm_tt_27) {
   voltage_map (vdd, 1.2) ;
   voltage_map (vss, 0) ;
   cell (strongarm) {
-    area : 941.85 ;
+    area : 1187.28 ;
     is_macro_cell : true ;
     dont_touch : true ;
     dont_use : true ;
@@ -31,33 +31,33 @@ library (strongarm_tt_27) {
     pin (clk) {
       direction : input ;
       clock : true ;
-      capacitance : 0.016644 ;
+      capacitance : 0.026841 ;
       related_power_pin : vdd ;
       related_ground_pin : vss ;
     }
     pin (inm) {
       direction : input ;
       is_analog : true ;
-      capacitance : 0.004564 ;
+      capacitance : 0.004601 ;
       related_power_pin : vdd ;
       related_ground_pin : vss ;
     }
     pin (inp) {
       direction : input ;
       is_analog : true ;
-      capacitance : 0.004839 ;
+      capacitance : 0.004601 ;
       related_power_pin : vdd ;
       related_ground_pin : vss ;
     }
     pin (outn) {
       direction : output ;
-      capacitance : 0.023677 ;
+      capacitance : 0.025149 ;
       related_power_pin : vdd ;
       related_ground_pin : vss ;
     }
     pin (outp) {
       direction : output ;
-      capacitance : 0.027068 ;
+      capacitance : 0.025199 ;
       related_power_pin : vdd ;
       related_ground_pin : vss ;
     }

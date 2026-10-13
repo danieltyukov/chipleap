@@ -10,7 +10,9 @@ min = 0.8
 definition = "decision = value_at(V(outp,outn), 2.9n) >= 0.8"
 
 [specs.measured]
-tt_27 = 1.1999754650438517
+ff_27 = 1.199996633618921
+ss_27 = 1.1714869108884056
+tt_27 = 1.1999972023148826
 
 [[specs]]
 name = "outn_low"
@@ -20,7 +22,33 @@ max = 0.3
 definition = "outn_low = value_at(V(outn), 2.9n) <= 0.3"
 
 [specs.measured]
-tt_27 = 0.000018943258406239607
+ff_27 = 0.0000028782367226319974
+ss_27 = 0.0245248817544831
+tt_27 = 0.0000021440090039370292
+
+[[specs]]
+name = "reverse"
+description = "After layout (extracted)."
+unit = "V"
+max = -0.8
+definition = "reverse = value_at(V(outp,outn), 6.9n) <= -0.8"
+
+[specs.measured]
+ff_27 = -1.1999966336121781
+ss_27 = -1.1705162841892756
+tt_27 = -1.19999714977526
+
+[[specs]]
+name = "outp_low"
+description = "After layout (extracted)."
+unit = "V"
+max = 0.3
+definition = "outp_low = value_at(V(outp), 6.9n) <= 0.3"
+
+[specs.measured]
+ff_27 = 0.000002878239717146816
+ss_27 = 0.025393204993485404
+tt_27 = 0.000002185046653168346
 
 [[specs]]
 name = "decision_schematic"
@@ -29,6 +57,8 @@ unit = "V"
 definition = "decision = value_at(V(outp,outn), 2.9n) >= 0.8"
 
 [specs.measured]
+ff_27 = 1.1999971208646107
+ss_27 = 1.1999998934610174
 tt_27 = 1.1999994542605952
 
 [[specs]]
@@ -38,4 +68,28 @@ unit = "V"
 definition = "outn_low = value_at(V(outn), 2.9n) <= 0.3"
 
 [specs.measured]
+ff_27 = 0.0000023075271835743
+ss_27 = 0.00000007728347856200954
 tt_27 = 0.0000003993839751659204
+
+[[specs]]
+name = "reverse_schematic"
+description = "reverse before layout (schematic), for comparison; its limits are on reverse."
+unit = "V"
+definition = "reverse = value_at(V(outp,outn), 6.9n) <= -0.8"
+
+[specs.measured]
+ff_27 = -1.1999971209092257
+ss_27 = -1.1999998934243294
+tt_27 = -1.1999994542815444
+
+[[specs]]
+name = "outp_low_schematic"
+description = "outp_low before layout (schematic), for comparison; its limits are on outp_low."
+unit = "V"
+definition = "outp_low = value_at(V(outp), 6.9n) <= 0.3"
+
+[specs.measured]
+ff_27 = 0.000002307505828761476
+ss_27 = 0.0000000773070096272901
+tt_27 = 0.00000039936436199755455

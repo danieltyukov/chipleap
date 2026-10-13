@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from chipleap.chip.floorplan import BOND_UM, Floorplan
+from chipleap.chip.floorplan import BOND_UM, Floorplan, Placed
 from chipleap.chip.io import IoCell
 from chipleap.chip.netlist import transform
 
@@ -38,6 +38,11 @@ GDS_LAYERS = {
     "TopMetal2": 134,
 }
 NET_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A flattened net as OpenROAD's CDL writes it: identifiers joined by dots, a bus bit's
+# brackets escaped (u_core.rdata_o\[3\]).
+FLAT_NET_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){1,8}(\\\[[0-9]{1,6}\\\])?"
+)
 DROP_PREFIXES = ("sg13g2_IOPad", "sg13g2_Corner", "sg13g2_Filler", "bondpad", "sealring")
 NETLIST_MAX = 1 << 30
 DB_MAX = 256 << 20
@@ -83,16 +88,32 @@ class LvsInputs:
     instances: int
 
 
+@dataclass(frozen=True)
+class Abstract:
+    """A macro the chip's LVS compares as a box, as it does the IO cells: where it is
+    placed, its pins and their shapes (``MacroView.pins``, in its own coordinates), its
+    size, and its subcircuit's ports in order (``<i>`` for a bus bit, as in its CDL)."""
+
+    placed: Placed
+    pins: dict[str, list[tuple[str, tuple[float, float, float, float]]]]
+    size: tuple[float, float]
+    ports: list[str]
+
+
 def lvs_inputs(
     cdl: str,
     io_cdl: str,
     plan: Floorplan,
     io_cells: Mapping[str, IoCell],
     extra: Iterable[str],
+    abstract: Mapping[str, Abstract] | None = None,
 ) -> LvsInputs:
     """The LVS netlist and the pins of the LVS view, from OpenROAD's CDL of the chip
     (``cdl``), the IO library's CDL, the floorplan and the IO cells' LEF; ``extra`` are
-    the subcircuit libraries to append (the standard cells', each macro's)."""
+    the subcircuit libraries to append (the standard cells', each macro's). The macro
+    instances of ``abstract`` leave the netlist as the IO cells do, and each of their
+    pins becomes metal labelled with its net: what reaches the macro is still checked,
+    not what is inside it."""
     if len(cdl) > NETLIST_MAX:
         raise CheckError("OpenROAD's CDL is larger than expected")
     orders = subckt_ports(io_cdl)
@@ -103,6 +124,7 @@ def lvs_inputs(
         raise CheckError("OpenROAD's CDL has no .SUBCKT")
     top = lines[head].split()[1]
     body: list[str] = []
+    boxes: list[tuple[str, list[str], str]] = []
     pins: list[dict[str, Any]] = []
     ports = ["VDD", "VSS"]
     for line in lines[head + 1 :]:
@@ -114,6 +136,9 @@ def lvs_inputs(
         if not words[0].upper().startswith("X"):
             continue
         inst, nets, master = words[0][1:], words[1:-1], words[-1]
+        if abstract and inst in abstract:
+            boxes.append((inst, nets, master))
+            continue
         if master not in orders:
             body.append(line)
             continue
@@ -129,7 +154,7 @@ def lvs_inputs(
             shapes = [s for port in cell.core_ports(pin) for s in port]
             if not shapes:
                 continue
-            if not NET_RE.fullmatch(net):
+            if not NET_RE.fullmatch(net) and not FLAT_NET_RE.fullmatch(net):
                 raise CheckError(f"net {net[:40]!r} on {inst}/{pin} is not a plain name")
             rects = []
             for layer, rect in shapes:
@@ -139,6 +164,37 @@ def lvs_inputs(
             pins.append({"net": net, "rects": rects})
             if net not in ports:
                 ports.append(net)
+    used = {w for line in body for w in line.split()[1:-1]} | set(ports)
+    for inst, nets, master in boxes:
+        box = (abstract or {})[inst]
+        if master != box.placed.cell or len(nets) != len(box.ports):
+            raise CheckError(f"macro {inst} ({master}) is not the cell or the pins planned")
+        for port, net in zip(box.ports, nets, strict=True):
+            # A net only this pin has (an output nothing reads) has nothing to compare.
+            if net not in used:
+                continue
+            if not NET_RE.fullmatch(net) and not FLAT_NET_RE.fullmatch(net):
+                raise CheckError(f"net {net[:40]!r} on {inst}/{port} is not a plain name")
+            on_pin = box.pins.get(port.replace("<", "[").replace(">", "]"))
+            if not on_pin:
+                raise CheckError(f"macro {inst} has no shape for its pin {port}")
+            rects = [
+                [GDS_LAYERS[layer], [round(v, 4) for v in transform(box.placed, rect, box.size)]]
+                for layer, rect in on_pin
+                if layer in GDS_LAYERS
+            ]
+            pins.append({"net": net, "rects": rects})
+            if net not in ports:
+                ports.append(net)
+    # A pad's net the core drives straight from a cell (an SRAM's output, say) keeps the
+    # core's flattened name (u_core.rdata_o\\[3\\]); it becomes a plain one here, in
+    # the netlist and on the pin's label alike.
+    alias = _plain_aliases(ports, body)
+    if alias:
+        body = [" ".join(alias.get(w, w) for w in line.split()) for line in body]
+        ports = [alias.get(n, n) for n in ports]
+        for pin_entry in pins:
+            pin_entry["net"] = alias.get(pin_entry["net"], pin_entry["net"])
     netlist = [
         "* LVS netlist of the chip without its IO cells, written by ChipLeap",
         f".SUBCKT {top} {' '.join(ports)}",
@@ -149,14 +205,40 @@ def lvs_inputs(
     return LvsInputs("\n".join(netlist) + "\n", pins, ports, len(body))
 
 
-def lvs_plan(plan: Floorplan, name: str, inputs: LvsInputs, src: Path, out: Path) -> dict[str, Any]:
-    """The plan of the LVS view: what to drop, what to keep, which pins to label."""
+def _plain_aliases(nets: list[str], body: list[str]) -> dict[str, str]:
+    """A plain name for each net in ``nets`` that is a flattened one, unused anywhere in
+    ``body`` and by any other net."""
+    taken = {w for line in body for w in line.split()} | set(nets)
+    out: dict[str, str] = {}
+    for net in nets:
+        if NET_RE.fullmatch(net):
+            continue
+        base = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9_]", "_", net)).strip("_")
+        name, n = base, 0
+        while name in taken:
+            n += 1
+            name = f"{base}_{n}"
+        taken.add(name)
+        out[net] = name
+    return out
+
+
+def lvs_plan(
+    plan: Floorplan,
+    name: str,
+    inputs: LvsInputs,
+    src: Path,
+    out: Path,
+    abstract_cells: Iterable[str] = (),
+) -> dict[str, Any]:
+    """The plan of the LVS view: what to drop (the IO ring, and the cells of the macros
+    compared as boxes), what to keep, which pins to label."""
     inner = plan.ring_inner
     return {
         "input": str(src),
         "output": str(out),
         "top": name,
-        "drop_prefixes": list(DROP_PREFIXES),
+        "drop_prefixes": [*DROP_PREFIXES, *sorted(set(abstract_cells))],
         "keep_box": [inner[0] - 1, inner[1] - 1, inner[2] + 1, inner[3] + 1],
         "pins": inputs.pins,
     }
@@ -185,21 +267,32 @@ def lvs_outcome(log: str) -> str:
 class DrcResult:
     violations: dict[str, int] = field(default_factory=dict)  # rule -> count
     reports: int = 0
+    # Pin markers off the grid inside the PDK's own macros (IHP's SRAMs draw Metal1 pin
+    # shapes off the 5 nm grid): reported, not counted. Pin purposes are no mask layer.
+    in_pdk_macros: dict[str, int] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
         return sum(self.violations.values())
 
 
-def read_lyrdb(path: Path, into: DrcResult) -> None:
-    """Count a KLayout report database's items by rule."""
+PIN_OFFGRID_RE = re.compile(r"[A-Za-z0-9]+_pin_Offgrid")
+
+
+def read_lyrdb(path: Path, into: DrcResult, pdk_cells: frozenset[str] = frozenset()) -> None:
+    """Count a KLayout report database's items by rule; an off-grid pin marker inside one
+    of ``pdk_cells`` (the PDK's own macros) is counted apart, every other item as it is."""
     if path.stat().st_size > DB_MAX:
         raise CheckError(f"{path.name} is larger than expected")
     into.reports += 1
     for _, el in ET.iterparse(path, events=("end",)):
         if el.tag == "item":
             rule = (el.findtext("category") or "?").strip().strip("'")
-            into.violations[rule] = into.violations.get(rule, 0) + 1
+            cell = (el.findtext("cell") or "").strip()
+            if cell in pdk_cells and PIN_OFFGRID_RE.fullmatch(rule):
+                into.in_pdk_macros[rule] = into.in_pdk_macros.get(rule, 0) + 1
+            else:
+                into.violations[rule] = into.violations.get(rule, 0) + 1
             el.clear()
 
 

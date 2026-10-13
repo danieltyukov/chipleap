@@ -90,6 +90,31 @@ def _views(ref: Path, cell: str) -> list[Path]:
     ]
 
 
+# IHP SG13G2's single-port macros as ``catalog`` reads them from the PDK (IHP-Open-PDK
+# 22f2a25, the LEF outlines): what the model prices an accelerator's buffers with, where
+# the PDK need not be installed. tests/test_macro_sram.py checks it against the PDK.
+IHP_1P = (
+    Sram("RM_IHPSG13_1P_1024x16_c2_bm_bist", 1024, 16, 236.8, 336.46, True),
+    Sram("RM_IHPSG13_1P_1024x32_c2_bm_bist", 1024, 32, 416.64, 336.46, True),
+    Sram("RM_IHPSG13_1P_1024x64_c2_bm_bist", 1024, 64, 784.48, 336.46, True),
+    Sram("RM_IHPSG13_1P_1024x8_c2_bm_bist", 1024, 8, 146.88, 336.46, True),
+    Sram("RM_IHPSG13_1P_2048x64_c2_bm_bist", 2048, 64, 784.48, 626.7, True),
+    Sram("RM_IHPSG13_1P_256x16_c2_bm_bist", 256, 16, 236.8, 118.78, True),
+    Sram("RM_IHPSG13_1P_256x32_c2_bm_bist", 256, 32, 416.64, 118.78, True),
+    Sram("RM_IHPSG13_1P_256x48_c2_bm_bist", 256, 48, 596.48, 118.78, True),
+    Sram("RM_IHPSG13_1P_256x64_c2_bm_bist", 256, 64, 784.48, 118.78, True),
+    Sram("RM_IHPSG13_1P_256x8_c3_bm_bist", 256, 8, 236.8, 74.1, True),
+    Sram("RM_IHPSG13_1P_4096x16_c3_bm_bist", 4096, 16, 416.64, 618.3, True),
+    Sram("RM_IHPSG13_1P_4096x8_c3_bm_bist", 4096, 8, 236.8, 618.3, True),
+    Sram("RM_IHPSG13_1P_512x16_c2_bm_bist", 512, 16, 236.8, 191.34, True),
+    Sram("RM_IHPSG13_1P_512x32_c2_bm_bist", 512, 32, 416.64, 191.34, True),
+    Sram("RM_IHPSG13_1P_512x64_c2_bm_bist", 512, 64, 784.48, 191.34, True),
+    Sram("RM_IHPSG13_1P_512x8_c3_bm_bist", 512, 8, 236.8, 110.38, True),
+    Sram("RM_IHPSG13_1P_64x64_c2_bm_bist", 64, 64, 784.48, 64.36, True),
+    Sram("RM_IHPSG13_1P_8192x32_c4", 8192, 32, 1520.16, 618.3, False),
+)
+
+
 def catalog(pdk: Path) -> list[Sram]:
     """Every 1P macro of the PDK's ``sg13g2_sram`` with all its views: LEF, GDS, CDL and
     liberty at the three corners. The outline is read from the LEF."""

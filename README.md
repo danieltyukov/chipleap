@@ -85,9 +85,9 @@ These are the steps ChipLeap runs on a project today, with what each reported fo
 | IR drop | OpenROAD PDNSim on the routed power grid | 0.52 mV at worst |
 | Power intent | UPF read and placed by OpenROAD | the receiver in a domain of its own, 13 signals between the two |
 | ECO | OpenROAD edits on the routed design, then LibreLane's signoff again | a gate resized and the UART signed off again in about a minute and a half |
-| Macros | `macro/v1` packages, checked and rewritten before use | aispice's StrongARM comparator, 20.93 x 45 um, its transistors in LVS |
+| Macros | `macro/v1` packages, checked and rewritten before use | aispice's StrongARM comparator, 29.1 x 40.8 um, both decisions measured after layout, its transistors in LVS |
 | Chip assembly | LibreLane with IHP's pad ring, then bond pads, seal ring and fill in KLayout | 33 pads on a 1.52 x 1.52 mm die |
-| Timing at the ports | OpenSTA through IHP's IO cells at every corner | +0.971 ns of setup slack at the slow corner (+6.302 ns at the core's side of the pads) |
+| Timing at the ports | OpenSTA through IHP's IO cells at every corner | +0.968 ns of setup slack at the slow corner (+6.257 ns at the core's side of the pads) |
 | Signoff | IHP's DRC deck on the whole die (density included), its LVS deck down to the macros' transistors, antenna | 0 DRC violations, LVS match, 0 antenna violations |
 
 ```sh
@@ -133,7 +133,7 @@ Every tool is optional. `chipleap doctor` lists what it found, and `chipleap ver
 The accelerator model is the same tile schedule the RTL runs, so it is checked against it:
 
 - **Cycles:** equal to simulation without memory stalls, within a few percent with random stalls, on Verilator, Xcelium, VCS and Questa alike.
-- **Area:** logic area within 3 % on average of synthesis on IHP SG13G2, across 12 configurations.
+- **Area:** logic area within 3 % on average of synthesis on IHP SG13G2, across 12 configurations, and buffers priced with the SRAM macros the layout places, equal to the routed SmolLM2 accelerator's.
 - **Clock:** the model allows what the routed accelerator meets at the slow corner: 100 MHz with up to seven ports, about 99 MHz with eight and 89 MHz with sixteen, and less for a GEMV engine with eight or more lanes or more than eight columns.
 
 The other nodes are scaled from published figures and say so. [docs/model.md](docs/model.md) lists every number and its source; [docs/verification.md](docs/verification.md) explains each check.

@@ -2,17 +2,17 @@
   "artifacts": [
     {
       "path": "strongarm.pex.spice",
-      "sha256": "695a7288d7cb8a588324e07891b78104b08af815ad71429c9f918f2a675c8ca1"
+      "sha256": "31668cf77b0d17b463b40972b95b330ac7d71456bc2a16dcb48767ff01d8be65"
     }
   ],
   "engineering": {
     "status": "pass",
-    "summary": "Magic extraction: 34 device fingers, 37 capacitors (90.2 fF), 0 resistors"
+    "summary": "Magic extraction: 30 device fingers, 36 capacitors (101.1 fF), 0 resistors"
   },
   "inputs": [
     {
       "path": "strongarm.gds",
-      "sha256": "20c4f90d53740c877f95122f923a43fa562c3dcefdf97d43604915e1bac84148"
+      "sha256": "4d79d2adc33db02f0fe71ea09f6298d89ff2af0356e53c3029f1712333a61eac"
     }
   ],
   "operation": "pex",

@@ -177,10 +177,13 @@ def manifest(
     stage: bool = False,
     extra_args: tuple[str, ...] = (),
     env: dict[str, str] | None = None,
+    macro_timing: bool = False,
 ) -> dict[str, Any]:
     """The runner's manifest. With ``stage`` the sources, include directories, tests and
     golden model are copied under ``workdir/src`` and named relative to it. ``extra_args``
-    and ``env`` are more simulator options and environment (gate-level simulation's)."""
+    and ``env`` are more simulator options and environment (gate-level simulation's).
+    ``macro_timing`` keeps the SRAM models' timing (their ``specify`` paths, for an SDF)
+    instead of defining ``FUNCTIONAL``."""
     tests_dir = project.tests.dir
     if tests_dir is None:
         raise SimError("the project has no tests (add a tests section)")
@@ -225,7 +228,7 @@ def manifest(
     except macros.MacroStepError as exc:
         raise SimError(str(exc)) from exc
     defines: dict[str, Any] = {k: (1 if v is None else v) for k, v in project.defines.items()}
-    if models:
+    if models and not macro_timing:
         defines.setdefault("FUNCTIONAL", 1)
     return {
         "simulator": simulator,
@@ -357,6 +360,7 @@ def run_tests(
     workdir: Path | None = None,
     extra_args: tuple[str, ...] = (),
     env: dict[str, str] | None = None,
+    macro_timing: bool = False,
 ) -> SimRun:
     """Build the project and run its cocotb tests. Raises SimError when they cannot run
     at all (no cocotb, no simulator, no tests); a failing build or test is a result."""
@@ -386,6 +390,7 @@ def run_tests(
         stage=staged,
         extra_args=extra_args,
         env=env,
+        macro_timing=macro_timing,
     )
     (work / "manifest.json").write_text(json.dumps(m, indent=1))
     (work / RUNNER).write_text(resources.files("chipleap.rtl").joinpath(RUNNER).read_text())
