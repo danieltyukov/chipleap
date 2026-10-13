@@ -18,9 +18,10 @@ The steps after them treat a macro as a box with its ports: formal makes it a cu
 CDC a state element of the clock its port samples on, equivalence turns its pins into
 compared outputs and shared inputs, gate-level simulation runs the PDK's model, scan
 insertion and ATPG leave it off the chains and out of the test, power and IR drop read
-its liberty and LEF, UPF places it in its domain, and an ECO passes its views on. The
-chip and the commercial tools do not model a macro yet; they say so, rather than check
-a design they cannot read.
+its liberty and LEF, UPF places it in its domain, an ECO passes its views on, and the
+chip places the core's macros inside its pad ring (an SRAM compared as a box by LVS).
+The commercial tools do not model a macro yet; they say so, rather than check a design
+they cannot read.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ from chipleap.rtl.project import Project, RtlMacro
 from chipleap.verify.tools import yosys
 
 # Steps that do not model a macro yet.
-UNSUPPORTED = ("chip",)
+UNSUPPORTED: tuple[str, ...] = ()
 OPEN_TOOLS = ("", "auto", "icarus", "verilator", "yosys", "librelane")
 MANIFEST_MAX = 1 << 20
 # Yosys lists every wire and cell too, so a large design's list is long.

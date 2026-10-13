@@ -149,7 +149,8 @@ The `macros` section lists the hard macros the RTL instantiates by their cell na
 - `power` and `ir_drop` read each macro's LEF and its liberty at the corner (from the routed run's own copies, hash checked), so the macros' power is in the report's `Macro` group and their supply pins are on the grid PDNSim solves; the gate-level activity run uses their models.
 - `upf` counts a macro in its domain's area, makes the domain's region at least as wide as its widest macro, fixes the macro inside it and cuts the rows under it. A domain of macros alone is refused: OpenROAD places a domain by its standard cells.
 - `eco` passes the routed run's macros on to LibreLane as place and route wrote them (each view one the run recorded), and never the power grid script: the ECO resumes after the grid is built.
-- `chip` and the commercial tools do not model a macro yet: on a project with macros they skip and name the macros, here and in the assistant's tools.
+- `chip` places the core's macros inside the pad ring with the chip's own ([chips](chips.md#floorplan)), under their macro grid and in LibreLane's `MACROS`, and its LVS compares IHP's SRAMs as boxes, as it does the IO cells: IHP's deck does not match IHP's own SRAM at transistor level, so the nets that reach each pin are checked, not what is inside ([chips](chips.md#what-runs)).
+- The commercial tools do not model a macro yet: on a project with macros they skip and name the macros, here and in the assistant's tools.
 
 `examples/sram` is a 1 KiB scratchpad in one `RM_IHPSG13_1P_256x32_c2_bm_bist` with byte enables, with cocotb tests against a dictionary of words.
 
