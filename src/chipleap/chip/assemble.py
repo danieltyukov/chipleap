@@ -131,7 +131,11 @@ def plan_chip(project: Project) -> dict[str, Any]:
             man = macros.manifest(project, m.package)
             sizes[inst] = (man.name, man.width_um, man.height_um)
     inner = [(f"{netlist.CORE_INST}.{m.flat}", m.at_um, m.orientation) for m in project.macros]
-    plan = floorplan.plan(chip, cells, sizes, core_macros=inner)
+    # An SRAM is under pdngen's macro grid; a package's supply pins are strapped.
+    gridded = frozenset(
+        f"{netlist.CORE_INST}.{m.flat}" for m in project.macros if m.package is None
+    )
+    plan = floorplan.plan(chip, cells, sizes, core_macros=inner, gridded=gridded)
     return {"name": chip.name, **plan.to_dict()}
 
 
@@ -204,7 +208,8 @@ def prepare(project: Project, pdk: Path) -> Prepared:
         for inst, cell in every.cells.items()
     }
     inner = [(f"{netlist.CORE_INST}.{m.flat}", m.at_um, m.orientation) for m in project.macros]
-    plan = floorplan.plan(chip, cells, sizes, binding.directions, inner)
+    gridded = frozenset(i for i, c in every.cells.items() if not every.views[c].supply_hookup)
+    plan = floorplan.plan(chip, cells, sizes, binding.directions, inner, gridded)
     if any(not c.cell for c in plan.ring):
         raise NetlistError("a pad has no IO cell")
     try:

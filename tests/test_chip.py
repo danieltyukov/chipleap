@@ -258,6 +258,20 @@ def test_the_cores_macros_are_placed_with_the_chips_but_stay_inside_the_core():
         )
 
 
+def test_an_sram_along_the_top_edge_moves_down_under_a_supply_pair():
+    from chipleap.macro import grid
+
+    sizes = {"u_core.u_mem": ("ram", 236.8, 74.1)}
+    inner = [("u_core.u_mem", None, "N")]
+    plan = floorplan.plan(chip(), CELLS, sizes, core_macros=inner, gridded=frozenset(sizes))
+    (mem,) = plan.core_macros
+    assert grid.tm2_pairs(plan.core[1], mem.y, mem.y + mem.h)
+    # On the row grid, and the same macro left ungridded stays at the edge.
+    assert round((mem.y - plan.core[1]) * 1000) % 3780 == 0
+    edge = floorplan.plan(chip(), CELLS, sizes, core_macros=inner).core_macros[0]
+    assert edge.y > mem.y
+
+
 def test_a_library_without_a_cell_is_refused():
     cells = dict(CELLS)
     del cells["sg13g2_Filler200"]

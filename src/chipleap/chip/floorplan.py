@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from chipleap.chip.config import SIDES, ChipConfig, Pad
 from chipleap.chip.io import CORNER, FILLERS, PAD_CELLS, IoCell, fillers
+from chipleap.macro import grid
 
 BOND_UM = 70  # the bond pads' band between the die edge and the IO ring
 SEAL_GAP_UM = 60  # from the die edge out to the seal ring's outline
@@ -173,11 +174,14 @@ def plan(
     macros: Mapping[str, tuple[str, float, float]] | None = None,
     directions: Mapping[str, str] | None = None,
     core_macros: Sequence[tuple[str, tuple[float, float] | None, str]] = (),
+    gridded: frozenset[str] = frozenset(),
 ) -> Floorplan:
     """The floorplan. ``io`` is the IO library's cells (``chipleap.chip.io.read_lef``),
     ``macros`` each macro instance's cell, width and height (the core's too),
     ``directions`` each signal pad's port direction (``in`` or ``out``), ``core_macros``
-    the core's own macros (instance, where in the core or None, orientation)."""
+    the core's own macros (instance, where in the core or None, orientation), ``gridded``
+    the macros under pdngen's macro grid (an SRAM), which need a whole TopMetal2 supply
+    pair over them."""
     macros = macros or {}
     directions = directions or {}
     pad_w, depth, corner = _sizes(io)
@@ -275,7 +279,7 @@ def plan(
         raise FloorplanError("the core does not fit inside the pad ring")
 
     wanted = [(m.instance, m.at_um, m.orientation) for m in config.macros]
-    placed_macros = _place_macros([*wanted, *core_macros], macros, core)
+    placed_macros = _place_macros([*wanted, *core_macros], macros, core, gridded)
     in_core = {name for name, _, _ in core_macros}
 
     # Bond map order, counter-clockwise from the top of the west side: the west side
@@ -308,10 +312,13 @@ def _place_macros(
     wanted: Sequence[tuple[str, tuple[float, float] | None, str]],
     macros: Mapping[str, tuple[str, float, float]],
     core: tuple[int, int, int, int],
+    gridded: frozenset[str] = frozenset(),
 ) -> list[Placed]:
     """Each macro (instance, where, orientation) where the project puts it (from the
     core's lower left), or in a row along the core's top edge; snapped to the site grid,
-    inside the core, apart by their halos."""
+    inside the core, apart by their halos. A gridded macro placed along the top edge
+    moves down, on the site grid, until a whole TopMetal2 supply pair lies over it (a
+    macro shorter than 104 um can fall between two)."""
     halo = HALO_UM * 1000
     cw, ch = core[2] - core[0], core[3] - core[1]
     out: list[Placed] = []
@@ -330,6 +337,10 @@ def _place_macros(
         # Onto the site grid: upward where the chip section puts it, downward along the
         # top edge, so the halo stays inside the core.
         y = (-(-y // SITE_NM[1]) if at_um is not None else y // SITE_NM[1]) * SITE_NM[1]
+        if at_um is None and instance in gridded:
+            y0 = _um(core[1])
+            low = grid.nudge(y0, _um(core[1] + y), h_um, _um(SITE_NM[1]), down=True)
+            y = _nm(low) - core[1] if low is not None else y
         if x < 0 or y < 0 or x + w > cw or y + h > ch:
             raise FloorplanError(
                 f"macro {instance} ({w_um:g} x {h_um:g} um at {_um(x):g}, {_um(y):g} um in "
