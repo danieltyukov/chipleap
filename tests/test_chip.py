@@ -557,6 +557,19 @@ def test_an_unplain_net_on_a_pad_is_refused():
         checks.lvs_inputs(cdl.replace(" a_core VDD\n", " a$core VDD\n"), IO_CDL, plan, CELLS, [])
 
 
+def test_a_flattened_net_on_a_pad_gets_a_plain_name_in_the_netlist_and_on_its_label():
+    """A core net driven straight from a cell (an SRAM's output) keeps the core's
+    flattened name in LibreLane's netlist; the LVS netlist and the pin's label take one
+    plain name for it, which no other net has."""
+    plan, cdl = lvs_case()
+    flat = cdl.replace("a_core", "u_core.a\\[3\\]").replace("net1", "u_core_a_3")
+    got = checks.lvs_inputs(flat, IO_CDL, plan, CELLS, [])
+    assert "u_core." not in got.netlist and "\\[" not in got.netlist
+    assert got.ports == ["VDD", "VSS", "u_core_a_3_1", "v", "v_padres"]
+    assert "X_1_ u_core_a_3_1 u_core_a_3 VDD VSS sg13g2_inv_1" in got.netlist
+    assert {p["net"] for p in got.pins} == {"u_core_a_3_1", "v", "v_padres"}
+
+
 PASS_LINE = "2026-10-12 04:17:43 +0200: Memory Usage (0K) : INFO : Congratulations! Netlists match."
 
 

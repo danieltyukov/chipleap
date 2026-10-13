@@ -38,6 +38,11 @@ GDS_LAYERS = {
     "TopMetal2": 134,
 }
 NET_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A flattened net as OpenROAD's CDL writes it: identifiers joined by dots, a bus bit's
+# brackets escaped (u_core.rdata_o\[3\]).
+FLAT_NET_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){1,8}(\\\[[0-9]{1,6}\\\])?"
+)
 DROP_PREFIXES = ("sg13g2_IOPad", "sg13g2_Corner", "sg13g2_Filler", "bondpad", "sealring")
 NETLIST_MAX = 1 << 30
 DB_MAX = 256 << 20
@@ -129,7 +134,7 @@ def lvs_inputs(
             shapes = [s for port in cell.core_ports(pin) for s in port]
             if not shapes:
                 continue
-            if not NET_RE.fullmatch(net):
+            if not NET_RE.fullmatch(net) and not FLAT_NET_RE.fullmatch(net):
                 raise CheckError(f"net {net[:40]!r} on {inst}/{pin} is not a plain name")
             rects = []
             for layer, rect in shapes:
@@ -139,6 +144,15 @@ def lvs_inputs(
             pins.append({"net": net, "rects": rects})
             if net not in ports:
                 ports.append(net)
+    # A pad's net the core drives straight from a cell (an SRAM's output, say) keeps the
+    # core's flattened name (u_core.rdata_o\\[3\\]); it becomes a plain one here, in
+    # the netlist and on the pin's label alike.
+    alias = _plain_aliases(ports, body)
+    if alias:
+        body = [" ".join(alias.get(w, w) for w in line.split()) for line in body]
+        ports = [alias.get(n, n) for n in ports]
+        for pin_entry in pins:
+            pin_entry["net"] = alias.get(pin_entry["net"], pin_entry["net"])
     netlist = [
         "* LVS netlist of the chip without its IO cells, written by ChipLeap",
         f".SUBCKT {top} {' '.join(ports)}",
@@ -147,6 +161,24 @@ def lvs_inputs(
         *extra,
     ]
     return LvsInputs("\n".join(netlist) + "\n", pins, ports, len(body))
+
+
+def _plain_aliases(nets: list[str], body: list[str]) -> dict[str, str]:
+    """A plain name for each net in ``nets`` that is a flattened one, unused anywhere in
+    ``body`` and by any other net."""
+    taken = {w for line in body for w in line.split()} | set(nets)
+    out: dict[str, str] = {}
+    for net in nets:
+        if NET_RE.fullmatch(net):
+            continue
+        base = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9_]", "_", net)).strip("_")
+        name, n = base, 0
+        while name in taken:
+            n += 1
+            name = f"{base}_{n}"
+        taken.add(name)
+        out[net] = name
+    return out
 
 
 def lvs_plan(plan: Floorplan, name: str, inputs: LvsInputs, src: Path, out: Path) -> dict[str, Any]:
