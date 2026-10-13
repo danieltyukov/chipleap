@@ -74,11 +74,13 @@ FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical cor
 #   operand registers and accumulators: the 2 x 8 engine took 9.63 ns and the 4 x 8 one
 #   10.27 ns. ACCEL_LANE_NS per doubling of lanes bounds both from above.
 # - More ports make the engine larger and its wires longer: the GEMV 1 x 8 engine took
-#   9.11 ns with one port and 11.18 ns with eight, the slot select into an operand register
-#   again, and the DMA's setup of each port's start address 10.11 ns. ACCEL_PORT_NS is the
-#   line a + b x ports through those two. Each port has an address generator of its own, so
-#   the DMA no longer hands words to the ports one after another; with that chain the GEMV
-#   2 x 8 engine with four ports took 14.02 ns, and now 9.63 ns.
+#   9.11 ns with one port, then 11.18 ns with eight and 11.25 ns with sixteen (at 35 % core
+#   utilisation), both on the slot select into an operand register; there the DMA's setup of
+#   each port's start address took 10.11 and 10.23 ns. ACCEL_PORT_NS is the line
+#   a + b x ports through one and eight ports; sixteen lie 2.3 ns under it. Each port has
+#   an address generator of its own, so the DMA no longer hands words to the ports one after
+#   another; with that chain the GEMV 2 x 8 engine with four ports took 14.02 ns, and now
+#   9.63 ns.
 # The model is at or above every routed period, so it errs on the safe side.
 # docs/verification.md lists the routed designs.
 ACCEL_ROUTED_NS = 9.33
