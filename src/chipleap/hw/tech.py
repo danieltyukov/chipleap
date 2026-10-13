@@ -29,18 +29,18 @@ from typing import Any
 # Logic of the generated accelerator in kGE (thousands of NAND2 equivalents), fitted to
 # Yosys and ABC on SG13G2 across 12 configurations: all three dataflows, one to four ports,
 # 8 to 64 MACs, mapped and sized for the 5 ns target of verify/synth.py, with the buffers
-# extrapolated away. The leave-one-out error is 2.9% on average and 8.4% at worst.
+# extrapolated away. The leave-one-out error is 2.9% on average and 8.7% at worst.
 # Gate counts are roughly node independent, so the generic nodes reuse them.
-# `scripts/calibrate_sg13g2.py --accel` measures them again.
-ACCEL_BASE_KGE = 26.65  # register file, job and tile control, store engine, cycle counter
-ACCEL_PORT_KGE = 2.33  # one OBI read port of the DMA
+# `scripts/calibrate_sg13g2.py` measures them again.
+ACCEL_BASE_KGE = 24.54  # register file, job and tile control, store engine, cycle counter
+ACCEL_PORT_KGE = 2.47  # one OBI read port of the DMA, with its own address generator
 # Per dataflow: kGE per MAC (8 x 8 multiplier, adder or pipeline registers) and per edge
 # unit: a GEMV lane's accumulators, a weight-stationary column's accumulators, or the
 # operand skew registers on each row and column of an output-stationary array.
 ACCEL_KGE: dict[str, tuple[float, float]] = {
-    "gemv": (0.955, 2.907),
-    "ws": (1.912, 1.649),
-    "os": (1.670, 0.808),
+    "gemv": (0.948, 2.916),
+    "ws": (1.916, 1.629),
+    "os": (1.897, 0.308),
 }
 
 
@@ -52,29 +52,41 @@ AXI_ADAPTER_KGE = 0.54
 
 # Critical path of the generated accelerator on SG13G2 at the typical corner, sized for the
 # 5 ns target of verify/synth.py (scripts/calibrate_sg13g2.py): a delay per dataflow, more
-# for a GEMV adder tree wider than eight columns, and the DMA's port logic, which grows with
-# the number of ports. Set to bound every one of the 12 synthesized configurations from
-# above (3.3 to 5.0 ns), so the clock limit below errs on the safe side.
-ACCEL_DELAY_NS: dict[str, float] = {"gemv": 4.17, "ws": 3.68, "os": 3.40}
-ACCEL_DELAY_WIDE_NS = 0.63  # per doubling of GEMV columns beyond eight
-ACCEL_DELAY_PORTS_NS = (2.27, 0.68)  # the port logic: a + b x ports
+# for a GEMV adder tree wider than eight columns, and the DMA's setup of its ports' start
+# addresses, which grows slowly with the number of ports. Set to bound every one of the 12
+# synthesized configurations from above (3.2 to 4.8 ns), and for the ports the DMA paths of
+# configurations with 4 to 16 ports (3.3 to 4.1 ns), so the clock limit below errs on the
+# safe side.
+ACCEL_DELAY_NS: dict[str, float] = {"gemv": 4.27, "ws": 3.68, "os": 3.40}
+ACCEL_DELAY_WIDE_NS = 0.51  # per doubling of GEMV columns beyond eight
+ACCEL_DELAY_PORTS_NS = (3.23, 0.052)  # the port logic: a + b x ports
 FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical corner
-# After placement and routing with LibreLane at the slow corner (1.08 V, 125 C):
-# - The routed single-port GEMV 1 x 8, weight-stationary 4 x 4 and output-stationary 4 x 4
-#   designs all met 100 MHz, at 9.2 to 9.5 ns whatever their datapath. Their worst paths were
-#   a 32-bit address counter, the weight-stationary accumulator update and the unpacking of
-#   packed weights. ACCEL_ROUTED_NS is the worst of them.
-# - A datapath longer than theirs is scaled from that period by its synthesized path (plus
-#   flop overhead): ACCEL_SIGNOFF_FACTOR is ACCEL_ROUTED_NS over the longest path routed,
-#   the 1 x 8 GEMV engine's.
-# - More ports cost clock: a + b x ports (ACCEL_PORT_NS) through the routed GEMV 4 x 8 with two
-#   ports (10.13 ns, limited by its larger datapath) and GEMV 2 x 8 with four (14.02 ns,
-#   limited by the DMA, which hands words to its ports one after another within a cycle).
+# After placement and routing with LibreLane at the slow corner (1.08 V, 125 C), every
+# design at 100 MHz with 16-word buffers:
+# - The single-port GEMV 1 x 8, weight-stationary 4 x 4 and output-stationary 4 x 4 designs
+#   met 100 MHz at 9.0 to 9.3 ns. Their worst paths were the GEMV engine's row counter, the
+#   weight-stationary accumulator update, and a port's address step and the output-stationary
+#   operand feed. ACCEL_ROUTED_NS is the worst of them.
+# - A synthesized datapath longer than the GEMV 1 x 8 engine's (a wider adder tree) is scaled
+#   from that period in proportion: ACCEL_SIGNOFF_FACTOR is ACCEL_ROUTED_NS over the GEMV
+#   delay above plus flop overhead.
+# - A GEMV engine slows with its lanes, because the buffer slot select reaches every lane's
+#   operand registers and accumulators: the 2 x 8 engine took 9.63 ns and the 4 x 8 one
+#   10.27 ns. ACCEL_LANE_NS per doubling of lanes bounds both from above.
+# - More ports make the engine larger and its wires longer: the GEMV 1 x 8 engine took
+#   9.11 ns with one port, then 11.18 ns with eight and 11.25 ns with sixteen (at 35 % core
+#   utilisation), both on the slot select into an operand register; there the DMA's setup of
+#   each port's start address took 10.11 and 10.23 ns. ACCEL_PORT_NS is the line
+#   a + b x ports through one and eight ports; sixteen lie 2.3 ns under it. Each port has
+#   an address generator of its own, so the DMA no longer hands words to the ports one after
+#   another; with that chain the GEMV 2 x 8 engine with four ports took 14.02 ns, and now
+#   9.63 ns.
 # The model is at or above every routed period, so it errs on the safe side.
 # docs/verification.md lists the routed designs.
-ACCEL_ROUTED_NS = 9.53
-ACCEL_SIGNOFF_FACTOR = ACCEL_ROUTED_NS / (4.17 + FLOP_OVERHEAD_NS)
-ACCEL_PORT_NS = (6.24, 1.95)
+ACCEL_ROUTED_NS = 9.33
+ACCEL_SIGNOFF_FACTOR = ACCEL_ROUTED_NS / (ACCEL_DELAY_NS["gemv"] + FLOP_OVERHEAD_NS)
+ACCEL_LANE_NS = 0.47
+ACCEL_PORT_NS = (8.81, 0.296)
 
 
 def accel_delay_ns(dataflow: str, cols: int, ports: int) -> float:
@@ -86,11 +98,14 @@ def accel_delay_ns(dataflow: str, cols: int, ports: int) -> float:
     return max(d, a + b * ports)
 
 
-def accel_signoff_mhz(dataflow: str, cols: int, ports: int) -> float:
+def accel_signoff_mhz(dataflow: str, cols: int, ports: int, rows: int = 1) -> float:
     """The clock the routed accelerator meets on SG13G2 at the slow corner."""
-    a, b = ACCEL_PORT_NS
     datapath = (accel_delay_ns(dataflow, cols, ports) + FLOP_OVERHEAD_NS) * ACCEL_SIGNOFF_FACTOR
-    return 1000.0 / max(ACCEL_ROUTED_NS, datapath, a + b * ports)
+    datapath = max(ACCEL_ROUTED_NS, datapath)
+    if dataflow == "gemv" and rows > 1:
+        datapath += ACCEL_LANE_NS * math.log2(rows)
+    a, b = ACCEL_PORT_NS
+    return 1000.0 / max(datapath, a + b * ports)
 
 
 def accel_logic_kge(dataflow: str, rows: int, cols: int, ports: int) -> float:
@@ -140,12 +155,14 @@ class Technology:
     host: str = ""
     user: bool = False  # added by the user, not shipped with ChipLeap
 
-    def clock_limit_mhz(self, dataflow: str = "", cols: int = 0, ports: int = 0) -> float:
+    def clock_limit_mhz(
+        self, dataflow: str = "", cols: int = 0, ports: int = 0, rows: int = 1
+    ) -> float:
         """The fastest clock a design on this node may use: the node's limit, and with an
         accelerator on a node with measured timing, what that accelerator meets after
         routing at the slow corner."""
         if self.accel_timing and dataflow:
-            return min(self.max_freq_mhz, accel_signoff_mhz(dataflow, cols, ports))
+            return min(self.max_freq_mhz, accel_signoff_mhz(dataflow, cols, ports, rows))
         return self.max_freq_mhz
 
     def logic_mm2(self, kge: float) -> float:

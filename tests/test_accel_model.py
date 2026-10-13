@@ -1,3 +1,4 @@
+import math
 import random
 import statistics
 
@@ -5,6 +6,7 @@ import pytest
 
 from chipleap.hw import Accel
 from chipleap.model.accel import (
+    DMA_FIXED,
     Bandwidth,
     TilingError,
     job_timing,
@@ -105,3 +107,19 @@ def test_weight_stationary_wastes_decode():
         job_timing(ws, 1, 2048, 2048, 8, bw, 1.0).compute
         > 10 * job_timing(gemv, 1, 2048, 2048, 8, bw, 1.0).compute
     )
+
+
+def test_stalls_wait_for_the_slowest_port():
+    # Without stalls the number of ports changes nothing: n words take n / rate cycles.
+    plain = Bandwidth(x=16, w_on=16, w_ext=16, y=4)
+    four = Bandwidth(x=16, w_on=16, w_ext=16, y=4, ports=4)
+    assert plain.dma(1024, 16, 2) == four.dma(1024, 16, 2) == 64 + 2 + DMA_FIXED
+    # At a 70 % grant rate each of four ports reads 64 words in 64 / 0.7 cycles on average,
+    # give or take sqrt(64 * 0.3) / 0.7, and the slowest is 1.0294 of those late.
+    rate = 16 * 0.7
+    stalled = Bandwidth(x=rate, w_on=rate, w_ext=rate, y=4, grant=0.7, ports=4)
+    late = 1.0294 * math.sqrt(64 * 0.3) / 0.7
+    assert stalled.dma(1024, rate, 2) == pytest.approx(92 + 2 + DMA_FIXED + late)
+    # A single port waits for no other.
+    one = Bandwidth(x=2.8, w_on=2.8, w_ext=2.8, y=4, grant=0.7, ports=1)
+    assert one.dma(1024, 2.8, 2) == 366 + 2 + DMA_FIXED

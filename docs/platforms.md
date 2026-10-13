@@ -76,7 +76,9 @@ drives ID 0). Error responses are not reported to software.
 The core reads one 32-bit word per port per cycle when the interconnect keeps up. That is
 the bandwidth the model assumes, so an interconnect that accepts back-to-back single-beat
 reads (most do; check width converters and clock crossings) is what makes the prediction
-hold.
+hold. Each port reads its own share of a transfer (port `p` reads words `p`, `p + ports`,
+`p + 2 ports` and so on), so a transfer finishes when its slowest port does: give the read
+ports equal paths to memory.
 
 ### Connecting it
 

@@ -122,7 +122,10 @@ def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
         "SYNTH_PARAMETERS": [f"{k}={v}" for k, v in params.items()],
         "CLOCK_PORT": "clk_i",
         "CLOCK_PERIOD": round(1000.0 / clock_mhz, 3),
-        "FP_CORE_UTIL": 45,
+        # Each read port has an address generator that the DMA's per-transfer steps fan out
+        # to. With 16 ports at 45 % the GEMV 1 x 8 engine failed global routing on
+        # congestion, while its timing was met; at 35 % it routes.
+        "FP_CORE_UTIL": 45 if accel.ports <= 8 else 35,
         "PL_TARGET_DENSITY_PCT": 55,
         **signoff(),
     }

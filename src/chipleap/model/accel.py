@@ -12,6 +12,7 @@ the evaluator's numbers can be checked against a cycle-accurate simulation:
 * With double buffering the weight buffer (and the activation buffer when X is not
   resident) is split into two slots, and the next tile loads while the core computes.
 * Loads use every read port, one 32-bit word per port per cycle when the source keeps up.
+  Port ``p`` reads words ``p``, ``p + ports``, ``p + 2 ports`` and so on of each transfer.
   Results leave through one write port, one word per cycle.
 
 ``plan_tiles`` is the single source of truth for tile sizes: the C driver generated in
@@ -44,6 +45,8 @@ JOB_FIXED = 1
 # with few tiles the per-tile averages the closed form relies on are poor, and walking
 # the tiles is still cheap.
 EXACT_TILES = 256
+# The expected largest of n independent standard normal draws, for n read ports.
+_MAX_OF_NORMALS = {1: 0.0, 2: 0.5642, 4: 1.0294, 8: 1.4236, 16: 1.7660}
 
 
 def words_per_row(elements: int, bits: int) -> int:
@@ -165,11 +168,25 @@ class Bandwidth:
     y: float  # result stores
     lat_on: int = 1
     lat_ext: int = 24
+    # Random stalls, as the testbench's memory model makes them: each read request is granted
+    # with probability ``grant`` in a cycle, on each of ``ports`` read ports independently.
+    # The rates above already include the average loss.
+    grant: float = 1.0
+    ports: int = 1
 
     def dma(self, nbytes: float, per_cycle: float, lat: int) -> float:
         if nbytes <= 0:
             return 0.0
-        return math.ceil(nbytes / per_cycle - 1e-9) + lat + DMA_FIXED
+        cycles = float(math.ceil(nbytes / per_cycle - 1e-9) + lat + DMA_FIXED)
+        if self.grant < 1 and self.ports > 1:
+            # Each port reads a fixed share of the words, so under random stalls a transfer
+            # waits for the slowest port. n words at grant rate g take n / g cycles with a
+            # standard deviation of sqrt(n (1 - g)) / g, and the slowest of the ports is late
+            # by the expected largest of that many standard normal draws.
+            n = math.ceil(nbytes / (4 * self.ports))
+            spread = _MAX_OF_NORMALS.get(self.ports, math.sqrt(2 * math.log(self.ports)))
+            cycles += spread * math.sqrt(n * (1 - self.grant)) / self.grant
+        return cycles
 
     def w_dma(self, nbytes: float, w_on_frac: float) -> float:
         """A weight transfer that comes from on-chip SRAM for ``w_on_frac`` of the bytes."""
