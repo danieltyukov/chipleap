@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from chipleap.hw.tech import FLOP_OVERHEAD_NS, get_tech
-from chipleap.rtl import confine
+from chipleap.rtl import confine, macros
 from chipleap.rtl import quote as q
 from chipleap.rtl.diag import Diagnostic, parse_sv2v, parse_yosys, relative
 from chipleap.rtl.project import Project, runs_tools
@@ -118,14 +118,22 @@ def prepare_verilog(project: Project, workdir: Path) -> tuple[list[Path], bool]:
     return [out], False
 
 
-def read_commands(project: Project, files: list[Path], raw: bool) -> list[str]:
-    """The Yosys commands that read the project: sources, include directories, defines,
-    parameters and the top."""
+def source_reads(project: Project, files: list[Path], raw: bool) -> list[str]:
+    """The Yosys commands that read the project's sources, with its include directories
+    and defines when the files still need them."""
     opts: list[str] = []
     if raw:
         opts += [f"-I {q.yosys(i)}" for i in project.include_dirs]
         opts += [f"-D {q.yosys(x)}" for x in project.define_args()]
-    reads = [" ".join(["read_verilog -sv", *opts, q.yosys(f)]) for f in files]
+    return [" ".join(["read_verilog -sv", *opts, q.yosys(f)]) for f in files]
+
+
+def read_commands(project: Project, files: list[Path], raw: bool) -> list[str]:
+    """The Yosys commands that read the project: sources, include directories, defines,
+    parameters and the top."""
+    # The hard macros first, as black boxes: synthesis keeps each as an instance.
+    boxes = [f"read_verilog -sv {q.yosys(m)}" for m in macros.stubs(project)]
+    reads = [*boxes, *source_reads(project, files, raw)]
     chparam = " ".join(f"-set {q.plain(k)} {int(v)}" for k, v in project.parameters.items())
     top = q.plain(project.top)
     return [
@@ -289,6 +297,21 @@ def synth_data(project: Project, r: RtlSynthResult) -> dict[str, Any]:
         "netlist": project.rel(r.netlist),
         "warnings": len(r.diagnostics),
         "diagnostics": [d.to_dict() for d in r.diagnostics],
+        **_macro_data(project),
+    }
+
+
+def _macro_data(project: Project) -> dict[str, Any]:
+    """The SRAM macros synthesis kept as instances, and their area from the PDK's LEF."""
+    if not project.macros:
+        return {}
+    try:
+        area = macros.area_um2(project)
+    except macros.MacroStepError:
+        area = None
+    return {
+        "macros": [m.to_dict(project.rel) for m in project.macros],
+        "macro_um2": round(area, 2) if area is not None else None,
     }
 
 
@@ -313,9 +336,16 @@ def synth(project: Project) -> StepResult:
         verdict = "within" if r.fmax_mhz >= clk.mhz else "short of"
         fits = f", {verdict} the {clk.mhz:g} MHz clock on {clk.port}"
     warn = f"; {len(r.diagnostics)} Yosys warnings" if r.diagnostics else ""
+    data = synth_data(project, r)
+    sram = ""
+    if project.macros:
+        n = len(project.macros)
+        sram = f" and {n} SRAM macro{'s' if n != 1 else ''}"
+        if data["macro_um2"] is not None:
+            sram += f" ({data['macro_um2'] / 1e6:.4f} mm2)"
     msg = (
-        f"{r.area_um2 / 1e6:.4f} mm2 of standard cells on {tech} ({r.cells} cells, "
+        f"{r.area_um2 / 1e6:.4f} mm2 of standard cells{sram} on {tech} ({r.cells} cells, "
         f"{r.flops} flip-flops); critical path {r.delay_ns:.2f} ns, about {r.fmax_mhz:.0f} MHz "
         f"at the typical corner{fits}{warn}"
     )
-    return StepResult("synth", "pass", msg, synth_data(project, r))
+    return StepResult("synth", "pass", msg, data)

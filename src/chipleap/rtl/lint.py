@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from chipleap.rtl import confine
+from chipleap.rtl import confine, macros
 from chipleap.rtl.diag import Diagnostic, counts, parse_slang, parse_verilator, relative
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.verify.result import StepResult
@@ -50,6 +50,8 @@ def verilator_lint(project: Project, tool: Tool) -> list[Diagnostic]:
         *(f"-D{d}" for d in project.define_args()),
         *(f"-G{k}={v}" for k, v in project.parameters.items()),
         *(rel(w) for w in project.lint.waivers),
+        # The SRAM macros as black boxes: their ports, from their names.
+        *(rel(m) for m in macros.stubs(project)),
         *(rel(s) for s in project.sources),
     ]
     out = _run(cmd, project)
@@ -102,6 +104,7 @@ def slang_lint(project: Project, tool: Tool) -> list[Diagnostic]:
             *(f"-I{rel(d)}" for d in project.include_dirs),
             *(f"-D{d}" for d in project.define_args()),
             *(a for k, v in project.parameters.items() for a in ("-G", f"{k}={v}")),
+            *(rel(m) for m in macros.stubs(project)),
             *(rel(s) for s in project.sources),
         ]
         out = _run(cmd, project)

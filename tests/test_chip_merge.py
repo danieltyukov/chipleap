@@ -38,8 +38,9 @@ def view(cell: str) -> MacroView:
 
 
 def test_a_macro_named_like_a_module_of_the_core_is_refused():
-    modules = merge.yosys_modules("3 modules:\n  $paramod\\fifo\\DEPTH=4\n  top\n  \\esc\n")
-    assert modules == ["fifo", "top", "esc"]
+    listed = "top\ntop/w\n$paramod\\fifo\\DEPTH=4\nfifo/q\n\\esc\nodd/name\nodd/name/w\n"
+    modules = merge.listed_modules(listed)
+    assert modules == ["top", "fifo", "esc"]
     # Left unchecked, the chip top instantiates fifo for the macro, and the core's RTL
     # defines a module fifo: synthesis binds the instance to the RTL, not the macro.
     pads = {"south": (Pad("signal", "a"), Pad("vdd"), Pad("vss"), Pad("iovdd"), Pad("iovss"))}
@@ -52,8 +53,19 @@ def test_a_macro_named_like_a_module_of_the_core_is_refused():
     plan = floorplan.plan(cfg, io.read_lef(io_lef()), {"m": ("fifo", 20.0, 40.0)}, b.directions)
     assert "  fifo m (.a(a_core));" in chip_top(cfg, b, plan, "top", {})
     with pytest.raises(MergeError, match="module fifo is defined by macro fifo"):
-        merge.check_modules(modules, "c", ["sg13g2_IOPadIn"], {"fifo": view("fifo")})
-    merge.check_modules(modules, "c", ["sg13g2_IOPadIn"], {"strongarm": view("strongarm")})
+        merge.check_modules(modules, {"fifo": view("fifo")}, "c", ["sg13g2_IOPadIn"])
+    merge.check_modules(modules, {"strongarm": view("strongarm")}, "c", ["sg13g2_IOPadIn"])
+    # Without a chip top or IO cells, as an RTL project with macros checks its modules.
+    with pytest.raises(MergeError, match="module fifo is defined by macro fifo"):
+        merge.check_modules(modules, ["fifo"])
+    merge.check_modules(modules, ["strongarm"])
+
+
+def test_a_module_list_too_long_is_refused(monkeypatch):
+    monkeypatch.setattr(merge, "MODULES_MAX", 3)
+    assert merge.listed_modules("a\nb\nc\n") == ["a", "b", "c"]
+    with pytest.raises(MergeError, match="more than 3 modules"):
+        merge.listed_modules("a\nb\nc\nd\n")
 
 
 # Layout and netlist

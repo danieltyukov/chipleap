@@ -14,7 +14,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from chipleap.chip.assemble import chip
-from chipleap.rtl import builddir, commercial
+from chipleap.rtl import builddir, commercial, macros
 from chipleap.rtl.cdc import cdc
 from chipleap.rtl.coverage import coverage
 from chipleap.rtl.dft import dft
@@ -123,6 +123,10 @@ def _run_step(
     remote: Remote | None,
     test_filter: str,
 ) -> StepResult:
+    tool = {"sim": sim_tool, "synth": synth_tool, "pnr": pnr_tool}.get(step, "")
+    why = macros.unsupported(project, step, tool)
+    if why is not None:
+        return StepResult(step, "skipped", why)
     if step == "lint":
         return lint(project)
     if step == "sim":

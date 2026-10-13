@@ -1,0 +1,15 @@
+# A scratchpad in one of IHP's SRAM macros: chipleap verify examples/sram --steps lint,sim,synth,pnr
+schema: project/v1
+name: sram
+description: A 1 KiB scratchpad with byte enables, in one of IHP's single-port SRAM macros.
+top: scratchpad
+sources: [rtl/scratchpad.sv]
+clocks: [{port: clk_i, period_ns: 20}]
+resets: [{port: rst_ni, active: low, sync: false}]
+tech: ihp-sg13g2
+tests: {dir: test, seed: 1}
+# The macro the RTL instantiates (u_mem). Simulation uses the PDK's model of it, place and
+# route its views; ChipLeap sizes the die and places it, unless pnr.die_um and at_um say.
+macros:
+  - instance: u_mem
+    cell: RM_IHPSG13_1P_256x32_c2_bm_bist

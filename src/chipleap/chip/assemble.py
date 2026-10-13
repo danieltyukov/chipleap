@@ -31,7 +31,7 @@ from chipleap.chip.run import ToolError, klayout, plain, private_dir, python_wit
 from chipleap.macro import layer
 from chipleap.macro.layer import MacroImportError
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, parse_toml
-from chipleap.rtl import builddir
+from chipleap.rtl import builddir, macros
 from chipleap.rtl.openroad import OpenroadError
 from chipleap.rtl.pnr import verilog_config
 from chipleap.rtl.project import Project, runs_tools
@@ -187,12 +187,11 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     plan = floorplan.plan(chip, cells, sizes, binding.directions)
     if any(not c.cell for c in plan.ring):
         raise NetlistError("a pad has no IO cell")
-    merge.check_modules(
-        netlist.core_modules(ports_dir),
-        chip.name,
-        sorted({c.cell for c in plan.ring}),
-        imported.views,
-    )
+    try:
+        core = macros.rtl_modules(project, builddir.work_dir(work, "modules"))
+    except macros.MacroStepError as exc:
+        raise NetlistError(str(exc)) from None
+    merge.check_modules(core, imported.views, chip.name, sorted({c.cell for c in plan.ring}))
     flow.write_io(flow_dir, pdk, cells, sorted({c.cell for c in plan.ring}))
     pad = cells[io.PAD_CELLS["in"]]
     if f"dir::src/{chip.name}.v" in verilog.get("VERILOG_FILES", []):
@@ -208,7 +207,7 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     )
     builddir.write_text(flow_dir, "macro_placement.cfg", netlist.placement(plan))
     placed = {m.inst: (m, imported.views[m.cell]) for m in plan.macros}
-    builddir.write_text(flow_dir, "pdn.tcl", pdn.script(placed))
+    builddir.write_text(flow_dir, "pdn.tcl", pdn.script(placed, plan.core[1]))
     clk = project.fastest_clock
     cfg = flow.config(
         chip,
