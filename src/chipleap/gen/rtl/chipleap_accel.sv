@@ -1027,6 +1027,13 @@ module chipleap_accel_core #(
       for (int k = 0; k < int'(PW); k++) y[k] = x[k < b ? k : b - 1];
       return y;
     endfunction
+    // log2(n) rounded up, as $clog2: Yosys's slang frontend cannot evaluate $clog2 of a
+    // loop variable, and a function of one is evaluated as the loop unrolls.
+    function automatic int lg(input int n);
+      int r = 0;
+      for (int k = 0; k < 31; k++) if ((1 << k) < n) r = k + 1;
+      return r;
+    endfunction
     always_comb begin
       for (int l = 0; l < int'(L); l++) begin
         logic signed [PW-1:0] t[V];
@@ -1034,7 +1041,7 @@ module chipleap_accel_core #(
         for (int w = int'(V); w > 1; w = (w + 1) / 2) begin
           // With w sums left, each is a sum of V / w products: PW - log2(w) bits.
           for (int i = 0; i < w / 2; i++)
-            t[i] = sx(t[2*i], PW - $clog2(w)) + sx(t[2*i+1], PW - $clog2(w));
+            t[i] = sx(t[2*i], PW - lg(w)) + sx(t[2*i+1], PW - lg(w));
           if (w % 2 == 1) t[w/2] = t[w-1];
         end
         dot[l] = 32'(t[0]);

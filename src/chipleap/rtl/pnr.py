@@ -75,7 +75,16 @@ def sdc(project: Project) -> str:
             "set clock_inputs {}",
             "set data_inputs [all_inputs]",
         ]
-    lines += [
+    lines += io_lines(ref, period)
+    return "\n".join(lines) + "\n"
+
+
+def io_lines(ref: str, period: float) -> list[str]:
+    """The rest of LibreLane's base SDC, after the clocks: inputs and outputs timed against
+    clock ``ref`` of ``period`` ns, the PDK's driving cells (the clock's on
+    ``$clock_inputs``, the rest on ``$data_inputs``), load, uncertainty, transition and
+    derating, and ideal or propagated clocks."""
+    return [
         f"set io_delay [expr {period:g} * $::env(IO_DELAY_CONSTRAINT) / 100]",
         f"set_input_delay $io_delay -clock [get_clocks {ref}] $data_inputs",
         f"set_output_delay $io_delay -clock [get_clocks {ref}] [all_outputs]",
@@ -111,7 +120,6 @@ def sdc(project: Project) -> str:
         "    set_propagated_clock [all_clocks]",
         "}",
     ]
-    return "\n".join(lines) + "\n"
 
 
 def _copy_into(project: Project, path: Path, src: Path) -> str:

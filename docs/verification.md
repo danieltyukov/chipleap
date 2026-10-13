@@ -96,6 +96,17 @@ Designs with more than eight read ports are placed at 35 % core utilisation inst
 
 The model's clock limit for the accelerator on IHP SG13G2 comes from these runs ([model.md](model.md#technology-data)), so designs the explorer recommends are clocked where they close timing at the slow corner.
 
+### The whole SoC
+
+`--steps soc` places and routes X-HEEP with the accelerator as one block, with every memory in IHP's SRAM macros. It runs only when named, and takes hours.
+
+1. ChipLeap copies X-HEEP at the commit it pins (the X-HEEP step's checkout, or `--fetch-xheep`) into `DIR/verify/soc/x-heep/` and renders it there with X-HEEP's own generator, for the configuration ChipLeap writes from `design.yaml`: the bundle's copy is Python, and the generator runs it, so it is never used.
+2. FuseSoC lists X-HEEP's sources for its ASIC synthesis target and runs X-HEEP's generators: the register files, and the boot ROM, which a RISC-V GCC compiles for RV32. X-HEEP's cores need its own FuseSoC; `scripts/install_fusesoc.sh` installs it at the commit X-HEEP pins, beside nothing else (`CHIPLEAP_FUSESOC`). Only the design's CPU is synthesized: the other CPUs' cores are left out, their packages kept, since the MCU imports them.
+3. ChipLeap writes what X-HEEP leaves to a technology, for IHP SG13G2 (`chipleap.gen.soc`): the top, `chipleap_soc`, with the accelerator on X-HEEP's external ports as the datasheet tells an integrator (its read and write masters on the external crossbar, its registers on the external peripheral bus, its interrupt on the external peripheral interrupt) and every other port a chip brings out (the pads' signals, the external memory's OBI ports, the pad control bus) as ports of the block; X-HEEP's `sram_wrapper` in IHP's macros of 32-bit words with a bit mask, since X-HEEP writes bytes and the one macro without a mask (8192 x 32) cannot; and X-HEEP's clock gates on IHP's integrated clock gate, `sg13g2_slgcp_1`. The accelerator's buffers are its macros, as in `--steps pnr`. A port of X-HEEP's MCU the top does not know stops the step, so a different X-HEEP is not wired by guess.
+4. LibreLane reads the SystemVerilog with Yosys's slang frontend, places the macros in a row along the top of the core and one along the bottom, under their macro grid, and signs the block off as the accelerator is signed off, at the slow corner.
+
+The result lists the macros, compares their area with the model's banks and buffers, and the model's logic (CPU, X-HEEP's logic and bus, the accelerator) with LibreLane's synthesis, and reports what place and route adds. The model's memory interface (the external memory's controller and PHY) is not in the block.
+
 ## After place and route
 
 RTL projects have five more steps, for what follows place and route in an industrial flow ([projects.md](projects.md#after-place-and-route) describes their sections and results). Each writes an OpenROAD script from the project and runs the `openroad` command on it, and reads OpenROAD's reports back; LibreLane does the routing and the signoff.
