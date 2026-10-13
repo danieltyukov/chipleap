@@ -147,6 +147,12 @@ def test_sdf_conditions_are_rewritten_for_icarus():
     out = gls.normalize_sdf(sdf)
     assert "(COND (A0 == 1'b1 && A1 == 1'b0)\n" in out
     assert "(COND (A1 == 1'b0 && A2 == 1'b1)\n" in out  # already in the form Icarus reads
+    # A timing check's condition (an SRAM's) is left as it is: wrapping the rest of its
+    # line made the whole SDF unreadable.
+    check = (
+        "    (HOLD (COND A_W_ACCESS (posedge A_DIN[0])) (COND A_W_ACCESS (posedge A_CLK)) (0.5))\n"
+    )
+    assert gls.normalize_sdf(check) == check
     log = (
         "SDF ERROR: /w/x.sdf:1370: Invalid/malformed COND\n"
         "SDF ERROR: /w/x.sdf:649: Could not find intermodpath!\n"
@@ -208,3 +214,29 @@ def test_every_file_of_the_gate_level_run_is_written_through_builddir(
     files = sorted(f for f in work.rglob("*") if f.is_file())
     assert files == sorted(written) and len(files) == 4
     assert {f.name for f in gate.sources} == {"cells.v", "udp.v", "counter.gls.v"}
+
+
+def test_a_macros_paths_to_bus_bits_fold_into_one_path_icarus_reads():
+    """Icarus reads no IOPATH to a bus bit (A_DOUT[0]) and stops at the first; the
+    macro's model has one specify path to the whole bus, which takes the slowest bit's
+    delays. Each instance keeps its own; a standard cell's checks stay."""
+
+    def macro(inst: str, slow: str) -> str:
+        return (
+            f' (CELL\n  (CELLTYPE "RM_X")\n  (INSTANCE {inst})\n  (DELAY\n   (ABSOLUTE\n'
+            "    (IOPATH A_CLK A_DOUT[0] (3.0:3.0:3.0) (2.9:2.9:2.9))\n"
+            f"    (IOPATH A_CLK A_DOUT[1] ({slow}:{slow}:{slow}) (2.8:2.8:2.8))\n"
+            "   )\n  )\n  (TIMINGCHECK\n"
+            "    (HOLD (COND W (posedge A_DIN[0])) (COND W (posedge A_CLK)) (0.5:0.5:0.5))\n"
+            "  )\n )\n"
+        )
+
+    flop = (
+        ' (CELL\n  (CELLTYPE "sg13g2_dfrbpq_1")\n  (INSTANCE r)\n'
+        "  (TIMINGCHECK\n    (SETUP (posedge D) (posedge CLK) (0.1:0.1:0.1))\n  )\n )\n"
+    )
+    out = gls.normalize_sdf("(DELAYFILE\n" + macro("a", "3.5") + macro("b", "3.2") + flop + ")\n")
+    assert "A_DOUT[" not in out and "A_DIN[" not in out
+    assert out.count("(IOPATH A_CLK A_DOUT (3.500:3.500:3.500) (2.900:2.900:2.900))") == 1
+    assert out.count("(IOPATH A_CLK A_DOUT (3.200:3.200:3.200) (2.900:2.900:2.900))") == 1
+    assert "(SETUP (posedge D) (posedge CLK) (0.1:0.1:0.1))" in out
