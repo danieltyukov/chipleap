@@ -925,23 +925,36 @@ PDK_MACRO_LIBRARIES = ("sg13g2_sram",)
 _KINDS = {"POWER": "power", "GROUND": "ground", "CLOCK": "clock", "ANALOG": "analog"}
 
 
+def _pdk_macro_files(pdk: Path, cell: str, library: str) -> dict[str, Path]:
+    if library not in PDK_MACRO_LIBRARIES:
+        raise MacroImportError(f"{library} is not a macro library ChipLeap places")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", cell):
+        raise MacroImportError(f"{cell[:64]!r} is not a cell name")
+    ref = pdk / "libs.ref" / library
+    return {
+        "lef": ref / "lef" / f"{cell}.lef",
+        "gds": ref / "gds" / f"{cell}.gds",
+        "lib": ref / "lib" / f"{cell}_typ_1p20V_25C.lib",
+        "spice": ref / "cdl" / f"{cell}.cdl",
+    }
+
+
+def pdk_macro_cells(pdk: Path, cell: str, library: str = "sg13g2_sram") -> tuple[str, ...]:
+    """The structures of a PDK macro's GDS (the macro and the cells it is made of), as
+    ``pdk_macro`` records them in ``gds_cells``."""
+    gds = _pdk_macro_files(pdk, cell, library)["gds"]
+    if not gds.is_file():
+        raise MacroImportError(f"{library} has no gds view of {cell}")
+    return tuple(_structure_names(gds.read_bytes()))
+
+
 def pdk_macro(pdk: Path, cell: str, work: Path, library: str = "sg13g2_sram") -> MacroView:
     """A macro of the PDK (an SRAM of ``sg13g2_sram``): its LEF, GDS, typical-corner
     liberty and CDL copied into ``work/macros/<cell>/``, its pins and outline from its
     LEF. The PDK is trusted, so its views are used as they are."""
     from chipleap.chip.io import read_lef  # the IO library's reader reads any LEF
 
-    if library not in PDK_MACRO_LIBRARIES:
-        raise MacroImportError(f"{library} is not a macro library ChipLeap places")
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", cell):
-        raise MacroImportError(f"{cell[:64]!r} is not a cell name")
-    ref = pdk / "libs.ref" / library
-    lefs = {
-        "lef": ref / "lef" / f"{cell}.lef",
-        "gds": ref / "gds" / f"{cell}.gds",
-        "lib": ref / "lib" / f"{cell}_typ_1p20V_25C.lib",
-        "spice": ref / "cdl" / f"{cell}.cdl",
-    }
+    lefs = _pdk_macro_files(pdk, cell, library)
     missing = [k for k, f in lefs.items() if not f.is_file()]
     if missing:
         raise MacroImportError(f"{library} has no {', '.join(missing)} view of {cell}")

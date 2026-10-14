@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -10,7 +11,7 @@ import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -144,11 +145,13 @@ def excluded(path: str | Path, exclude: Iterable[str | Path] = ()) -> bool:
     return any(real.is_relative_to(b) for b in _banned(exclude))
 
 
-def probe(cmd: list[str], timeout: float = 20) -> subprocess.CompletedProcess[str]:
+def probe(
+    cmd: list[str], timeout: float = 20, base: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a short query of a tool (its version, where its Python is) in an empty
     directory of its own: run in a project, ``python -c "import cocotb"`` would import a
     ``cocotb`` package the project ships, since Python looks in the current directory
-    first."""
+    first. ``base`` is the environment it starts from (``clean_env``)."""
     with tempfile.TemporaryDirectory(prefix="chipleap-probe-") as empty:
         return subprocess.run(
             cmd,
@@ -157,13 +160,13 @@ def probe(cmd: list[str], timeout: float = 20) -> subprocess.CompletedProcess[st
             timeout=timeout,
             check=False,
             cwd=empty,
-            env=clean_env(exclude=[empty]),
+            env=clean_env(exclude=[empty], base=base),
         )
 
 
-def _version(cmd: list[str], pattern: str) -> str:
+def _version(cmd: list[str], pattern: str, base: Mapping[str, str] | None = None) -> str:
     try:
-        out = probe(cmd)
+        out = probe(cmd, base=base)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     m = re.search(pattern, out.stdout + out.stderr)
@@ -209,14 +212,21 @@ def located(name: str, env: str | None = None) -> tuple[str | None, str]:
 
 
 def find(
-    name: str, version_args: list[str], pattern: str, purpose: str, env: str | None = None
+    name: str,
+    version_args: list[str],
+    pattern: str,
+    purpose: str,
+    env: str | None = None,
+    base: Mapping[str, str] | None = None,
 ) -> Tool:
+    """The tool ``name`` and its version, asked for in the environment ``base`` (this
+    process's by default)."""
     path, note = located(name, env)
     if path is None:
         return Tool(name, None, "", purpose, note)
     if is_wrapper(path):
         return Tool(name, path, "container wrapper", purpose)
-    return Tool(name, path, _version([path, *version_args], pattern), purpose)
+    return Tool(name, path, _version([path, *version_args], pattern, base), purpose)
 
 
 def verilator() -> Tool:
@@ -248,13 +258,134 @@ def sta() -> Tool:
 
 
 def librelane() -> Tool:
-    return find(
+    """LibreLane, its version asked for as a run would start it (``librelane_env``). For a
+    wrapper ChipLeap does not ask (``is_wrapper``) given ``CHIPLEAP_LIBRELANE_IMAGE``, the
+    version is the image's tag (``3.0.14`` of ``ghcr.io/librelane/librelane:3.0.14``); each
+    run checks it is the one that ran (``librelane_ran``)."""
+    try:
+        base: Mapping[str, str] | None = librelane_env()
+    except ValueError:  # a run reports the setting's problem
+        base = None
+    tool = find(
         "librelane",
         ["--version"],
         r"LibreLane v?(\S+)",
         "placement, routing, DRC and LVS (LibreLane with OpenROAD, KLayout, Magic, Netgen)",
         "CHIPLEAP_LIBRELANE",
+        base,
     )
+    image = librelane_image()
+    if image and tool.found and tool.version == "container wrapper":
+        tag = image.rpartition("/")[2].partition(":")[2]
+        return replace(tool, version=tag or f"container wrapper, {image}")
+    return tool
+
+
+LIBRELANE_IMAGE_ENV = "CHIPLEAP_LIBRELANE_IMAGE"
+
+
+def librelane_image() -> str:
+    """The LibreLane container image ChipLeap asks a wrapper for (``CHIPLEAP_LIBRELANE_IMAGE``,
+    passed on as ``LIBRELANE_IMAGE``); empty to leave the wrapper's own."""
+    return os.environ.get(LIBRELANE_IMAGE_ENV, "").strip()
+
+
+def librelane_env() -> dict[str, str]:
+    """This process's environment with the settings a LibreLane container wrapper reads:
+    ``LIBRELANE_IMAGE`` from ``CHIPLEAP_LIBRELANE_IMAGE`` (the image it starts) and
+    ``LIBRELANE_PDK_ROOT`` from ``CHIPLEAP_LIBRELANE_PDK_ROOT`` (the PDK root it mounts), so
+    a run gets the LibreLane and PDK ChipLeap was set to, whatever the wrapper's defaults."""
+    env = dict(os.environ)
+    if image := librelane_image():
+        env["LIBRELANE_IMAGE"] = image
+    if (root := librelane_pdk_root()) is not None:
+        env["LIBRELANE_PDK_ROOT"] = str(root)
+    return env
+
+
+def librelane_ran(run: Path) -> str:
+    """The LibreLane version that ran ``run`` (its ``resolved.json``), checked against the
+    one ChipLeap expected (``librelane().version``, when that is a version): a wrapper that
+    ignored ``CHIPLEAP_LIBRELANE_IMAGE`` raises ``ValueError``, since the run's
+    configuration was written for the other. Empty when the run does not say."""
+    try:
+        meta = json.loads((run / "resolved.json").read_text()).get("meta") or {}
+    except (OSError, ValueError, AttributeError):
+        return ""
+    ran = str(meta.get("librelane_version") or "") if isinstance(meta, dict) else ""
+    expected = librelane().version
+    if ran and librelane_version_key(expected) != (0, 0, 0, 0, 0) and ran != expected:
+        raise ValueError(
+            f"LibreLane {ran} ran, not {expected}"
+            + (
+                f": the wrapper did not start {librelane_image()} ({LIBRELANE_IMAGE_ENV})"
+                if librelane_image()
+                else ""
+            )
+        )
+    return ran
+
+
+def librelane_version_key(version: str) -> tuple[int, int, int, int, int]:
+    """Orders LibreLane versions: ``3.0.0.dev44`` before ``3.0.0rc1`` before ``3.0.0``
+    before ``3.0.14``. An unreadable version sorts first."""
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)(?:\.?(dev|rc)(\d+))?", version)
+    if not m:
+        return (0, 0, 0, 0, 0)
+    stage = {"dev": 0, "rc": 1}.get(m[4] or "", 2)
+    return (int(m[1]), int(m[2]), int(m[3]), stage, int(m[5] or 0))
+
+
+def librelane_loads_pad_views() -> bool:
+    """Whether the LibreLane here loads a PDK's pad library views itself (``PAD_LEFS`` and
+    the rest, from 3.0.0 on; IHP-Open-PDK sets them from its LibreLane configuration of
+    May 2026)."""
+    tool = librelane()
+    return tool.found and librelane_version_key(tool.version) >= (3, 0, 0, 2, 0)
+
+
+LIBRELANE_PDK_ENV = "CHIPLEAP_LIBRELANE_PDK_ROOT"
+LIBRELANE_PDK = "ihp-sg13g2"
+
+
+def librelane_pdk_root() -> Path | None:
+    """The PDK root LibreLane runs on, when ``CHIPLEAP_LIBRELANE_PDK_ROOT`` names one: a
+    directory holding ``ihp-sg13g2`` (a ciel root with the commit of the chip's PDK
+    checkout enabled). ``None`` when it is unset: LibreLane then installs the version it
+    pins itself, through ciel. A setting that is not an absolute directory with
+    ``ihp-sg13g2`` in it raises ``ValueError``, so a run never falls back silently."""
+    value = os.environ.get(LIBRELANE_PDK_ENV, "")
+    if not value:
+        return None
+    if not os.path.isabs(value):
+        raise ValueError(f"{LIBRELANE_PDK_ENV} is a relative path, {value}; give an absolute one")
+    root = Path(value)
+    if not (root / LIBRELANE_PDK).is_dir():
+        raise ValueError(f"{LIBRELANE_PDK_ENV} names {value}, which holds no {LIBRELANE_PDK}")
+    return root
+
+
+def librelane_pdk_args() -> list[str]:
+    """LibreLane's PDK arguments: the PDK and, with ``CHIPLEAP_LIBRELANE_PDK_ROOT``,
+    ``--manual-pdk --pdk-root`` it (``librelane_pdk_root``)."""
+    root = librelane_pdk_root()
+    args = ["--pdk", LIBRELANE_PDK]
+    if root is not None:
+        args += ["--manual-pdk", "--pdk-root", str(root)]
+    return args
+
+
+def librelane_pdk_commit(root: Path) -> str:
+    """The commit of the PDK under a ciel root: ciel keeps each version in
+    ``ciel/<family>/versions/<commit>``, which ``ihp-sg13g2`` links to. Empty when the
+    path does not say."""
+    real = (root / LIBRELANE_PDK).resolve()
+    parts = real.parts
+    if "versions" in parts:
+        i = parts.index("versions")
+        if i + 1 < len(parts):
+            return parts[i + 1]
+    return ""
 
 
 def iverilog() -> Tool:
@@ -512,12 +643,19 @@ PDK_ROOTS = (
 
 
 def pdk_roots() -> tuple[Path, ...]:
-    """Where PDKs live on this machine: ``PDK_ROOT`` and the usual install directories,
-    resolved. Files the implementation steps take from a PDK must be under one of them,
-    or beside the liberty ``CHIPLEAP_LIBERTY`` names. Relative settings count for
-    nothing (``liberty_settings_problem``)."""
+    """Where PDKs live on this machine: ``PDK_ROOT``, the usual install directories and
+    the PDK root LibreLane runs on (``librelane_pdk_root``), resolved. Files the
+    implementation steps take from a PDK must be under one of them, or beside the liberty
+    ``CHIPLEAP_LIBERTY`` names. Relative settings count for nothing
+    (``liberty_settings_problem``)."""
     pdk_root = os.environ.get("PDK_ROOT", "")
     roots = [pdk_root if os.path.isabs(pdk_root) else "", *PDK_ROOTS]
+    try:
+        librelane_root = librelane_pdk_root()
+    except ValueError:
+        librelane_root = None
+    if librelane_root is not None:
+        roots.append(str(librelane_root))
     out = [Path(r).expanduser().resolve() for r in roots if r and Path(r).expanduser().is_dir()]
     env = os.environ.get("CHIPLEAP_LIBERTY")
     if env and os.path.isabs(env) and Path(env).is_file():

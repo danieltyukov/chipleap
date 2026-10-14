@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from chipleap.rtl import builddir
+from chipleap.rtl import builddir, macros
 from chipleap.rtl import quote as q
 from chipleap.rtl.openroad import (
     ECO_MANIFEST,
@@ -56,17 +56,27 @@ from chipleap.rtl.pnr import SDC_NAME, margins, pnr_data
 from chipleap.rtl.project import CORNERS, EcoChange, Project
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.verify import launch
+from chipleap.verify.drc import describe_markers
 from chipleap.verify.pnr import (
     DEF_TO_ODB,
     DETAILED_ROUTING,
     PnrError,
     PnrResult,
+    klayout_drc,
+    klayout_report,
     parse,
+    parse_run,
     patch_min_area,
     step_state,
 )
 from chipleap.verify.result import StepResult
-from chipleap.verify.tools import librelane, untrusted
+from chipleap.verify.tools import (
+    librelane,
+    librelane_env,
+    librelane_pdk_args,
+    librelane_ran,
+    untrusted,
+)
 
 RESUME_AT = "OpenROAD.DetailedRouting"
 # Before routing again: the edited DEF into LibreLane's database, legal placement, and
@@ -554,14 +564,25 @@ def _run_librelane(
     tool = librelane()
     if not tool.found or tool.path is None:
         raise OpenroadUnavailable("LibreLane is not installed")
+    try:
+        pdk_args = librelane_pdk_args()
+        env = librelane_env()
+    except ValueError as exc:
+        raise EcoError(str(exc)) from None
     builddir.write_text(work, "config.eco.json", json.dumps(cfg, indent=2))
-    base = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", ECO_TAG]
+    base = [tool.path, *pdk_args, "--run-tag", ECO_TAG]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
     start = time.monotonic()
     route_log = work / "librelane-eco-route.log"
     first = [*base, "--overwrite", "--with-initial-state", str(state)]
-    code = _launch([*first, "--to", DETAILED_ROUTING, "config.eco.json"], work, route_log, limit)
+    code = _launch(
+        [*first, "--to", DETAILED_ROUTING, "config.eco.json"], work, route_log, limit, env
+    )
     run = run_dir_of(work)
+    try:
+        librelane_ran(run)
+    except ValueError as exc:
+        raise EcoError(str(exc)) from None
     routed = step_state(run, DETAILED_ROUTING)
     if routed is None:
         tail = "\n".join(read_limited(route_log).splitlines()[-15:])
@@ -578,7 +599,7 @@ def _run_librelane(
     else:
         args.append("config.eco.json")
     log = work / "librelane-eco.log"
-    code = _launch(args, work, log, max(limit - (time.monotonic() - start), 1.0))
+    code = _launch(args, work, log, max(limit - (time.monotonic() - start), 1.0), env)
     final = run / "final"
     if not (final / "metrics.json").is_file():
         tail = "\n".join(read_limited(log).splitlines()[-15:])
@@ -590,9 +611,9 @@ def _run_librelane(
     return metrics, gds
 
 
-def _launch(cmd: list[str], work: Path, log: Path, timeout: float) -> int:
+def _launch(cmd: list[str], work: Path, log: Path, timeout: float, env: dict[str, str]) -> int:
     try:
-        return launch.run(cmd, work, log, timeout)
+        return launch.run(cmd, work, log, timeout, env)
     except launch.Busy as exc:
         raise EcoError(f"LibreLane did not start: {exc}") from None
     except launch.TimedOut:
@@ -640,8 +661,22 @@ def apply_eco(project: Project, changes: list[EcoChange]) -> EcoResult:
         raise EcoError(str(exc)) from exc
     clk = project.fastest_clock
     mhz = clk.mhz if clk else 100.0
-    before = parse(_read(sealed, run / "final" / "metrics.json"), mhz, None)
-    after = parse(metrics, mhz, gds)
+    try:
+        held = macros.pdk_cells(project)
+    except macros.MacroStepError as exc:
+        raise EcoError(f"macros: {exc}") from None
+    sealed_metrics = _read(sealed, run / "final" / "metrics.json")
+    report = klayout_report(run)
+    try:
+        before = parse(
+            sealed_metrics,
+            mhz,
+            None,
+            klayout_drc(sealed_metrics, report and _check(sealed, report, "DRC report"), held),
+        )
+        after = parse_run(metrics, mhz, gds, run_dir_of(work), held)
+    except PnrError as exc:
+        raise EcoError(str(exc)) from None
     record = []
     k = 0
     for c in changes:
@@ -680,6 +715,8 @@ def summarize(project: Project, r: EcoResult) -> tuple[str, str]:
         if clean
         else f"{a.drc_errors} DRC, {a.lvs_errors} LVS and {a.antenna_nets} antenna violations"
     )
+    if a.pin_markers:
+        checks += f"; {describe_markers(a.pin_markers)}"
     msg = (
         f"{n} change{'s' if n != 1 else ''} applied and signed off again: setup slack at the "
         f"slow corner {b.setup_slack_ns:+.3f} to {a.setup_slack_ns:+.3f} ns, hold "
