@@ -34,6 +34,23 @@ LAYER Metal3
   WIDTH 0.20 ;
   AREA 0.144 ;
 END Metal3
+LAYER Via3
+  TYPE CUT ;
+END Via3
+LAYER Metal4
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  WIDTH 0.20 ;
+  AREA 0.144 ;
+END Metal4
+Via Via3_XY DEFAULT
+  LAYER Metal3 ;
+    RECT -0.145 -0.105 0.145 0.105 ;
+  LAYER Via3 ;
+    RECT -0.095 -0.095 0.095 0.095 ;
+  LAYER Metal4 ;
+    RECT -0.1 -0.145 0.1 0.145 ;
+END Via3_XY
 Via Via1_XY DEFAULT
   LAYER Metal1 ;
     RECT -0.145 -0.105 0.145 0.105 ;
@@ -156,11 +173,137 @@ def test_power_stripes_and_cells_with_metal_block_patches():
     # half its width past its last point, is 0.555 um above the stub, so the patch fits.
     (patch,) = minarea.repair(layout)
     assert patch.rect[1] == 1140445
-    masters = {"sram": minarea.Master(2000, 2000, frozenset({"Metal2"}))}
+    masters = {
+        "sram": minarea.Master(
+            2000, 2000, frozenset({"Metal2"}), obs=(("Metal2", (0, 0, 2000, 2000)),)
+        )
+    }
     comps = "COMPONENTS 1 ;\n    - u_ram sram + FIXED ( 875000 1140600 ) N ;\nEND COMPONENTS\n"
     text = _def(_net("net14185", STUB)).replace("PINS 1 ;", comps + "PINS 1 ;")
     (patch,) = minarea.repair(minarea.read_layout(text, minarea.read_tech(TECH), masters))
-    assert patch.rect[3] == 1139810  # the macro over the top end sends it to the bottom
+    # The macro's obstruction over the top end sends the patch to the bottom.
+    assert patch.rect[3] == 1139810
+
+
+# IHP's 4 mA output pad as its LEF has it, the parts the check reads: the bond-side pin
+# on every metal, the core-side pin, and obstructions over the whole cell.
+PAD_LEF = """
+MACRO sg13g2_IOPadOut4mA
+    CLASS PAD OUTPUT ;
+    ORIGIN 0.000 0.000 ;
+    SIZE 80.000 BY 180.000 ;
+  PIN c2p
+    DIRECTION INPUT ;
+    PORT
+      LAYER Metal2 ;
+        RECT 38.145 167.000 41.855 180.000 ;
+    END
+  END c2p
+  PIN pad
+    DIRECTION INOUT ;
+    PORT
+      LAYER Metal3 ;
+        RECT 5.000 0.000 75.000 3.000 ;
+      LAYER Metal4 ;
+        RECT 5.000 0.000 75.000 3.000 ;
+    END
+  END pad
+  OBS
+    LAYER Metal3 ;
+      RECT 0.000 0.000 80.000 178.000 ;
+    LAYER Metal4 ;
+      RECT 0.000 0.000 80.000 178.000 ;
+  END
+END sg13g2_IOPadOut4mA
+"""
+PAD = (
+    "COMPONENTS 1 ;\n    - pad_w0 sg13g2_IOPadOut4mA + FIXED ( 70000 260000 ) E ;\nEND COMPONENTS\n"
+)
+
+# The UART chip's route from a chip pin to that pad's bond-side pin, as the router left
+# it: a Metal3 wire from the pin, a Via3 and a Metal4 stub that ends 80 nm inside the pad,
+# on its pin. The stub alone is 0.134 um2.
+CHIP_PIN = (
+    "    - pad_o + NET pad_o + DIRECTION INOUT + USE SIGNAL\n"
+    "      + PORT + LAYER Metal3 ( -1000 -1000 ) ( 1000 1000 ) + FIXED ( 68500 300000 ) N ;"
+)
+TO_PAD = """
+      + ROUTED Metal3 ( 69120 299040 0 ) ( 69600 * )
+      NEW Metal4 ( 69600 299040 ) ( 70080 * 0 )
+      NEW Metal3 ( 69600 299040 ) Via3_XY"""
+
+
+def _with(
+    components: str, nets: str, masters: dict[str, minarea.Master], pins: str = ""
+) -> minarea.Layout:
+    text = _def(nets, pins=pins).replace("PINS 1 ;", components + "PINS 1 ;")
+    return minarea.read_layout(text, minarea.read_tech(TECH), masters)
+
+
+def test_the_lef_gives_each_pin_its_ports_and_the_cell_its_obstructions():
+    pad = minarea.read_masters(PAD_LEF)["sg13g2_IOPadOut4mA"]
+    assert (pad.width, pad.height) == (80000, 180000)
+    assert pad.pins["pad"] == (
+        ("Metal3", (5000, 0, 75000, 3000)),
+        ("Metal4", (5000, 0, 75000, 3000)),
+    )
+    assert pad.pins["c2p"] == (("Metal2", (38145, 167000, 41855, 180000)),)
+    assert ("Metal4", (0, 0, 80000, 178000)) in pad.obs
+    assert pad.layers == {"Metal2", "Metal3", "Metal4"}
+
+
+def test_a_stub_that_ends_on_a_pads_pin_is_that_pins_metal():
+    masters = minarea.read_masters(PAD_LEF)
+    net = "    - pad_o ( PIN pad_o ) ( pad_w0 pad ) + USE SIGNAL" + TO_PAD + " ;"
+    layout = _with(PAD, net, masters, CHIP_PIN)
+    # The pad turned east: its pin lies 70 um along the die's west edge, 3 um deep.
+    assert (70000, 265000, 73000, 335000) in layout.nets[("pad_o", "Metal4")]
+    assert minarea.check(layout) == []
+    assert minarea.repair(layout) == []
+
+
+def test_a_stub_that_ends_on_a_macros_pin_is_that_pins_metal():
+    lef = """
+MACRO blk
+  SIZE 20 BY 20 ;
+  PIN a
+    PORT
+      LAYER Metal4 ;
+        RECT 0 9.9 0.5 10.1 ;
+    END
+  END a
+  OBS
+    LAYER Metal4 ;
+      RECT 0.6 0 20 20 ;
+  END
+END blk
+"""
+    comps = "COMPONENTS 1 ;\n    - u_blk blk + FIXED ( 100000 100000 ) N ;\nEND COMPONENTS\n"
+    stub = "\n      + ROUTED Metal4 ( 99700 110000 ) ( 100200 * 0 )"
+    joined = "    - n ( u_blk a ) + USE SIGNAL" + stub + " ;"
+    # 0.12 um2 alone, 0.18 um2 with the 0.5 um of pin it ends on.
+    assert minarea.check(_with(comps, joined, minarea.read_masters(lef))) == []
+    alone = "    - n ( u2 X ) + USE SIGNAL" + stub + " ;"
+    (shape,) = minarea.check(_with(comps, alone, minarea.read_masters(lef)))
+    assert shape.area_um2 == pytest.approx(0.12)
+
+
+def test_a_stub_short_of_the_minimum_beside_an_obstruction_still_fails():
+    # Another net's stub that stops 0.1 um short of the pad: the pad's obstruction leaves
+    # no room at its east end, another net's wire none at its west end.
+    stub = "\n      + ROUTED Metal4 ( 69300 299040 ) ( 69900 * 0 )"
+    west = "\n      + ROUTED Metal4 ( 68000 298000 ) ( * 300000 )"
+    nets = "\n".join(
+        [
+            "    - x ( u1 A ) + USE SIGNAL" + stub + " ;",
+            "    - y ( u2 A ) + USE SIGNAL" + west + " ;",
+        ]
+    )
+    layout = _with(PAD, nets, minarea.read_masters(PAD_LEF))
+    (shape,) = minarea.check(layout)
+    assert (shape.net, shape.layer) == ("x", "Metal4") and shape.area_um2 == pytest.approx(0.14)
+    with pytest.raises(minarea.MinAreaError, match=r"Metal4 of net x, 0\.140000 um2"):
+        minarea.repair(layout)
 
 
 def test_patches_go_back_into_the_net_they_fix():
