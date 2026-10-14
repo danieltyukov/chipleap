@@ -343,25 +343,50 @@ def bank_instances(plan: BankPlan, wrapper_path: str) -> list[tuple[str, str]]:
 
 def clock_cells_sv() -> str:
     """X-HEEP's clock cells for IHP: every clock gate on ``sg13g2_slgcp_1``, the rest as
-    logic, which synthesis maps to standard cells."""
-    gate = "  {ICG} i_icg (.GATE({en}), .SCE({te}), .CLK(clk_i), .GCLK(clk_o));"
-    out = ["// Written by ChipLeap: X-HEEP's clock cells on IHP SG13G2's standard cells."]
-    gates = (
-        ("tc_clk_gating", "en_i", "test_en_i", "  parameter bit IS_FUNCTIONAL = 1'b1"),
-        ("cve2_clock_gate", "en_i", "scan_cg_en_i", ""),
+    logic, which synthesis maps to standard cells. A ``tc_clk_gating`` its user marks
+    not functional (``IS_FUNCTIONAL`` 0, the GPIO input stages' power-saving gates) passes
+    the clock through, as the generic cell's contract allows: a gate fewer under which
+    the clock tree must be balanced."""
+    gate = "{ICG} i_icg (.GATE({en}), .SCE({te}), .CLK(clk_i), .GCLK(clk_o));"
+    return (
+        "\n".join(
+            [
+                "// Written by ChipLeap: X-HEEP's clock cells on IHP SG13G2's standard cells.",
+                "module tc_clk_gating #(",
+                "    parameter bit IS_FUNCTIONAL = 1'b1",
+                ") (",
+                "    input  logic clk_i,",
+                "    input  logic en_i,",
+                "    input  logic test_en_i,",
+                "    output logic clk_o",
+                ");",
+                "  if (IS_FUNCTIONAL) begin : g_gate",
+                "    " + gate.format(ICG=ICG, en="en_i", te="test_en_i"),
+                "  end else begin : g_through",
+                "    assign clk_o = clk_i;",
+                "  end",
+                "endmodule",
+                "",
+                "module cve2_clock_gate (",
+                "    input  logic clk_i,",
+                "    input  logic en_i,",
+                "    input  logic scan_cg_en_i,",
+                "    output logic clk_o",
+                ");",
+                "  " + gate.format(ICG=ICG, en="en_i", te="scan_cg_en_i"),
+                "endmodule",
+                "",
+                *_logic_clock_cells(),
+            ]
+        )
+        + "\n"
     )
-    for name, en, te, param in gates:
-        out += [
-            f"module {name} {'#(' + chr(10) + param + chr(10) + ') ' if param else ''}(",
-            "    input  logic clk_i,",
-            f"    input  logic {en},",
-            f"    input  logic {te},",
-            "    output logic clk_o",
-            ");",
-            gate.format(ICG=ICG, en=en, te=te),
-            "endmodule",
-            "",
-        ]
+
+
+def _logic_clock_cells() -> list[str]:
+    """The clock cells that are logic: and, buffer, inverter, multiplexer, xor, or and a
+    delay that synthesis drops."""
+    out: list[str] = []
     out += [
         "module tc_clk_and2 (input logic clk0_i, input logic clk1_i, output logic clk_o);",
         "  assign clk_o = clk0_i & clk1_i;",
@@ -395,7 +420,7 @@ def clock_cells_sv() -> str:
         "  assign out_o = in_i;",
         "endmodule",
     ]
-    return "\n".join(out) + "\n"
+    return out
 
 
 # The clock cell modules ``clock_cells_sv`` defines, which X-HEEP's own copies must not

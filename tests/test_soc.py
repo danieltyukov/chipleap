@@ -154,6 +154,10 @@ def test_every_clock_gate_is_ihps_integrated_gate():
     for name in ("tc_clk_gating", "cve2_clock_gate"):
         body = text.split(f"module {name}")[1].split("endmodule")[0]
         assert f"{soc.ICG} i_icg" in body
+    # A gate its user marks not functional passes the clock through.
+    gating = text.split("module tc_clk_gating")[1].split("endmodule")[0]
+    assert "if (IS_FUNCTIONAL) begin : g_gate" in gating
+    assert "end else begin : g_through\n    assign clk_o = clk_i;" in gating
     for name in soc.CLOCK_MODULES:
         assert f"module {name} " in text
     assert text.count("module ") == len(soc.CLOCK_MODULES)
