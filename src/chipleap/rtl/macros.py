@@ -41,12 +41,14 @@ from chipleap.macro.layer import (
     Reserved,
     import_packages,
     pdk_libs,
+    pdk_macro_cells,
     reserved_names,
 )
 from chipleap.macro.manifest import MANIFEST, Manifest, parse_toml
 from chipleap.macro.sram import Sram, SramViews
 from chipleap.rtl import builddir, confine
 from chipleap.rtl.project import Project, RtlMacro
+from chipleap.verify import drc
 from chipleap.verify.tools import yosys
 
 # Steps that do not model a macro yet.
@@ -213,6 +215,21 @@ def area_um2(project: Project) -> float | None:
         man = manifest(project, m.package)
         total += man.width_um * man.height_um
     return total
+
+
+def pdk_cells(project: Project) -> dict[str, tuple[str, ...]]:
+    """The cells of the PDK's own macros the project places (its SRAMs), each with the
+    macros that hold it, as the DRC reports are read with them (``chipleap.verify.drc``)."""
+    if not srams(project):
+        return {}
+    root = pdk()
+    try:
+        return drc.pdk_cells(
+            ((s.cell, pdk_macro_cells(root, s.cell, sram.LIBRARY)) for s in cells(project)),
+            (project.top,),
+        )
+    except MacroImportError as exc:
+        raise MacroStepError(str(exc)) from None
 
 
 def views(

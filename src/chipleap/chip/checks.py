@@ -18,9 +18,8 @@ import csv
 import io as textio
 import json
 import re
-import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +44,6 @@ FLAT_NET_RE = re.compile(
 )
 DROP_PREFIXES = ("sg13g2_IOPad", "sg13g2_Corner", "sg13g2_Filler", "bondpad", "sealring")
 NETLIST_MAX = 1 << 30
-DB_MAX = 256 << 20
 # The IO ring's own supply rails on TopMetal1, from its outer (bond-side) edge, in um.
 RAILS = {"VDD": (140.0, 158.0), "VSS": (160.0, 178.0)}
 GRID_NM = 5
@@ -258,42 +256,6 @@ def lvs_outcome(log: str) -> str:
     if any(LVS_PASS.match(ln) for ln in lines):
         return "pass"
     return "unknown"
-
-
-# DRC
-
-
-@dataclass
-class DrcResult:
-    violations: dict[str, int] = field(default_factory=dict)  # rule -> count
-    reports: int = 0
-    # Pin markers off the grid inside the PDK's own macros (IHP's SRAMs draw Metal1 pin
-    # shapes off the 5 nm grid): reported, not counted. Pin purposes are no mask layer.
-    in_pdk_macros: dict[str, int] = field(default_factory=dict)
-
-    @property
-    def total(self) -> int:
-        return sum(self.violations.values())
-
-
-PIN_OFFGRID_RE = re.compile(r"[A-Za-z0-9]+_pin_Offgrid")
-
-
-def read_lyrdb(path: Path, into: DrcResult, pdk_cells: frozenset[str] = frozenset()) -> None:
-    """Count a KLayout report database's items by rule; an off-grid pin marker inside one
-    of ``pdk_cells`` (the PDK's own macros) is counted apart, every other item as it is."""
-    if path.stat().st_size > DB_MAX:
-        raise CheckError(f"{path.name} is larger than expected")
-    into.reports += 1
-    for _, el in ET.iterparse(path, events=("end",)):
-        if el.tag == "item":
-            rule = (el.findtext("category") or "?").strip().strip("'")
-            cell = (el.findtext("cell") or "").strip()
-            if cell in pdk_cells and PIN_OFFGRID_RE.fullmatch(rule):
-                into.in_pdk_macros[rule] = into.in_pdk_macros.get(rule, 0) + 1
-            else:
-                into.violations[rule] = into.violations.get(rule, 0) + 1
-            el.clear()
 
 
 # Supply hookup

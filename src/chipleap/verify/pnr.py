@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -28,10 +29,11 @@ from chipleap.gen import banks
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.hw.tech import accel_logic_kge, get_tech
-from chipleap.macro import grid, place, sram
+from chipleap.macro import grid, layer, place, sram
 from chipleap.verify import launch, minarea
+from chipleap.verify.drc import DrcReportError, DrcResult, pdk_cells, read_lyrdb
 from chipleap.verify.synth import _sv2v
-from chipleap.verify.tools import librelane
+from chipleap.verify.tools import librelane, librelane_env, librelane_pdk_args, librelane_ran
 
 PNR_WORDS = 16
 
@@ -61,6 +63,9 @@ class PnrResult:
     macro_um2: float = 0.0
     buffers: str = ""  # what the buffers are in the layout, and why when they are flops
     synth_cell_um2: float = 0.0  # LibreLane's synthesis, before placement's repairs
+    # Off-grid pin markers inside the PDK's own macros, left out of drc_errors
+    # (``chipleap.verify.drc``): rule, cell, the macros that hold it, count.
+    pin_markers: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -158,11 +163,13 @@ def _corner(metrics: dict[str, Any], prefix: str, corner: str) -> float | None:
     return None
 
 
-def parse(metrics: dict[str, Any], clock_mhz: float, gds: Path | None) -> PnrResult:
-    drc = sum(
-        int(_num(metrics, k))
-        for k in ("route__drc_errors", "klayout__drc_error__count", "magic__drc_error__count")
-    )
+def parse(
+    metrics: dict[str, Any], clock_mhz: float, gds: Path | None, klayout: DrcResult | None = None
+) -> PnrResult:
+    """The result of a run from its metrics; with ``klayout`` (``klayout_drc``), its KLayout
+    DRC count is that report's, off-grid pin markers inside the PDK's macros set apart."""
+    drc = sum(int(_num(metrics, k)) for k in ("route__drc_errors", "magic__drc_error__count"))
+    drc += klayout.total if klayout else int(_num(metrics, "klayout__drc_error__count"))
     return PnrResult(
         clock_mhz=clock_mhz,
         die_um2=_num(metrics, "design__die__area"),
@@ -182,7 +189,50 @@ def parse(metrics: dict[str, Any], clock_mhz: float, gds: Path | None) -> PnrRes
         power_mw=_num(metrics, "power__total") * 1000,
         gds=gds,
         metrics=metrics,
+        pin_markers=klayout.markers_data() if klayout else [],
     )
+
+
+def klayout_report(run: Path) -> Path | None:
+    """The report database of a run's last KLayout DRC."""
+    steps = sorted(run.glob("*-klayout-drc"), key=lambda p: int(p.name.split("-")[0]))
+    report = steps[-1] / "reports" / "drc.klayout.lyrdb" if steps else None
+    return report if report is not None and report.is_file() else None
+
+
+def klayout_drc(
+    metrics: dict[str, Any], report: Path | None, held: Mapping[str, tuple[str, ...]]
+) -> DrcResult | None:
+    """A run's KLayout DRC report read as the chip step reads IHP's (``chipleap.verify.drc``),
+    ``held`` naming the cells of the PDK's own macros; None when the run counted no KLayout
+    violation. The report must hold what LibreLane counted."""
+    counted = int(_num(metrics, "klayout__drc_error__count"))
+    if counted == 0:
+        return None
+    if report is None:
+        raise PnrError(f"LibreLane's KLayout DRC counted {counted} violations and left no report")
+    result = DrcResult()
+    try:
+        read_lyrdb(report, result, held)
+    except (DrcReportError, OSError) as exc:
+        raise PnrError(f"LibreLane's KLayout DRC report: {exc}") from None
+    if result.total + result.markers != counted:
+        raise PnrError(
+            f"LibreLane's KLayout DRC counted {counted} violations, its report holds "
+            f"{result.total + result.markers}"
+        )
+    return result
+
+
+def parse_run(
+    metrics: dict[str, Any],
+    clock_mhz: float,
+    gds: Path | None,
+    run: Path,
+    held: Mapping[str, tuple[str, ...]],
+) -> PnrResult:
+    """``parse`` with the run's own KLayout DRC report (``klayout_drc``)."""
+    return parse(metrics, clock_mhz, gds, klayout_drc(metrics, klayout_report(run), held))
 
 
 DETAILED_ROUTING = "OpenROAD.DetailedRouting"
@@ -207,8 +257,13 @@ def run_librelane(
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
+    try:
+        pdk_args = librelane_pdk_args()
+        env = librelane_env()
+    except ValueError as exc:
+        raise PnrError(str(exc)) from None
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
-    base = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", tag]
+    base = [tool.path, *pdk_args, "--run-tag", tag]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
     start = time.monotonic()
     route_log = workdir / "librelane-route.log"
@@ -218,8 +273,13 @@ def run_librelane(
         route_log,
         limit,
         limit,
+        env,
     )
     run = workdir / "runs" / tag
+    try:
+        librelane_ran(run)
+    except ValueError as exc:
+        raise PnrError(str(exc)) from None
     routed = step_state(run, DETAILED_ROUTING)
     if routed is None:
         raise PnrError(
@@ -233,7 +293,7 @@ def run_librelane(
     else:
         args.append("config.json")
     left = limit - (time.monotonic() - start)
-    code = _librelane(args, workdir, log, max(left, 1.0), limit)
+    code = _librelane(args, workdir, log, max(left, 1.0), limit, env)
     final = run / "final"
     metrics_file = final / "metrics.json"
     if not metrics_file.is_file():
@@ -242,9 +302,11 @@ def run_librelane(
     return json.loads(metrics_file.read_text()), gds
 
 
-def _librelane(cmd: list[str], workdir: Path, log: Path, timeout: float, limit: float) -> int:
+def _librelane(
+    cmd: list[str], workdir: Path, log: Path, timeout: float, limit: float, env: dict[str, str]
+) -> int:
     try:
-        return launch.run(cmd, workdir, log, timeout)
+        return launch.run(cmd, workdir, log, timeout, env)
     except launch.Busy as exc:
         raise PnrError(f"LibreLane did not start: {exc}") from None
     except launch.TimedOut as exc:
@@ -384,18 +446,21 @@ def place_and_route(
     _sv2v(src / "chipleap_accel.sv", src / "chipleap_accel.v")
     pdk = pdk or io.pdk_dir()
     reason = sram_reason(accel, pdk)
+    run = workdir / "runs" / "chipleap"
     if reason is not None or pdk is None:
         metrics, gds = run_librelane(workdir, config(accel, clock_mhz))
-        result = parse(metrics, clock_mhz, gds)
+        result = parse_run(metrics, clock_mhz, gds, run, {})
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
     cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
     metrics, gds = run_librelane(workdir, cfg)
     from chipleap.rtl.pnr import check_merged
 
-    check_merged(workdir / "runs" / "chipleap", workdir, banks.TOP)
-    result = replace(
-        parse(metrics, clock_mhz, gds), synth_cell_um2=synth_area(workdir / "runs" / "chipleap")
+    check_merged(run, workdir, banks.TOP)
+    held = pdk_cells(
+        ((s.cell, layer.pdk_macro_cells(pdk, s.cell, sram.LIBRARY)) for s in plan.cells()),
+        (banks.TOP,),
     )
+    result = replace(parse_run(metrics, clock_mhz, gds, run, held), synth_cell_um2=synth_area(run))
     counts: dict[str, int] = {}
     for _, cell in plan.instances():
         counts[cell] = counts.get(cell, 0) + 1

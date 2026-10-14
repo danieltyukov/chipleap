@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,14 @@ from chipleap.rtl.openroad import OpenroadError
 from chipleap.rtl.pnr import verilog_config
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS
+from chipleap.verify.drc import (
+    DB_MAX,
+    DrcReportError,
+    DrcResult,
+    describe_markers,
+    pdk_cells,
+    read_lyrdb,
+)
 from chipleap.verify.pnr import PnrError, parse
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane, openroad, yosys
@@ -53,6 +62,7 @@ ERRORS = (
     PdnError,
     IoError,
     CheckError,
+    DrcReportError,
     ToolError,
     PnrError,
     MacroError,
@@ -445,7 +455,7 @@ def _ihp_runner(
                 wanted = f.name in keep or f.suffix in (".lyrdb", ".log")
                 if not f.is_file() or not wanted:
                     continue
-                if f.stat().st_size > checks.DB_MAX:
+                if f.stat().st_size > DB_MAX:
                     raise ToolError(
                         f"IHP's {which.upper()} wrote {f.name}, larger than ChipLeap reads"
                     )
@@ -460,7 +470,7 @@ def _ihp_runner(
 DRC_LOGS = ("density", "sg13g2_maximal")
 
 
-def drc(p: Prepared, final: Path, name: str) -> checks.DrcResult:
+def drc(p: Prepared, final: Path, name: str) -> DrcResult:
     """IHP's DRC deck on the finished chip: every table, density and the extra rules
     included, recommended rules left out (bond pads against their IO cells break
     Pad.d1R and Pad.fR_* by design, as on IHP's own reference chips)."""
@@ -481,13 +491,22 @@ def drc(p: Prepared, final: Path, name: str) -> checks.DrcResult:
         ],
         (),
     )
-    pdk_cells = {v.cell for v in p.imported.views.values() if v.source == "pdk"}
-    return drc_result(drc_dir, name, code, log, frozenset(pdk_cells))
+    return drc_result(drc_dir, name, code, log, drc_held(p.imported.views.values(), name))
+
+
+def drc_held(views: Iterable[layer.MacroView], name: str) -> dict[str, tuple[str, ...]]:
+    """The cells of the PDK's own macros on the chip (views from the PDK's libraries) and
+    of their GDS, in which DRC sets off-grid pin markers apart (``chipleap.verify.drc``)."""
+    return pdk_cells(((v.cell, v.gds_cells) for v in views if v.source == "pdk"), (name,))
 
 
 def drc_result(
-    drc_dir: Path, name: str, code: int, log: str, pdk_cells: frozenset[str] = frozenset()
-) -> checks.DrcResult:
+    drc_dir: Path,
+    name: str,
+    code: int,
+    log: str,
+    held: Mapping[str, tuple[str, ...]] | None = None,
+) -> DrcResult:
     """The violations of a DRC run, after checking it ran: run_drc.py exits 0 when clean
     and 1 with violations, and merges the tables into one report; every expected table's
     log must be there and the code must agree with the report."""
@@ -496,9 +515,9 @@ def drc_result(
     if code not in (0, 1) or not report.is_file() or missing:
         what = f"no {', '.join(missing)} table" if missing else f"exit {code}"
         raise ToolError(f"IHP's DRC did not finish ({what}): {_last(log)}")
-    result = checks.DrcResult()
-    checks.read_lyrdb(report, result, pdk_cells)
-    if (code == 1) != (result.total + sum(result.in_pdk_macros.values()) > 0):
+    result = DrcResult()
+    read_lyrdb(report, result, held)
+    if (code == 1) != (result.total + result.markers > 0):
         raise ToolError(
             f"IHP's DRC exited {code} with {result.total} violations in its report; one of "
             "them is wrong"
@@ -585,8 +604,8 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
             "rules": dict(sorted(drc_result.violations.items())),
             "recommended_rules": "not checked",
             **(
-                {"pin_markers_in_pdk_macros": dict(sorted(drc_result.in_pdk_macros.items()))}
-                if drc_result.in_pdk_macros
+                {"pin_markers_in_pdk_macros": drc_result.markers_data()}
+                if drc_result.pin_markers
                 else {}
             ),
         },
@@ -650,8 +669,8 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
     lvs = "LVS clean on IHP's deck"
     if boxes:
         lvs += f" ({', '.join(boxes)} compared as {'boxes' if len(boxes) > 1 else 'a box'})"
-    markers = sum(data["drc"].get("pin_markers_in_pdk_macros", {}).values())
-    pdk = f"; {markers} pin markers off the grid inside the PDK's own macros" if markers else ""
+    markers = describe_markers(data["drc"].get("pin_markers_in_pdk_macros", []))
+    pdk = f"; {markers}" if markers else ""
     return True, (
         f"{head}; {lvs}, DRC clean on IHP's deck (density included, "
         f"recommended rules not checked{pdk}), supplies reach the ring, precheck "

@@ -235,7 +235,7 @@ def test_run_librelane_routes_then_finishes(tmp_path, monkeypatch):
     tool.chmod(0o755)
     monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(tool))
 
-    def fake(cmd, workdir, log, timeout, limit):
+    def fake(cmd, workdir, log, timeout, limit, env):
         calls.append(cmd[5:])
         run = workdir / "runs" / "chipleap"
         if "--to" in cmd:
