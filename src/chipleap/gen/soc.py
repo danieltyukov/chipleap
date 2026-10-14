@@ -415,18 +415,15 @@ CLOCK_MODULES = (
 
 # Clocks besides clk_i that clock flip-flops in X-HEEP, each asynchronous to the others,
 # as X-HEEP's own synchronizers and CDC FIFOs treat them: (name, port, source, period in
-# ns; 0 for the design's clock period). The I2S clock is X-HEEP's own, divided from clk_i
-# (at most clk_i's frequency) and leaving on i2s_sck_o: its clock is created on the pin
-# that drives that net. JTAG and the SPI slave are timed at 20 MHz.
+# ns). JTAG and the SPI slave are timed at 20 MHz. X-HEEP's I2S clock is clk_i through
+# the I2S's own divider, bypass mux and clock gate, and gets no clock of its own: clk
+# reaches its flip-flops through the bypass and the gate, at its fastest (a divider of
+# one), and the clock tree is built through the gate as through X-HEEP's other gates. A
+# clock created on the gate's output stops clk there and leaves its 337 flip-flops on an
+# unbuffered net: the first layout found them 6 ns late.
 EXTRA_CLOCKS = (
     ("jtag_tck", "jtag_tck_i", "[get_ports jtag_tck_i]", 50.0),
     ("spi_slave_sck", "spi_slave_sck_i", "[get_ports spi_slave_sck_i]", 50.0),
-    (
-        "i2s_sck",
-        "i2s_sck_o",
-        "[get_pins -of_objects [get_nets i2s_sck_o] -filter {direction == output}]",
-        0.0,
-    ),
 )
 
 

@@ -315,8 +315,10 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     assert any(f.endswith("if_xif.sv") for f in prep.sources.files)
     assert prep.sources.files[-1] == f"src/{soc.TOP}.sv"
     sdc = (work / soc_step.SDC).read_text()
-    for clock in ("clk", "jtag_tck", "spi_slave_sck", "i2s_sck"):
+    for clock in ("clk", "jtag_tck", "spi_slave_sck"):
         assert f"-name {clock} " in sdc
+    # The I2S clock is clk through the I2S's divider and gate, with no clock of its own.
+    assert "i2s" not in sdc
     assert "set_clock_groups -asynchronous" in sdc
     cells = [c for _, c in prep.instances]
     assert cells.count("RM_IHPSG13_1P_1024x32_c2_bm_bist") == 8
