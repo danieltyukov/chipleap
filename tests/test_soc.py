@@ -332,6 +332,8 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     assert small.core_um2 < fp.core_um2
     # CTS keeps the gated trees' levels alike instead of chaining delay buffers.
     assert cfg["CTS_DELAY_BUFFER_DERATE_PCT"] == 0 and cfg["CTS_BALANCE_LEVELS"] is True
+    # CTS skips a clock net with a buffer on it: no port buffer on the I2S clock's net.
+    assert cfg["DESIGN_REPAIR_BUFFER_OUTPUT_PORTS"] is False
     # A clock other than the design's, for a signoff the SoC can meet.
     slow, _ = soc_step.prepare(design, xheep_config(design), co, work, pdk, clock_mhz=55.0)
     assert slow["CLOCK_PERIOD"] == pytest.approx(18.182)

@@ -397,6 +397,11 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # rest on the data paths.
         "CTS_DELAY_BUFFER_DERATE_PCT": 0,
         "CTS_BALANCE_LEVELS": True,
+        # No buffer between an output port and its net before the clock tree: X-HEEP's
+        # I2S clock leaves on i2s_sck_o, and OpenROAD's CTS skips a clock net that has
+        # a buffer on it already, which left the I2S's 337 flip-flops on the gate's
+        # unbuffered output, 3 ns late. Repair still sizes and buffers the outputs' nets.
+        "DESIGN_REPAIR_BUFFER_OUTPUT_PORTS": False,
         "PDN_CFG": "dir::pdn.tcl",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
