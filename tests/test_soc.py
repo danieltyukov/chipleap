@@ -338,8 +338,8 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     assert small.core_um2 < fp.core_um2
     # CTS skips a clock net with a buffer on it: no port buffer on the I2S clock's net.
     assert cfg["DESIGN_REPAIR_BUFFER_OUTPUT_PORTS"] is False
-    # Antennas are left to the detailed router's repair.
-    assert cfg["RUN_ANTENNA_REPAIR"] is False and cfg["DRT_ANTENNA_REPAIR_ITERS"] > 0
+    # Antenna repair may reroute with a little overflow; the detailed router resolves it.
+    assert cfg["GRT_ALLOW_CONGESTION"] is True and cfg["DRT_ANTENNA_REPAIR_ITERS"] > 0
     # A clock other than the design's, for a signoff the SoC can meet.
     slow, _ = soc_step.prepare(design, xheep_config(design), co, work, pdk, clock_mhz=55.0)
     assert slow["CLOCK_PERIOD"] == pytest.approx(18.182)
