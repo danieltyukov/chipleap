@@ -89,12 +89,12 @@ These are the designs routed with this flow at 100 MHz, each with 16-word flop b
 | GEMV 1 x 8 | 1 | +0.89 ns, about 110 MHz | about 160 MHz | the GEMV engine's row counter |
 | Weight-stationary 4 x 4 | 1 | +0.67 ns, about 107 MHz | about 166 MHz | the accumulator update |
 | Output-stationary 4 x 4 | 1 | +1.03 ns, about 111 MHz | about 166 MHz | a read port's address step |
-| GEMV 4 x 8 | 2 | +0.31 ns, about 103 MHz | about 158 MHz | the dot product into a lane's partial sum |
+| GEMV 4 x 8 | 2 | -0.23 ns, about 98 MHz | about 153 MHz | the accumulator row select into the accumulators |
 | GEMV 2 x 8 | 4 | +0.37 ns, about 104 MHz | about 157 MHz | unpacking packed weights into the operand registers |
 | GEMV 1 x 8 | 8 | -0.09 ns, about 99 MHz | about 156 MHz | unpacking packed weights into the operand registers |
 | GEMV 1 x 8 | 16 | -0.41 ns, about 96 MHz | about 149 MHz | the activation read address into an operand register |
 
-The GEMV 4 x 8 design and the GEMV 1 x 8 designs with eight and sixteen ports are routed with the core reading its tile descriptor from a register loaded a cycle ahead. Before that, the core selected the descriptor of its buffer slot after the registers, and that select limited them: GEMV 4 x 8 met about 97 MHz (-0.27 ns) on the select into the accumulators, and GEMV 1 x 8 about 89 MHz with eight ports (-1.18 ns) and with sixteen (-1.25 ns) on the select into an activation operand register. The other rows were routed before the change and were not limited by it.
+The GEMV 4 x 8 design and the GEMV 1 x 8 designs with eight and sixteen ports are routed with the core reading its tile descriptor from a register loaded a cycle ahead. Before that, the core selected the descriptor of its buffer slot after the registers, and that select limited them: GEMV 4 x 8 met about 97 MHz (-0.27 ns) on the select into the accumulators, and GEMV 1 x 8 about 89 MHz with eight ports (-1.18 ns) and with sixteen (-1.25 ns) on the select into an activation operand register. The other rows were routed before the change and were not limited by it. Routing alone moves a period by about half a nanosecond: the GEMV 4 x 8 design, routed once more from the same logic before ChipLeap's core took its `chipleap_accel` wrapper, met +0.31 ns (about 103 MHz) on the dot product.
 
 Designs with more than eight read ports are placed at 35 % core utilisation instead of 45 %: at 45 % the 16-port design failed global routing on congestion; at 35 % global routing finished with no overflow. With the DMA that handed words to its read ports one after another, the GEMV 2 x 8 engine with four ports met about 71 MHz (-4.02 ns) and the GEMV 1 x 8 engine with sixteen about 24 MHz (-31.79 ns, at 45 %).
 

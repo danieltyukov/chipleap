@@ -73,8 +73,10 @@ FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical cor
 #   from that period in proportion: ACCEL_SIGNOFF_FACTOR is ACCEL_ROUTED_NS over the GEMV
 #   delay above plus flop overhead.
 # - A GEMV engine slows with its lanes, which make it larger: the 2 x 8 engine with four
-#   ports took 9.63 ns (weight unpacking) and the 4 x 8 one with two 9.69 ns (the dot
-#   product). ACCEL_LANE_NS per doubling of lanes bounds both from above.
+#   ports took 9.63 ns (weight unpacking), and the 4 x 8 one with two 9.69 ns (the dot
+#   product) and, routed again from the same logic, 10.23 ns (the accumulator row select
+#   into the accumulators): routing alone moved it by 0.54 ns. ACCEL_LANE_NS per doubling
+#   of lanes bounds them from above.
 # - More ports make the engine larger and its wires longer: the GEMV 1 x 8 engine took
 #   9.11 ns with one port, 10.09 ns with eight (weight unpacking, then the DMA's setup of
 #   each port's start address at 9.74 ns) and 10.41 ns with sixteen (at 35 % core
@@ -92,7 +94,7 @@ FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical cor
 # docs/verification.md lists the routed designs.
 ACCEL_ROUTED_NS = 9.33
 ACCEL_SIGNOFF_FACTOR = ACCEL_ROUTED_NS / (ACCEL_DELAY_NS["gemv"] + FLOP_OVERHEAD_NS)
-ACCEL_LANE_NS = 0.30
+ACCEL_LANE_NS = 0.46
 ACCEL_PORT_NS = (8.966, 0.1413)
 
 

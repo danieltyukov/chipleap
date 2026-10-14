@@ -93,10 +93,11 @@ def test_accel_clock_limit_follows_ports_lanes_and_width():
     assert accel_signoff_mhz("gemv", 16, 1) < accel_signoff_mhz("gemv", 8, 1)
     assert accel_signoff_mhz("gemv", 8, 2, rows=4) < accel_signoff_mhz("gemv", 8, 2, rows=2)
     ihp, g28 = get_tech("ihp-sg13g2"), get_tech("generic-28nm")
-    # Routed at the slow corner: GEMV 2 x 8 engines with four ports and 4 x 8 with two met
-    # 100 MHz, and a 1 x 8 engine met 99.06 MHz with eight ports and 96.0 MHz with sixteen.
+    # Routed at the slow corner: a GEMV 2 x 8 engine with four ports met 100 MHz, a 4 x 8
+    # engine with two 97.7 MHz (and 103.2 MHz in another run), and a 1 x 8 engine 99.06 MHz
+    # with eight ports and 96.0 MHz with sixteen.
     assert ihp.clock_limit_mhz("gemv", 8, 4, rows=2) == ihp.max_freq_mhz
-    assert ihp.clock_limit_mhz("gemv", 8, 2, rows=4) == ihp.max_freq_mhz
+    assert 97.5 < ihp.clock_limit_mhz("gemv", 8, 2, rows=4) <= 97.72
     assert 99.0 < ihp.clock_limit_mhz("gemv", 8, 8) <= 99.06
     assert ihp.clock_limit_mhz("gemv", 8, 16) == pytest.approx(89.1, abs=0.1)
     # Only the node the timing was measured on is capped by it.
