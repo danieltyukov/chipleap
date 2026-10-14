@@ -31,8 +31,10 @@ from typing import Any
 # 8 to 64 MACs, mapped and sized for the 5 ns target of verify/synth.py, with the buffers
 # extrapolated away. The leave-one-out error is 2.9% on average and 8.7% at worst.
 # Gate counts are roughly node independent, so the generic nodes reuse them.
-# `scripts/calibrate_sg13g2.py` measures them again.
-ACCEL_BASE_KGE = 24.54  # register file, job and tile control, store engine, cycle counter
+# `scripts/calibrate_sg13g2.py` measures them again. The registered copy of the core's tile
+# descriptor added 0.8 to 1.5 kGE to the 12 configurations, 1.16 on average, which the
+# base takes.
+ACCEL_BASE_KGE = 25.70  # register file, job and tile control, store engine, cycle counter
 ACCEL_PORT_KGE = 2.47  # one OBI read port of the DMA, with its own address generator
 # Per dataflow: kGE per MAC (8 x 8 multiplier, adder or pipeline registers) and per edge
 # unit: a GEMV lane's accumulators, a weight-stationary column's accumulators, or the
@@ -70,23 +72,30 @@ FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical cor
 # - A synthesized datapath longer than the GEMV 1 x 8 engine's (a wider adder tree) is scaled
 #   from that period in proportion: ACCEL_SIGNOFF_FACTOR is ACCEL_ROUTED_NS over the GEMV
 #   delay above plus flop overhead.
-# - A GEMV engine slows with its lanes, because the buffer slot select reaches every lane's
-#   operand registers and accumulators: the 2 x 8 engine took 9.63 ns and the 4 x 8 one
-#   10.27 ns. ACCEL_LANE_NS per doubling of lanes bounds both from above.
+# - A GEMV engine slows with its lanes, which make it larger: the 2 x 8 engine with four
+#   ports took 9.63 ns (weight unpacking), and the 4 x 8 one with two 9.69 ns (the dot
+#   product) and, routed again from the same logic, 10.23 ns (the accumulator row select
+#   into the accumulators): routing alone moved it by 0.54 ns. ACCEL_LANE_NS per doubling
+#   of lanes bounds them from above.
 # - More ports make the engine larger and its wires longer: the GEMV 1 x 8 engine took
-#   9.11 ns with one port, then 11.18 ns with eight and 11.25 ns with sixteen (at 35 % core
-#   utilisation), both on the slot select into an operand register; there the DMA's setup of
-#   each port's start address took 10.11 and 10.23 ns. ACCEL_PORT_NS is the line
-#   a + b x ports through one and eight ports; sixteen lie 2.3 ns under it. Each port has
-#   an address generator of its own, so the DMA no longer hands words to the ports one after
-#   another; with that chain the GEMV 2 x 8 engine with four ports took 14.02 ns, and now
-#   9.63 ns.
+#   9.11 ns with one port, 10.09 ns with eight (weight unpacking, then the DMA's setup of
+#   each port's start address at 9.74 ns) and 10.41 ns with sixteen (at 35 % core
+#   utilisation; the activation read address into an operand register). ACCEL_PORT_NS is
+#   the line a + b x ports through one and eight ports; sixteen lie 0.8 ns under it. Each
+#   port has an address generator of its own, so the DMA no longer hands words to the ports
+#   one after another; with that chain the GEMV 2 x 8 engine with four ports took 14.02 ns,
+#   and now 9.63 ns.
+# - The core reads its tile descriptor from a register loaded a cycle ahead, not through a
+#   select by the buffer slot. With the select, the slot's net and its buffer tree led into
+#   the GEMV engine's operand registers and accumulators, and set the period of the 4 x 8
+#   engine with two ports (10.27 ns) and the 1 x 8 with eight (11.18 ns) and sixteen
+#   (11.25 ns).
 # The model is at or above every routed period, so it errs on the safe side.
 # docs/verification.md lists the routed designs.
 ACCEL_ROUTED_NS = 9.33
 ACCEL_SIGNOFF_FACTOR = ACCEL_ROUTED_NS / (ACCEL_DELAY_NS["gemv"] + FLOP_OVERHEAD_NS)
-ACCEL_LANE_NS = 0.47
-ACCEL_PORT_NS = (8.81, 0.296)
+ACCEL_LANE_NS = 0.46
+ACCEL_PORT_NS = (8.966, 0.1413)
 
 
 def accel_delay_ns(dataflow: str, cols: int, ports: int) -> float:
