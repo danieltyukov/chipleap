@@ -593,43 +593,6 @@ def test_a_name_in_the_layout_cannot_print_a_pass():
     assert checks.lvs_outcome(PASS_LINE + " x") == "unknown"
 
 
-def test_drc_reports_are_counted_by_rule(tmp_path):
-    db = tmp_path / "a.lyrdb"
-    db.write_text(
-        "<report-database><items>"
-        "<item><category>'M1.a'</category></item>"
-        "<item><category>'M1.a'</category></item>"
-        "<item><category>'Pad.d1R'</category></item>"
-        "</items></report-database>"
-    )
-    r = checks.DrcResult()
-    checks.read_lyrdb(db, r)
-    assert r.violations == {"M1.a": 2, "Pad.d1R": 1} and r.total == 3
-
-
-def test_off_grid_pin_markers_inside_the_pdks_macros_are_counted_apart(tmp_path):
-    """IHP's SRAMs draw Metal1 pin markers off the 5 nm grid; only that rule, only
-    inside a PDK macro's cell, is counted apart. The same rule elsewhere, or any other
-    rule inside the macro, still counts."""
-    db = tmp_path / "a.lyrdb"
-    db.write_text(
-        "<report-database><items>"
-        "<item><category>metal1_pin_Offgrid</category><cell>RM_X</cell></item>"
-        "<item><category>metal1_pin_Offgrid</category><cell>RM_X</cell></item>"
-        "<item><category>metal1_pin_Offgrid</category><cell>chip</cell></item>"
-        "<item><category>M1.a</category><cell>RM_X</cell></item>"
-        "<item><category>metal1_drw_Offgrid</category><cell>RM_X</cell></item>"
-        "</items></report-database>"
-    )
-    r = checks.DrcResult()
-    checks.read_lyrdb(db, r, frozenset({"RM_X"}))
-    assert r.in_pdk_macros == {"metal1_pin_Offgrid": 2}
-    assert r.violations == {"metal1_pin_Offgrid": 1, "M1.a": 1, "metal1_drw_Offgrid": 1}
-    plain = checks.DrcResult()
-    checks.read_lyrdb(db, plain)
-    assert plain.total == 5 and not plain.in_pdk_macros
-
-
 def test_a_macro_compared_as_a_box_leaves_the_netlist_and_keeps_its_pins():
     """IHP's SRAM leaves the LVS netlist, as the IO cells do; each pin a net reaches
     becomes metal labelled with that net, placed and turned as the macro is."""
@@ -774,9 +737,10 @@ def flow_case():
     return cfg, plan, b, imported
 
 
-def test_the_flow_places_the_ring_and_routes_around_it():
+def test_the_flow_places_the_ring_and_routes_around_it(monkeypatch):
     from chipleap.chip import flow
 
+    monkeypatch.setattr(flow, "librelane_loads_pad_views", lambda: False)
     cfg, plan, b, imported = flow_case()
     c = flow.config(cfg, plan, b, imported, {"VERILOG_FILES": ["dir::src/core.v"]}, 10.0, FLOW_DIR)
     assert c["DESIGN_NAME"] == "c" and c["VERILOG_FILES"] == ["dir::src/c.v", "dir::src/core.v"]
@@ -789,12 +753,25 @@ def test_the_flow_places_the_ring_and_routes_around_it():
     obs = c["ROUTING_OBSTRUCTIONS"]
     assert len(obs) == 20 and obs[0] == ["Metal1", 70.0, 73.0, plan.die[0] - 70, 249.0]
     assert "KLAYOUT_DRC_THREADS" not in c
+    assert not any(k in c for k in flow.PAD_VIEWS)
 
 
-def test_a_value_tcl_could_read_as_syntax_is_refused():
+def test_the_chip_keeps_its_own_io_views_when_librelane_would_load_the_pdks(monkeypatch):
+    """LibreLane 3 loads the pad library IHP-Open-PDK's configuration names (PAD_LEFS and
+    the rest); a second definition of an IO cell beside the chip's own stops the router."""
+    from chipleap.chip import flow
+
+    monkeypatch.setattr(flow, "librelane_loads_pad_views", lambda: True)
+    cfg, plan, b, imported = flow_case()
+    c = flow.config(cfg, plan, b, imported, {}, 10.0, FLOW_DIR)
+    assert all(c[k] == [] for k in flow.PAD_VIEWS)
+
+
+def test_a_value_tcl_could_read_as_syntax_is_refused(monkeypatch):
     from chipleap.chip import flow
     from chipleap.verify.pnr import PnrError
 
+    monkeypatch.setattr(flow, "librelane_loads_pad_views", lambda: False)
     cfg, plan, b, imported = flow_case()
     with pytest.raises(PnrError, match="cannot go into a tool script"):
         flow.config(cfg, plan, b, imported, {"VERILOG_DEFINES": ["X=$(id)"]}, 10.0, FLOW_DIR)
@@ -1094,6 +1071,28 @@ def _drc_dir(tmp_path, items: int, logs=("density", "sg13g2_maximal")):
     for t in logs:
         (d / f"chip_c_{t}.log").write_text("ok\n")
     return d
+
+
+def test_the_chip_sets_apart_off_grid_pin_markers_only_in_the_pdks_macros(tmp_path):
+    """The chip step reads IHP's report as place and route reads LibreLane's
+    (``chipleap.verify.drc``): an off-grid pin marker in a cell of a PDK macro's GDS is
+    reported apart; in a package's cell it counts."""
+    from types import SimpleNamespace
+
+    sram = SimpleNamespace(cell="RM_S", gds_cells=("RM_S", "RM_IHPSG13_1P_BLDRV"), source="pdk")
+    pkg = SimpleNamespace(cell="strongarm", gds_cells=("strongarm", "sa_latch"), source="package")
+    held = assemble.drc_held([sram, pkg], "c")
+    assert set(held) == {"RM_S", "RM_IHPSG13_1P_BLDRV"}
+    d = _drc_dir(tmp_path, 0)
+    (d / "chip_c_full.lyrdb").write_text(
+        "<report-database><items>"
+        "<item><category>'metal1_pin_Offgrid'</category><cell>RM_IHPSG13_1P_BLDRV:r0</cell></item>"
+        "<item><category>'metal1_pin_Offgrid'</category><cell>sa_latch</cell></item>"
+        "</items></report-database>"
+    )
+    r = assemble.drc_result(d, "c", 1, "", held)
+    assert r.markers == 1 and r.violations == {"metal1_pin_Offgrid": 1}
+    assert r.markers_data()[0]["macros"] == ["RM_S"]
 
 
 def test_a_drc_run_must_finish_to_count(tmp_path):
