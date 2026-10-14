@@ -445,6 +445,10 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # a buffer on it already, which left the I2S's 337 flip-flops on the gate's
         # unbuffered output, 3 ns late. Repair still sizes and buffers the outputs' nets.
         "DESIGN_REPAIR_BUFFER_OUTPUT_PORTS": False,
+        # Antennas are repaired by the detailed router (signoff's DRT_ANTENNA_REPAIR_ITERS)
+        # only: on the SoC, global routing's own diode insertion found 403 nets to fix and
+        # stopped with "routing congestion too high" while rerouting them.
+        "RUN_ANTENNA_REPAIR": False,
         "PDN_CFG": "dir::pdn.tcl",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
