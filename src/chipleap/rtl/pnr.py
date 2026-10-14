@@ -110,8 +110,10 @@ def sdc(project: Project) -> str:
         "set_load [expr $::env(OUTPUT_CAP_LOAD) / 1000.0] [all_outputs]",
         "set_clock_uncertainty $::env(CLOCK_UNCERTAINTY_CONSTRAINT) [all_clocks]",
         "set_clock_transition $::env(CLOCK_TRANSITION_CONSTRAINT) [all_clocks]",
-        "set_timing_derate -early [expr 1-[expr $::env(TIME_DERATING_CONSTRAINT) / 100]]",
-        "set_timing_derate -late [expr 1+[expr $::env(TIME_DERATING_CONSTRAINT) / 100]]",
+        # A real division: LibreLane 3.0.0.dev44 passes the PDK's 5 as an integer, and
+        # Tcl's 5 / 100 is 0.
+        "set_timing_derate -early [expr 1-[expr $::env(TIME_DERATING_CONSTRAINT) / 100.0]]",
+        "set_timing_derate -late [expr 1+[expr $::env(TIME_DERATING_CONSTRAINT) / 100.0]]",
         # Ideal clocks before the clock tree exists, propagated after, as in the base SDC.
         "if { [info exists ::env(OPENLANE_SDC_IDEAL_CLOCKS)] && $::env(OPENLANE_SDC_IDEAL_CLOCKS) } {",
         "    unset_propagated_clock [all_clocks]",

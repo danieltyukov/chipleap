@@ -435,6 +435,10 @@ def test_the_sdc_times_the_pads_core_side_pins():
     assert "pad_south_0/p2c pad" not in sdc  # the clock pad has no input delay
     outputs = next(ln for ln in sdc.splitlines() if ln.startswith("set_output_delay"))
     assert "pad_south_3/c2p" in outputs and "p2c" not in outputs
+    # The core is derated as place and route derates it.
+    from test_project_pnr import derates
+
+    assert derates(sdc, "5") == ["-early 0.95", "-late 1.05"]
 
 
 def test_pins_sit_outside_the_bond_side_on_the_grid():
