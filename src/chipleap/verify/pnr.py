@@ -30,10 +30,10 @@ from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.hw.tech import accel_logic_kge, get_tech
 from chipleap.macro import grid, layer, place, sram
-from chipleap.verify import launch, minarea
+from chipleap.verify import launch, librelane_pdk, minarea
 from chipleap.verify.drc import DrcReportError, DrcResult, pdk_cells, read_lyrdb
 from chipleap.verify.synth import _sv2v
-from chipleap.verify.tools import librelane, librelane_env, librelane_pdk_args, librelane_ran
+from chipleap.verify.tools import librelane, librelane_env, librelane_ran
 
 PNR_WORDS = 16
 
@@ -258,12 +258,12 @@ def run_librelane(
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
     try:
-        pdk_args = librelane_pdk_args()
+        pdk_root = librelane_pdk.ensure()
         env = librelane_env()
     except ValueError as exc:
         raise PnrError(str(exc)) from None
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
-    base = [tool.path, *pdk_args, "--run-tag", tag]
+    base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", tag]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
     start = time.monotonic()
     route_log = workdir / "librelane-route.log"
@@ -277,7 +277,7 @@ def run_librelane(
     )
     run = workdir / "runs" / tag
     try:
-        librelane_ran(run)
+        librelane_ran(run, pdk_root)
     except ValueError as exc:
         raise PnrError(str(exc)) from None
     routed = step_state(run, DETAILED_ROUTING)

@@ -484,25 +484,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             else liberty_settings_problem() or "open PDK for synthesis (set CHIPLEAP_LIBERTY)",
         ]
     )
-    from chipleap.verify.tools import LIBRELANE_PDK_ENV, librelane_pdk_commit, librelane_pdk_root
+    from chipleap.verify import librelane_pdk
 
+    ll_ok, ll_commit = False, ""
     try:
-        ll_root = librelane_pdk_root()
-        ll_note = (
-            f"LibreLane runs on {ll_root}"
-            if ll_root
-            else f"LibreLane installs the PDK it pins (set {LIBRELANE_PDK_ENV} for another)"
-        )
+        if (given := librelane_pdk.configured_root()) is not None:
+            ll_ok, ll_commit = True, librelane_pdk.commit_of(given / librelane_pdk.PDK)
+            ll_note = f"LibreLane runs on {given} ({librelane_pdk.ENV})"
+        else:
+            ll_commit = librelane_pdk.wanted_commit()
+            managed = librelane_pdk.managed_root(ll_commit)
+            ll_ok = librelane_pdk.installed(managed)
+            why = (
+                "the IHP checkout's commit"
+                if librelane_pdk.checkout()[0] is not None
+                else "ChipLeap's pinned commit, as there is no IHP checkout"
+            )
+            ll_note = (
+                f"LibreLane runs on {managed}, {why}, installed by ChipLeap"
+                if ll_ok
+                else f"{why}, not installed yet: the first place and route installs it in "
+                f"{managed} (about 800 MB); {librelane_pdk.ENV} names another root"
+            )
     except ValueError as exc:
-        ll_root, ll_note = None, str(exc)
-    rows.append(
-        [
-            "LibreLane PDK",
-            "yes" if ll_root else "no",
-            librelane_pdk_commit(ll_root)[:7] if ll_root else "",
-            ll_note,
-        ]
-    )
+        ll_note = str(exc)
+    rows.append(["LibreLane PDK", "yes" if ll_ok else "no", ll_commit[:7], ll_note])
     co = find_checkout()
     rows.append(
         [

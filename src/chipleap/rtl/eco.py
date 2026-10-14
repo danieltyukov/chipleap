@@ -55,7 +55,7 @@ from chipleap.rtl.openroad import (
 from chipleap.rtl.pnr import SDC_NAME, margins, pnr_data
 from chipleap.rtl.project import CORNERS, EcoChange, Project
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
-from chipleap.verify import launch
+from chipleap.verify import launch, librelane_pdk
 from chipleap.verify.drc import describe_markers
 from chipleap.verify.pnr import (
     DEF_TO_ODB,
@@ -73,7 +73,6 @@ from chipleap.verify.result import StepResult
 from chipleap.verify.tools import (
     librelane,
     librelane_env,
-    librelane_pdk_args,
     librelane_ran,
     untrusted,
 )
@@ -565,12 +564,12 @@ def _run_librelane(
     if not tool.found or tool.path is None:
         raise OpenroadUnavailable("LibreLane is not installed")
     try:
-        pdk_args = librelane_pdk_args()
+        pdk_root = librelane_pdk.ensure()
         env = librelane_env()
     except ValueError as exc:
         raise EcoError(str(exc)) from None
     builddir.write_text(work, "config.eco.json", json.dumps(cfg, indent=2))
-    base = [tool.path, *pdk_args, "--run-tag", ECO_TAG]
+    base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", ECO_TAG]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
     start = time.monotonic()
     route_log = work / "librelane-eco-route.log"
@@ -580,7 +579,7 @@ def _run_librelane(
     )
     run = run_dir_of(work)
     try:
-        librelane_ran(run)
+        librelane_ran(run, pdk_root)
     except ValueError as exc:
         raise EcoError(str(exc)) from None
     routed = step_state(run, DETAILED_ROUTING)

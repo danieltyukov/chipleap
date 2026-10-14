@@ -88,7 +88,7 @@ On the UART chip at 100 MHz with the defaults, the slow corner's worst setup sla
 
 LibreLane (as for `pnr`), Yosys, OpenROAD (for the timing at the ports), KLayout 0.30 or newer, a Python with KLayout's module for IHP's runners (`pip install klayout`; `CHIPLEAP_KLAYOUT_PYTHON` names another Python), and an IHP-Open-PDK checkout: `CHIPLEAP_IHP_PDK` names its `ihp-sg13g2` directory, or ChipLeap takes the one the standard-cell liberty is in. The step skips itself, with the reason, when any is missing. IHP's runners build shell command lines from the paths they are given, so ChipLeap runs them in a private directory on copies of their inputs, and the PDK's path must be letters, digits and `_ . / + -`. `CHIPLEAP_CHIP_TIMEOUT` limits each KLayout and runner call (3 hours by default); LibreLane has `CHIPLEAP_PNR_TIMEOUT`.
 
-The IO cells, fill, DRC and LVS come from the PDK checkout; the standard cells and the routing come from the PDK LibreLane runs on: the commit it pins and installs for itself, or the PDK root `CHIPLEAP_LIBRELANE_PDK_ROOT` names, which can hold the checkout's commit ([verification.md](verification.md#librelanes-version-and-pdk)). A macro built at another commit than the checkout's is a warning.
+The IO cells, fill, DRC and LVS come from the PDK checkout; the standard cells and the routing come from the PDK LibreLane runs on, which ChipLeap installs at the checkout's own commit (or the PDK root `CHIPLEAP_LIBRELANE_PDK_ROOT` names; [verification.md](verification.md#librelanes-version-and-pdk)). A macro built at another commit than the checkout's is a warning.
 
 ## Security
 

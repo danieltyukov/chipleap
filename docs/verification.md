@@ -60,18 +60,16 @@ The liberty file is found under `PDK_ROOT`, `~/.volare`, `~/.ciel` or `~/.local/
 
 ### LibreLane's version and PDK
 
-ChipLeap starts the `librelane` command (`CHIPLEAP_LIBRELANE` names another), usually a wrapper script that runs LibreLane's container. Two settings pin what it runs, so a result can be reproduced:
+ChipLeap starts the `librelane` command (`CHIPLEAP_LIBRELANE` names another), usually a wrapper script that runs LibreLane's container. It pins what that runs, so a result can be reproduced:
 
-- `CHIPLEAP_LIBRELANE_IMAGE` names the container image, such as `ghcr.io/librelane/librelane:3.0.14`. ChipLeap passes it to the wrapper as `LIBRELANE_IMAGE`, asks the wrapper for its version with it, and checks that every run's `resolved.json` records that version: a wrapper that starts another LibreLane fails the run.
-- `CHIPLEAP_LIBRELANE_PDK_ROOT` names a PDK root that holds `ihp-sg13g2`. LibreLane then runs on it as it is (`--manual-pdk --pdk-root`) instead of installing the commit it pins, and the wrapper is told to mount it (`LIBRELANE_PDK_ROOT`). `chipleap doctor` shows its commit.
+- **LibreLane 3.0.14**, the release Tiny Tapeout's GDS action uses. ChipLeap passes the image `ghcr.io/librelane/librelane:3.0.14` to the wrapper as `LIBRELANE_IMAGE`, asks the wrapper for its version with it, and checks that every run's `resolved.json` records that version: a wrapper that starts another LibreLane fails the run. `CHIPLEAP_LIBRELANE_IMAGE` names another image; set empty, the wrapper keeps its own. An installed LibreLane that is no wrapper runs as it is, its own version checked the same way.
+- **The IHP-Open-PDK commit of the checkout** the chip step takes its IO cells, DRC and LVS from (`CHIPLEAP_IHP_PDK`, or the one the standard-cell liberty is in), not the commit the LibreLane release pins (3.0.14 pins c4b8b4e). The first place and route installs that commit with ciel into `~/.local/share/chipleap/librelane-pdk/<commit>` (under `XDG_DATA_HOME` when it is set), which downloads about 800 MB once. ChipLeap runs the `ciel` command (`CHIPLEAP_CIEL`), or the one in LibreLane's image through docker. Without a checkout the commit is 22f2a25, the one ChipLeap is tested with. LibreLane then runs on that root as it is (`--manual-pdk --pdk-root`), and the wrapper is told to mount its directory (`LIBRELANE_PDK_ROOT`). Every run checks that its `resolved.json` names a root of that commit.
 
-Without them, the wrapper's own image runs on the PDK commit that version of LibreLane pins. To run LibreLane 3.0.14 on IHP-Open-PDK 22f2a25, the commit of the checkout the chip step takes its IO cells, DRC and LVS from:
+The install takes a lock, so two runs never install at once, and goes into a temporary directory that is renamed into place only once it is checked. The root must link to the commit asked for, and eight of its files (the technology and cell LEFs, the cells' GDS and slow liberty, the IO LEF, IHP's LibreLane configuration and DRC deck) must be the checkout's own, byte for byte, or, without a checkout, match ChipLeap's record of them at 22f2a25. A failed or offline download is an error that gives the ciel command to run by hand; ChipLeap never falls back to the commit the LibreLane release pins. `CHIPLEAP_LIBRELANE_PDK_ROOT` names a PDK root of your own instead, used as it is. `chipleap doctor` shows the root, its commit, why that commit (the checkout's, or ChipLeap's pinned one without a checkout) and whether it is installed. To install it by hand:
 
 ```sh
-ciel enable --pdk-root "$HOME/.local/share/pdk/ciel-22f2a25" --pdk-family ihp-sg13g2 \
-  22f2a25f1734796de3debbbf29cf697cbbc54081
-export CHIPLEAP_LIBRELANE_IMAGE=ghcr.io/librelane/librelane:3.0.14
-export CHIPLEAP_LIBRELANE_PDK_ROOT="$HOME/.local/share/pdk/ciel-22f2a25"
+ciel enable --pdk-root "$HOME/.local/share/chipleap/librelane-pdk/22f2a25f1734796de3debbbf29cf697cbbc54081" \
+  --pdk-family ihp-sg13g2 22f2a25f1734796de3debbbf29cf697cbbc54081
 ```
 
 LibreLane 3.0.0.dev44, which pins IHP-Open-PDK cb7daaa, cannot load the LibreLane configuration of 22f2a25: it uses LibreLane 3.0's names (`IO_PIN_H_LAYER`, a run mode in `KLAYOUT_DRC_OPTIONS`). LibreLane 3.0 also loads the pad library a PDK's configuration names (`PAD_LEFS` and the rest, which IHP's names at 22f2a25); the chip step clears those, since it brings its own IO views ([chips.md](chips.md)).

@@ -336,7 +336,11 @@ def test_the_report_shows_the_ports_timing(counter_project):
     assert "| core to pad setup | _262_ | pad_y | +0.970 ns | 5.400 ns |" in md
 
 
-def test_a_run_times_every_corner_and_names_the_pads_it_cannot_time(tmp_path, monkeypatch):
+# LibreLane 3.0.0.dev44 names a tech LEF per corner, LibreLane 3.0 one for all of them.
+@pytest.mark.parametrize("tech_corner", ["nom_*", "*"])
+def test_a_run_times_every_corner_and_names_the_pads_it_cannot_time(
+    tmp_path, monkeypatch, tech_corner
+):
     """The whole run on a stand-in OpenROAD that prints the UART's slow-corner log: the
     IO liberty of the slow corner has no arc for the output pad, so its port is listed
     as not timed and the chip's IO timing fails, whatever the slack says."""
@@ -346,7 +350,7 @@ def test_a_run_times_every_corner_and_names_the_pads_it_cannot_time(tmp_path, mo
     for f in ("tech.lef", "cells.lef"):
         (lefs / f).write_text("VERSION 5.8 ;\n")
     resolved.update(
-        TECH_LEFS={"nom_*": str(lefs / "tech.lef")}, CELL_LEFS=[str(lefs / "cells.lef")]
+        TECH_LEFS={tech_corner: str(lefs / "tech.lef")}, CELL_LEFS=[str(lefs / "cells.lef")]
     )
     arc = 'timing () { related_pin : "c2p"; cell_rise (t) { } cell_fall (t) { } }'
     full = LIB.replace("internal_power () {", arc + " internal_power () {")
