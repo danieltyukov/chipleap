@@ -356,6 +356,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         synth_tech=getattr(args, "synth_tech", None) or "ihp-sg13g2",
         remote=remote,
         pnr_tool=getattr(args, "pnr_tool", None) or "librelane",
+        soc_clock_mhz=getattr(args, "soc_clock", None),
     )
     code = _print_steps(results)
     print(f"\nWrote {args.bundle}/verify/VERIFY.md and verify.json")
@@ -817,6 +818,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["librelane", "innovus"],
         help="place and route: LibreLane (default) or Cadence Genus and Innovus",
+    )
+    s.add_argument(
+        "--soc-clock",
+        type=float,
+        default=None,
+        metavar="MHZ",
+        help="the clock the soc step lays the SoC out at, instead of the design's",
     )
     s.add_argument(
         "--allow-path",

@@ -389,6 +389,14 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         "PNR_SDC_FILE": f"dir::{SDC}",
         "SIGNOFF_SDC_FILE": f"dir::{SDC}",
         "PL_TARGET_DENSITY_PCT": 55,
+        # X-HEEP gates its clock in many places (one gate drives the peripheral
+        # subsystem's 15,000 flip-flops), and IHP's only integrated clock gate is a weak
+        # cell. Balancing the latency under each gate against the macros' with chains of
+        # delay buffers left 3 ns of skew between the gates' trees and hold violations
+        # across them; keep the trees' levels alike instead, and let hold repair fix the
+        # rest on the data paths.
+        "CTS_DELAY_BUFFER_DERATE_PCT": 0,
+        "CTS_BALANCE_LEVELS": True,
         "PDN_CFG": "dir::pdn.tcl",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
@@ -423,11 +431,18 @@ def with_floorplan(
 
 
 def prepare(
-    design: Design, config_text: str, checkout: Path, work: Path, pdk: Path
+    design: Design,
+    config_text: str,
+    checkout: Path,
+    work: Path,
+    pdk: Path,
+    clock_mhz: float | None = None,
 ) -> tuple[dict[str, Any], Prepared]:
     """Everything the LibreLane runs read, in ``work``: X-HEEP rendered for the design,
     its sources from FuseSoC, ChipLeap's sources and constraints, the macros' views. The
-    configuration without its floorplan, and what was prepared."""
+    configuration without its floorplan, and what was prepared. The clock is the design's
+    unless ``clock_mhz`` says otherwise."""
+    clock = clock_mhz or design.freq_mhz
     if design.platform != "xheep":
         raise SocError("not an X-HEEP design (standalone AXI4 IP)")
     fs, gcc = fusesoc(), riscv_gcc()
@@ -449,12 +464,12 @@ def prepare(
     ours, plans, accel_banks = generate(design, tree, work, srams)
     sources = Sources(tuple(files + ours), tuple(includes), plans, accel_banks)
     ports = soc.mcu_ports((tree / "hw/core-v-mini-mcu/core_v_mini_mcu.sv").read_text())
-    builddir.write_text(work, SDC, soc.sdc(ports, round(1000.0 / design.freq_mhz, 3)))
+    builddir.write_text(work, SDC, soc.sdc(ports, round(1000.0 / clock, 3)))
     instances = bank_instances(tree, plans) + [
         (f"{soc.ACCEL_INST}.{inst}", cell) for inst, cell in accel_banks.instances()
     ]
     views = {cell: sram.views(pdk, cell, work) for cell in sorted({c for _, c in instances})}
-    return config(sources, design.freq_mhz), Prepared(sources, instances, views)
+    return config(sources, clock), Prepared(sources, instances, views)
 
 
 _CHECK_RE = re.compile(r"Found and reported (\d+) problems")
@@ -478,12 +493,18 @@ def netlist_problems(run: Path) -> str:
 
 
 def place_and_route(
-    design: Design, config_text: str, checkout: Path, work: Path, pdk: Path
+    design: Design,
+    config_text: str,
+    checkout: Path,
+    work: Path,
+    pdk: Path,
+    clock_mhz: float | None = None,
 ) -> SocResult:
     """Synthesis first, so the floorplan is sized for the standard cells it made (X-HEEP's
     peripherals are most of them, which the model's estimate does not follow), then the
     layout, in the same LibreLane run."""
-    cfg, prep = prepare(design, config_text, checkout, work, pdk)
+    clock = clock_mhz or design.freq_mhz
+    cfg, prep = prepare(design, config_text, checkout, work, pdk, clock)
     model_cells, model_macros = model_areas_um2(design)
     first, _ = with_floorplan(cfg, prep, model_cells, work)
     pnr.run_librelane(work, first, to="Yosys.Synthesis")
@@ -500,7 +521,7 @@ def place_and_route(
     check_merged(run, work, soc.TOP)
     area = {s.cell: s.area_um2 for s in sram.catalog(pdk)}
     result = replace(
-        pnr.parse(metrics, design.freq_mhz, gds),
+        pnr.parse(metrics, clock, gds),
         synth_cell_um2=synth,
         macros=tuple(prep.instances),
         macro_um2=sum(area[cell] for _, cell in prep.instances),

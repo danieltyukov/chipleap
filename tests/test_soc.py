@@ -330,6 +330,12 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     # More standard cells, a larger core.
     _, small = soc_step.with_floorplan(cfg, prep, 1.0e6, work)
     assert small.core_um2 < fp.core_um2
+    # CTS keeps the gated trees' levels alike instead of chaining delay buffers.
+    assert cfg["CTS_DELAY_BUFFER_DERATE_PCT"] == 0 and cfg["CTS_BALANCE_LEVELS"] is True
+    # A clock other than the design's, for a signoff the SoC can meet.
+    slow, _ = soc_step.prepare(design, xheep_config(design), co, work, pdk, clock_mhz=55.0)
+    assert slow["CLOCK_PERIOD"] == pytest.approx(18.182)
+    assert "-name clk -period 18.182" in (work / soc_step.SDC).read_text()
 
 
 def _check_report(run: Path, text: str) -> None:
