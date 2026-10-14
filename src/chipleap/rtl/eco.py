@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,7 +56,15 @@ from chipleap.rtl.pnr import SDC_NAME, margins, pnr_data
 from chipleap.rtl.project import CORNERS, EcoChange, Project
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.verify import launch
-from chipleap.verify.pnr import PnrError, PnrResult, parse
+from chipleap.verify.pnr import (
+    DEF_TO_ODB,
+    DETAILED_ROUTING,
+    PnrError,
+    PnrResult,
+    parse,
+    patch_min_area,
+    step_state,
+)
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane, untrusted
 
@@ -238,7 +247,9 @@ def base(project: Project) -> tuple[Path, Sealed, dict[str, Any], list[str]]:
     state = _confined_state(_read(sealed, steps[i][1] / "state_in.json"), sealed)
     if not isinstance(state.get("def"), str):
         raise EcoError("the state before detailed routing has no DEF")
-    return run, sealed, state, ids[i:]
+    # The routed run's own DEFtoODB, if it patched shapes under the minimum area, is not
+    # part of what the ECO repeats; the ECO adds it again if its routing needs a patch.
+    return run, sealed, state, [s for s in ids[i:] if s != DEF_TO_ODB]
 
 
 def changes_file(changes: list[EcoChange]) -> str:
@@ -537,30 +548,38 @@ def eco_config(
 def _run_librelane(
     work: Path, cfg: dict[str, Any], state: Path
 ) -> tuple[dict[str, Any], Path | None]:
+    """LibreLane from the edited state, in two parts as ``chipleap.verify.pnr.run_librelane``
+    runs it: up to detailed routing, then, after any routed shape under the minimum area
+    has a patch, the rest."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise OpenroadUnavailable("LibreLane is not installed")
     builddir.write_text(work, "config.eco.json", json.dumps(cfg, indent=2))
-    cmd = [
-        tool.path,
-        "--pdk",
-        "ihp-sg13g2",
-        "--run-tag",
-        ECO_TAG,
-        "--overwrite",
-        "--with-initial-state",
-        str(state),
-        "config.eco.json",
-    ]
-    log = work / "librelane-eco.log"
+    base = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", ECO_TAG]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    start = time.monotonic()
+    route_log = work / "librelane-eco-route.log"
+    first = [*base, "--overwrite", "--with-initial-state", str(state)]
+    code = _launch([*first, "--to", DETAILED_ROUTING, "config.eco.json"], work, route_log, limit)
+    run = run_dir_of(work)
+    routed = step_state(run, DETAILED_ROUTING)
+    if routed is None:
+        tail = "\n".join(read_limited(route_log).splitlines()[-15:])
+        raise EcoError(f"LibreLane did not finish the ECO's routing (exit {code}):\n{tail}")
     try:
-        code = launch.run(cmd, work, log, limit)
-    except launch.Busy as exc:
-        raise EcoError(f"LibreLane did not start: {exc}") from None
-    except launch.TimedOut as exc:
-        raise EcoError(f"LibreLane timed out after {exc.seconds:g} s") from None
-    final = run_dir_of(work) / "final"
+        rest, state_in = patch_min_area(
+            work, run, routed, cfg, out_dir="minarea-eco", config_name="config.eco.minarea.json"
+        )
+    except PnrError as exc:
+        raise EcoError(str(exc)) from None
+    args = [*base, "--from", rest]
+    if state_in is not None:
+        args += ["--with-initial-state", str(state_in), "config.eco.minarea.json"]
+    else:
+        args.append("config.eco.json")
+    log = work / "librelane-eco.log"
+    code = _launch(args, work, log, max(limit - (time.monotonic() - start), 1.0))
+    final = run / "final"
     if not (final / "metrics.json").is_file():
         tail = "\n".join(read_limited(log).splitlines()[-15:])
         raise EcoError(f"LibreLane did not finish the ECO (exit {code}):\n{tail}")
@@ -569,6 +588,16 @@ def _run_librelane(
     if not isinstance(metrics, dict):
         raise EcoError("the ECO's metrics.json is not a mapping")
     return metrics, gds
+
+
+def _launch(cmd: list[str], work: Path, log: Path, timeout: float) -> int:
+    try:
+        return launch.run(cmd, work, log, timeout)
+    except launch.Busy as exc:
+        raise EcoError(f"LibreLane did not start: {exc}") from None
+    except launch.TimedOut:
+        limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+        raise EcoError(f"LibreLane timed out after {limit:g} s") from None
 
 
 def run_dir_of(work: Path) -> Path:

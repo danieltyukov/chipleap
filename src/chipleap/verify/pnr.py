@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,7 @@ from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.hw.tech import accel_logic_kge, get_tech
 from chipleap.macro import grid, place, sram
-from chipleap.verify import launch
+from chipleap.verify import launch, minarea
 from chipleap.verify.synth import _sv2v
 from chipleap.verify.tools import librelane
 
@@ -184,30 +185,134 @@ def parse(metrics: dict[str, Any], clock_mhz: float, gds: Path | None) -> PnrRes
     )
 
 
+DETAILED_ROUTING = "OpenROAD.DetailedRouting"
+AFTER_ROUTING = "Odb.RemoveRoutingObstructions"  # the Classic flow's next step
+DEF_TO_ODB = "OpenROAD.DEFtoODB"
+MIN_AREA_DIR = "minarea"
+# Beside config.json: LibreLane resolves dir:: paths and puts runs/ beside the file.
+MIN_AREA_CONFIG = "config.minarea.json"
+
+
 def run_librelane(
     workdir: Path, cfg: dict[str, Any], tag: str = "chipleap"
 ) -> tuple[dict[str, Any], Path | None]:
     """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
-    Returns the final metrics and the GDS."""
+    Returns the final metrics and the GDS.
+
+    LibreLane runs in two parts, in one run directory: up to detailed routing, then the
+    rest. Between them, routed shapes under a layer's minimum area get a patch
+    (``chipleap.verify.minarea``): the router leaves one now and then, and it would fail
+    signoff. The patched layout goes back into LibreLane's database through
+    ``OpenROAD.DEFtoODB`` and the rest of the flow runs on it, signoff included."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
-    cmd = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", tag, "--overwrite", "config.json"]
-    log = workdir / "librelane.log"
+    base = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", tag]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
-    try:
-        code = launch.run(cmd, workdir, log, limit)
-    except launch.Busy as exc:
-        raise PnrError(f"LibreLane did not start: {exc}") from None
-    except launch.TimedOut as exc:
-        raise PnrError(_timed_out(exc, log)) from None
-    final = workdir / "runs" / tag / "final"
+    start = time.monotonic()
+    route_log = workdir / "librelane-route.log"
+    code = _librelane(
+        [*base, "--overwrite", "--to", DETAILED_ROUTING, "config.json"],
+        workdir,
+        route_log,
+        limit,
+        limit,
+    )
+    run = workdir / "runs" / tag
+    routed = step_state(run, DETAILED_ROUTING)
+    if routed is None:
+        raise PnrError(
+            f"LibreLane did not finish detailed routing (exit {code}):\n{_tail(route_log)}"
+        )
+    rest, state_in = patch_min_area(workdir, run, routed, cfg)
+    log = workdir / "librelane.log"
+    args = [*base, "--from", rest]
+    if state_in is not None:
+        args += ["--with-initial-state", str(state_in), MIN_AREA_CONFIG]
+    else:
+        args.append("config.json")
+    left = limit - (time.monotonic() - start)
+    code = _librelane(args, workdir, log, max(left, 1.0), limit)
+    final = run / "final"
     metrics_file = final / "metrics.json"
     if not metrics_file.is_file():
         raise PnrError(f"LibreLane did not finish (exit {code}):\n{_tail(log)}")
     gds = next(iter(sorted((final / "gds").glob("*.gds"))), None)
     return json.loads(metrics_file.read_text()), gds
+
+
+def _librelane(cmd: list[str], workdir: Path, log: Path, timeout: float, limit: float) -> int:
+    try:
+        return launch.run(cmd, workdir, log, timeout)
+    except launch.Busy as exc:
+        raise PnrError(f"LibreLane did not start: {exc}") from None
+    except launch.TimedOut as exc:
+        exc.seconds = limit  # the whole run's limit, not what was left of it
+        raise PnrError(_timed_out(exc, log)) from None
+
+
+def step_state(run: Path, step_id: str) -> Path | None:
+    """The state a step of the run left, by its directory (``45-openroad-detailedrouting``)."""
+    name = step_id.replace(".", "-").lower()
+    dirs = sorted(run.glob(f"*-{name}"), key=lambda p: int(p.name.split("-")[0]))
+    state = dirs[-1] / "state_out.json" if dirs else None
+    return state if state is not None and state.is_file() else None
+
+
+def patch_min_area(
+    workdir: Path,
+    run: Path,
+    routed: Path,
+    cfg: dict[str, Any],
+    out_dir: str = MIN_AREA_DIR,
+    config_name: str = MIN_AREA_CONFIG,
+) -> tuple[str, Path | None]:
+    """Patch the routed shapes under the minimum area. Returns the step to resume LibreLane
+    from and, with patches, the state it starts from; its configuration is then
+    ``config_name`` beside the run's, with ``OpenROAD.DEFtoODB`` after detailed routing."""
+    state = json.loads(routed.read_text())
+    def_path = Path(state.get("def") or "")
+    resolved = run / "resolved.json"
+    if not def_path.is_file() or not resolved.is_file():
+        raise PnrError("LibreLane's routed state has no DEF or resolved configuration")
+    try:
+        layout = minarea.load(def_path, json.loads(resolved.read_text()))
+        patches = minarea.repair(layout)
+        if not patches:
+            return AFTER_ROUTING, None
+        out = workdir / out_dir
+        out.mkdir(exist_ok=True)
+        patched = out / def_path.name
+        patched.write_text(minarea.apply(def_path.read_text(errors="replace"), patches))
+    except (minarea.MinAreaError, OSError) as exc:
+        raise PnrError(f"minimum metal area after routing: {exc}") from None
+    (out / "patches.txt").write_text(
+        "".join(f"{minarea.describe(p.shape)}: {p.statement()}\n" for p in patches)
+    )
+    (workdir / config_name).write_text(json.dumps(with_def_to_odb(cfg), indent=2))
+    state_in = out / "state_in.json"
+    state_in.write_text(json.dumps({**state, "def": str(patched)}, indent=1))
+    return DEF_TO_ODB, state_in
+
+
+def with_def_to_odb(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``cfg`` with a step after detailed routing that reads the (patched) DEF into a new
+    database: in the step list of a flow given as one, else as a substitution."""
+    meta = dict(cfg.get("meta") or {"version": 2, "flow": "Classic"})
+    flow = meta.get("flow")
+    if isinstance(flow, list):
+        steps = [s for s in flow if s != DEF_TO_ODB]
+        if DETAILED_ROUTING not in steps:
+            raise PnrError(f"the flow has no {DETAILED_ROUTING} step")
+        i = steps.index(DETAILED_ROUTING)
+        meta["flow"] = [*steps[: i + 1], DEF_TO_ODB, *steps[i + 1 :]]
+    else:
+        meta["substituting_steps"] = {
+            **(meta.get("substituting_steps") or {}),
+            f"+{DETAILED_ROUTING}": DEF_TO_ODB,
+        }
+    return {**cfg, "meta": meta}
 
 
 # A design with hard macros has long nets to the macros' pins (a word written to every
