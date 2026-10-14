@@ -252,6 +252,28 @@ def test_the_lef_gives_each_pin_its_ports_and_the_cell_its_obstructions():
     assert pad.layers == {"Metal2", "Metal3", "Metal4"}
 
 
+def test_lef_shapes_are_taken_from_the_cells_origin_and_through_a_mask():
+    lef = """
+MACRO m
+  ORIGIN 1 2 ;
+  SIZE 10 BY 10 ;
+  PIN a
+    PORT
+      LAYER Metal2 ;
+        RECT MASK 1 0 0 1 1 ;
+    END
+  END a
+  OBS
+    LAYER Metal3 ;
+      RECT -1 -2 9 8 ;
+  END
+END m
+"""
+    m = minarea.read_masters(lef)["m"]
+    assert m.pins["a"] == (("Metal2", (1000, 2000, 2000, 3000)),)
+    assert m.obs == (("Metal3", (0, 0, 10000, 10000)),)
+
+
 def test_a_stub_that_ends_on_a_pads_pin_is_that_pins_metal():
     masters = minarea.read_masters(PAD_LEF)
     net = "    - pad_o ( PIN pad_o ) ( pad_w0 pad ) + USE SIGNAL" + TO_PAD + " ;"
