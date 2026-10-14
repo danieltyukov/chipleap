@@ -21,7 +21,7 @@ from typing import Any
 from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
-from chipleap.hw.tech import accel_logic_kge, get_tech
+from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.model.evaluate import buffer_mm2
 from chipleap.rtl import builddir
 from chipleap.verify import backends, pnr, sim, synth, xheep
@@ -178,7 +178,11 @@ def place_route(design: Design, workdir: Path) -> StepResult:
             "pnr", "skipped" if "not installed" in msg else "fail", msg, {"error": str(exc)}
         )
     a = design.accel
-    model_cell = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports) * 1000 * ihp.ge_um2
+    kge = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports)
+    if r.macros:
+        # The layout's buffers are macros, and its logic has their interface.
+        kge += accel_bank_kge(a.rows, a.cols, a.double_buffer)
+    model_cell = kge * 1000 * ihp.ge_um2
     model_buffers = buffer_mm2(a, ihp) * 1e6
     data = {
         "clock_mhz": clock,

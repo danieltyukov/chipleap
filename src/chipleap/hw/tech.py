@@ -27,23 +27,31 @@ from pathlib import Path
 from typing import Any
 
 # Logic of the generated accelerator in kGE (thousands of NAND2 equivalents), fitted to
-# Yosys and ABC on SG13G2 across 12 configurations: all three dataflows, one to four ports,
-# 8 to 64 MACs, mapped and sized for the 5 ns target of verify/synth.py, with the buffers
-# extrapolated away. The leave-one-out error is 2.9% on average and 8.7% at worst.
+# Yosys and ABC on SG13G2 across 24 configurations: all three dataflows, one to eight
+# ports, 4 to 64 MACs, mapped and sized for the 5 ns target of verify/synth.py, with the
+# buffers extrapolated away. The leave-one-out error is 2.8% on average and 7.1% at worst.
+# (Fitted to 12 configurations, the eight terms followed Yosys wherever an unrelated change
+# to the RTL moved it: the core's chipleap_accel wrapper moved some designs by 3 to 5 %,
+# with the logic unchanged, and the error to 5.0% and 9.8%.)
 # Gate counts are roughly node independent, so the generic nodes reuse them.
-# `scripts/calibrate_sg13g2.py` measures them again. The registered copy of the core's tile
-# descriptor added 0.8 to 1.5 kGE to the 12 configurations, 1.16 on average, which the
-# base takes.
-ACCEL_BASE_KGE = 25.70  # register file, job and tile control, store engine, cycle counter
-ACCEL_PORT_KGE = 2.47  # one OBI read port of the DMA, with its own address generator
+# `scripts/calibrate_sg13g2.py` measures them again.
+ACCEL_BASE_KGE = 24.93  # register file, job and tile control, store engine, cycle counter
+ACCEL_PORT_KGE = 2.79  # one OBI read port of the DMA, with its own address generator
 # Per dataflow: kGE per MAC (8 x 8 multiplier, adder or pipeline registers) and per edge
 # unit: a GEMV lane's accumulators, a weight-stationary column's accumulators, or the
 # operand skew registers on each row and column of an output-stationary array.
 ACCEL_KGE: dict[str, tuple[float, float]] = {
-    "gemv": (0.948, 2.916),
-    "ws": (1.916, 1.629),
-    "os": (1.897, 0.308),
+    "gemv": (0.899, 3.511),
+    "ws": (1.737, 2.607),
+    "os": (1.872, 0.148),
 }
+# A macro-backed GEMV build (chipleap.gen.banks, SRAM_BUF) has no flop buffers but logic of
+# its own: the macros' write path (word, mask and bank select) and the registers that read
+# each chunk a cycle ahead, and the chunk select from the bank words. Fitted to 12 such
+# builds (one to eight lanes, 4 to 16 columns, single and double buffered), each core
+# against its flop-buffer build: a + b x MACs, + c with a double buffer, within 0.67 kGE
+# of every build left out (0.39 on average).
+ACCEL_BANK_KGE = (5.52, 0.104, 1.03)
 
 
 # The AXI4 wrapper of the standalone platform: the AXI4-Lite slave's response registers,
@@ -55,11 +63,11 @@ AXI_ADAPTER_KGE = 0.54
 # Critical path of the generated accelerator on SG13G2 at the typical corner, sized for the
 # 5 ns target of verify/synth.py (scripts/calibrate_sg13g2.py): a delay per dataflow, more
 # for a GEMV adder tree wider than eight columns, and the DMA's setup of its ports' start
-# addresses, which grows slowly with the number of ports. Set to bound every one of the 12
-# synthesized configurations from above (3.2 to 4.8 ns), and for the ports the DMA paths of
+# addresses, which grows slowly with the number of ports. Set to bound every one of the 24
+# synthesized configurations from above (3.3 to 4.9 ns), and for the ports the DMA paths of
 # configurations with 4 to 16 ports (3.3 to 4.1 ns), so the clock limit below errs on the
 # safe side.
-ACCEL_DELAY_NS: dict[str, float] = {"gemv": 4.27, "ws": 3.68, "os": 3.40}
+ACCEL_DELAY_NS: dict[str, float] = {"gemv": 4.35, "ws": 3.77, "os": 3.53}
 ACCEL_DELAY_WIDE_NS = 0.51  # per doubling of GEMV columns beyond eight
 ACCEL_DELAY_PORTS_NS = (3.23, 0.052)  # the port logic: a + b x ports
 FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical corner
@@ -125,6 +133,13 @@ def accel_logic_kge(dataflow: str, rows: int, cols: int, ports: int) -> float:
     per_mac, per_edge = ACCEL_KGE[dataflow]
     edges = {"gemv": rows, "ws": cols, "os": rows + cols}[dataflow]
     return ACCEL_BASE_KGE + ACCEL_PORT_KGE * ports + per_mac * rows * cols + per_edge * edges
+
+
+def accel_bank_kge(rows: int, cols: int, double_buffer: bool) -> float:
+    """What a macro-backed GEMV build's logic adds to ``accel_logic_kge``: the interface to
+    its SRAM banks."""
+    a, per_mac, double = ACCEL_BANK_KGE
+    return a + per_mac * rows * cols + (double if double_buffer else 0.0)
 
 
 def _horowitz(node_nm: float, vdd: float, value_at_45nm_09v: float) -> float:

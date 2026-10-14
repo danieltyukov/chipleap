@@ -9,8 +9,14 @@ Prints, from the liberty files of the IHP open PDK:
 * the least-squares fit of macro area against capacity (periphery + per-KiB array),
 * the fit of read energy per byte against capacity (a power law),
 
-and, with Yosys installed, the logic area of the generated accelerator across twelve
-configurations, fitted to the terms of `accel_logic_kge` with its leave-one-out error.
+and, with Yosys installed:
+
+* the logic area of the generated accelerator across 24 configurations, fitted to the
+  terms of `accel_logic_kge` with its leave-one-out error,
+* the longest synthesized path per dataflow, which `ACCEL_DELAY_NS` bounds,
+* the bank interface of macro-backed GEMV builds (`chipleap.gen.banks`) across 12 builds,
+  each core against its flop-buffer build, fitted to the terms of `accel_bank_kge`.
+
 Compare the output with the ihp-sg13g2 entry and the ACCEL_* constants in tech.py.
 """
 
@@ -24,24 +30,55 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from chipleap.hw import Accel
-from chipleap.verify.synth import synthesize
+from chipleap.verify.synth import synthesize, synthesize_banked
 from chipleap.verify.tools import ihp_liberty
 
-# (dataflow, rows, cols, ports): every dataflow, one to four ports, 8 to 64 MACs.
+# (dataflow, rows, cols, ports): every dataflow, one to eight ports, 4 to 64 MACs. Twelve
+# were too few for eight terms: a change that moved Yosys's result by a few percent on
+# some designs with the logic unchanged (the core's chipleap_accel wrapper) moved the
+# fit's leave-one-out error from 2.9 % to 5.0 % and turned a term negative.
 ACCEL_CONFIGS = [
+    ("gemv", 1, 4, 1),
     ("gemv", 1, 8, 1),
+    ("gemv", 1, 8, 8),
     ("gemv", 2, 8, 4),
     ("gemv", 2, 16, 1),
     ("gemv", 4, 8, 2),
+    ("gemv", 4, 16, 1),
+    ("gemv", 8, 4, 2),
     ("gemv", 8, 8, 2),
+    ("ws", 2, 8, 1),
     ("ws", 4, 4, 1),
+    ("ws", 4, 4, 4),
     ("ws", 4, 8, 1),
+    ("ws", 4, 8, 8),
+    ("ws", 8, 4, 2),
     ("ws", 8, 8, 2),
     ("os", 2, 8, 1),
+    ("os", 2, 16, 1),
     ("os", 4, 4, 1),
+    ("os", 4, 4, 4),
     ("os", 4, 8, 1),
+    ("os", 4, 8, 8),
+    ("os", 8, 4, 2),
     ("os", 8, 8, 2),
 ]
+# (rows, cols, double buffer): macro-backed GEMV builds, one port each.
+BANK_CONFIGS = [
+    (1, 4, True),
+    (1, 8, False),
+    (1, 8, True),
+    (1, 16, True),
+    (2, 8, True),
+    (2, 16, False),
+    (2, 16, True),
+    (4, 4, True),
+    (4, 8, False),
+    (4, 8, True),
+    (8, 4, True),
+    (8, 8, True),
+]
+BANK_TERMS = ["base", "mac", "double buffer"]
 TERMS = ["base", "port", "gemv mac", "gemv lane", "ws mac", "ws column", "os mac", "os edge"]
 
 
@@ -84,7 +121,7 @@ def lstsq(a: list[list[float]], y: list[float]) -> list[float]:
     return [m[i][n] / m[i][i] for i in range(n)]
 
 
-def synth_kge(cfg: tuple[str, int, int, int], nand_um2: float) -> float:
+def synth_kge(cfg: tuple[str, int, int, int], nand_um2: float) -> tuple[float, float]:
     df, rows, cols, ports = cfg
     r = synthesize(Accel(df, rows, cols, 8, ports=ports, abuf_kib=4, wbuf_kib=4))
     print(
@@ -92,7 +129,33 @@ def synth_kge(cfg: tuple[str, int, int, int], nand_um2: float) -> float:
         f"critical path {r.delay_ns:.2f} ns",
         flush=True,
     )
-    return r.logic_um2 / nand_um2 / 1000
+    return r.logic_um2 / nand_um2 / 1000, r.delay_ns
+
+
+def bank_kge(cfg: tuple[int, int, bool], nand_um2: float) -> float:
+    """What a macro-backed build's core adds over its flop-buffer build's logic."""
+    rows, cols, double = cfg
+    a = Accel("gemv", rows, cols, 8, ports=1, abuf_kib=4, wbuf_kib=4, double_buffer=double)
+    flop = synthesize(a).logic_um2 / nand_um2 / 1000
+    banked = synthesize_banked(a)
+    core = banked.logic_um2 / nand_um2 / 1000
+    print(
+        f"banked gemv {rows}x{cols}{'' if double else ', single buffer'}: core {core:.1f} kGE, "
+        f"flop build {flop:.1f} kGE, interface {core - flop:.1f} kGE, "
+        f"critical path {banked.delay_ns:.2f} ns",
+        flush=True,
+    )
+    return core - flop
+
+
+def loo(a: list[list[float]], y: list[float], relative_to: list[float]) -> list[float]:
+    """Each point's error when the fit leaves it out, relative to ``relative_to``."""
+    errs = []
+    for i in range(len(a)):
+        coef = lstsq(a[:i] + a[i + 1 :], y[:i] + y[i + 1 :])
+        pred = sum(f * c for f, c in zip(a[i], coef, strict=True))
+        errs.append(abs(pred - y[i]) / relative_to[i])
+    return errs
 
 
 def cell_area(lib: str, cell: str) -> tuple[float, float]:
@@ -170,21 +233,42 @@ def main() -> None:
     if args.no_synth or shutil.which("yosys") is None:
         return
     with ProcessPoolExecutor(max_workers=args.jobs) as ex:
-        kge = list(ex.map(synth_kge, ACCEL_CONFIGS, [nand] * len(ACCEL_CONFIGS)))
-    a = [features(*c) for c in ACCEL_CONFIGS]
-    coef = lstsq(a, kge)
+        results = list(ex.map(synth_kge, ACCEL_CONFIGS, [nand] * len(ACCEL_CONFIGS)))
+        banks = list(ex.map(bank_kge, BANK_CONFIGS, [nand] * len(BANK_CONFIGS)))
+    kge = [k for k, _ in results]
+    x = [features(*c) for c in ACCEL_CONFIGS]
+    coef = lstsq(x, kge)
     print(
         "accelerator logic fit (kGE): "
         + ", ".join(f"{t} {v:.3f}" for t, v in zip(TERMS, coef, strict=True))
     )
-    errs = []
-    for i in range(len(a)):
-        loo = lstsq(a[:i] + a[i + 1 :], kge[:i] + kge[i + 1 :])
-        pred = sum(f * c for f, c in zip(a[i], loo, strict=True))
-        errs.append(abs(pred - kge[i]) / kge[i])
+    errs = loo(x, kge, kge)
     print(
         f"leave-one-out error: {100 * sum(errs) / len(errs):.1f}% mean, {100 * max(errs):.1f}% max"
     )
+    # ACCEL_DELAY_NS bounds each dataflow's paths from above (a GEMV engine's up to eight
+    # columns); a wider GEMV engine adds ACCEL_DELAY_WIDE_NS per doubling of its columns.
+    paths = {
+        df: [(c[2], d) for c, (_, d) in zip(ACCEL_CONFIGS, results, strict=True) if c[0] == df]
+        for df in ("gemv", "ws", "os")
+    }
+    narrow = {
+        df: max(d for cols, d in pts if df != "gemv" or cols <= 8) for df, pts in paths.items()
+    }
+    for df, pts in paths.items():
+        lo, hi = min(d for _, d in pts), max(d for _, d in pts)
+        print(f"{df} critical paths: {lo:.2f} to {hi:.2f} ns, bound {narrow[df]:.2f} ns")
+    doubling = [(d - narrow["gemv"]) / math.log2(cols / 8) for cols, d in paths["gemv"] if cols > 8]
+    if doubling:
+        print(f"gemv wider than eight columns: {max(doubling):.2f} ns per doubling at most")
+    bx = [[1.0, float(r * c), 1.0 if db else 0.0] for r, c, db in BANK_CONFIGS]
+    bcoef = lstsq(bx, banks)
+    print(
+        "bank interface fit (kGE): "
+        + ", ".join(f"{t} {v:.3f}" for t, v in zip(BANK_TERMS, bcoef, strict=True))
+    )
+    berrs = loo(bx, banks, [1.0] * len(banks))
+    print(f"leave-one-out error: {sum(berrs) / len(berrs):.2f} kGE mean, {max(berrs):.2f} kGE max")
 
 
 if __name__ == "__main__":

@@ -485,7 +485,7 @@ def verify_table(rows: list[dict[str, Any]]) -> str:
         '<tr><th scope="row">Model inputs</th><td><span class="ok">Tested</span> '
         "Parameter counts of all twelve LLM presets within 2% of their model cards. IHP "
         "SG13G2 SRAM area within 2% of the liberty data for every macro size. Accelerator "
-        "logic area within 3% on average of synthesis across 12 configurations. The C driver "
+        "logic area within 3% on average of synthesis across 24 configurations. The C driver "
         "plans the same tiles as the model on 6,000 random shapes.</td></tr>"
     )
     return (

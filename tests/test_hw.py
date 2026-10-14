@@ -52,6 +52,15 @@ def test_accel_area_grows_with_the_array():
     assert abs(accel_logic_kge("gemv", 1, 8, 1) - 38.0) / 38.0 < 0.03
 
 
+def test_a_macro_backed_engine_adds_its_bank_interface():
+    from chipleap.hw.tech import accel_bank_kge
+
+    # The SmolLM2 accelerator's core with its macros outside, synthesized on SG13G2 for the
+    # 5 ns target: 0.3312 mm2, 45.6 kGE.
+    assert abs(accel_logic_kge("gemv", 1, 8, 1) + accel_bank_kge(1, 8, True) - 45.6) < 0.5
+    assert accel_bank_kge(1, 8, False) < accel_bank_kge(1, 8, True) < accel_bank_kge(4, 8, True)
+
+
 def test_memory_availability():
     lp4 = MEMORIES["lpddr4-x16"]
     hyper = MEMORIES["hyperram"]
