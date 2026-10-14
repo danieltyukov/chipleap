@@ -389,14 +389,6 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         "PNR_SDC_FILE": f"dir::{SDC}",
         "SIGNOFF_SDC_FILE": f"dir::{SDC}",
         "PL_TARGET_DENSITY_PCT": 55,
-        # X-HEEP gates its clock in many places (one gate drives the peripheral
-        # subsystem's 15,000 flip-flops), and IHP's only integrated clock gate is a weak
-        # cell. Balancing the latency under each gate against the macros' with chains of
-        # delay buffers left 3 ns of skew between the gates' trees and hold violations
-        # across them; keep the trees' levels alike instead, and let hold repair fix the
-        # rest on the data paths.
-        "CTS_DELAY_BUFFER_DERATE_PCT": 0,
-        "CTS_BALANCE_LEVELS": True,
         # No buffer between an output port and its net before the clock tree: X-HEEP's
         # I2S clock leaves on i2s_sck_o, and OpenROAD's CTS skips a clock net that has
         # a buffer on it already, which left the I2S's 337 flip-flops on the gate's
