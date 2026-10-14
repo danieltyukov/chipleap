@@ -377,3 +377,23 @@ def test_x_heeps_other_clocks_are_asynchronous_to_clk():
     assert sdc.rstrip().endswith("set_clock_groups -asynchronous {*}$groups")
     # Clock ports are not data inputs.
     assert "foreach name {clk_i jtag_tck_i}" in sdc
+
+
+def test_pins_go_west_and_east_within_the_band():
+    from chipleap.macro import place
+
+    netlist = (
+        "module chipleap_soc(clk_i, rst_ni, pad_resp_i, uart_tx_o, exit_value_o);\n"
+        "  input clk_i;\n  input rst_ni;\n  input [33:0] pad_resp_i;\n"
+        "  output uart_tx_o;\n  output [31:0] exit_value_o;\nendmodule\n"
+    )
+    assert soc_step.port_bits(netlist) == (36, 33)
+    ms = [place.Macro(f"b{i}", 416.64, 336.46) for i in range(4)]
+    fp = place.rows(ms, 1.0e6, util=soc_step.UTIL)
+    cfg = soc_step.pin_order(36, 33, fp, {m.instance: m.height for m in ms})
+    lines = cfg.splitlines()
+    west, east = lines.index("#W"), lines.index("#E")
+    assert lines[west + 2] == r".*_n?i(\[[0-9]+\])?" and lines[east + 2] == r".*_n?o(\[[0-9]+\])?"
+    # Virtual pins fill the edge beside each macro row, in proportion to its height.
+    below = int(lines[west + 1][1:])
+    assert 0 < below < 36 and "#N" not in cfg and "#S" not in cfg

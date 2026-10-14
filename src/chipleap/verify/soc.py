@@ -335,6 +335,14 @@ def model_areas_um2(design: Design) -> tuple[float, float]:
     return cells * 1e6, macros * 1e6
 
 
+# The utilisation the band between the macro rows is sized for, against the cells
+# synthesis made. Place and route adds to them: timing and wire-length repair, and hold
+# repair, which on X-HEEP inserts about 40,000 delay cells (its flip-flop FIFOs pass
+# data from one flip-flop straight to the next). At the accelerator's 45 % the SoC
+# ended at 61 % and global routing overflowed.
+UTIL = 0.38
+
+
 def floorplan(
     instances: list[tuple[str, str]], views: dict[str, sram.SramViews], cell_um2: float
 ) -> place.Floorplan:
@@ -346,10 +354,53 @@ def floorplan(
             for inst, cell in instances
         ],
         cell_um2,
+        util=UTIL,
     )
 
 
+_PORT_RE = re.compile(r"^\s*(input|output)\s+(?:\[(\d+):(\d+)\]\s+)?\\?([A-Za-z_][\w$]*)\s*;", re.M)
+
+
+def port_bits(netlist: str) -> tuple[int, int]:
+    """The input and output bits of a synthesized netlist's top module."""
+    bits = {"input": 0, "output": 0}
+    for direction, hi, lo, _ in _PORT_RE.findall(netlist):
+        bits[direction] += abs(int(hi) - int(lo)) + 1 if hi else 1
+    return bits["input"], bits["output"]
+
+
+def pin_order(inputs: int, outputs: int, fp: place.Floorplan, heights: dict[str, float]) -> str:
+    """LibreLane's pin order (``IO_PIN_ORDER_CFG``): inputs on the west edge, outputs on
+    the east, each spread over the band between the macro rows. A pin on the north or
+    south edge would reach the logic over a row of macros, through their power grid and
+    the metal they block (on the first layout, 1,431 overflows in global routing, most
+    on TopMetal1 and Metal4 and Metal5). Virtual pins (``$n``) fill the edge beside the
+    rows, so the real ones fall within the band."""
+    _, y0, _, y1 = fp.core
+    tops = [p.y for p in fp.macros if p.orient == "N"]
+    bottoms = [p.y + heights[p.instance] for p in fp.macros if p.orient != "N"]
+    low = (max(bottoms) if bottoms else y0) + place.HALO_UM
+    high = (min(tops) if tops else y1) - place.HALO_UM
+    die_h = fp.die[1]
+    band = max(high - low, 1.0)
+    lines = ["# Written by ChipLeap: inputs west, outputs east, within the logic band."]
+    for side, n, rx in (
+        ("W", inputs, r".*_n?i(\[[0-9]+\])?"),
+        ("E", outputs, r".*_n?o(\[[0-9]+\])?"),
+    ):
+        lines.append(f"#{side}")
+        below = round(n * low / band)
+        above = round(n * (die_h - high) / band)
+        if below:
+            lines.append(f"${below}")
+        lines.append(rx)
+        if above:
+            lines.append(f"${above}")
+    return "\n".join(lines) + "\n"
+
+
 SDC = "chipleap_soc.sdc"
+PINS = "pins.cfg"
 # The step LibreLane's Classic flow runs after synthesis: the layout run resumes there.
 AFTER_SYNTHESIS = "Checker.YosysUnmappedCells"
 
@@ -418,13 +469,20 @@ def with_floorplan(
         [(p.instance, by_inst[p.instance], p.x, p.y, p.orient) for p in fp.macros],
         work,
     )
-    return {
+    out = {
         **cfg,
         "FP_SIZING": "absolute",
         "DIE_AREA": [0, 0, *fp.die],
         "CORE_AREA": list(fp.core),
         "MACROS": macros,
-    }, fp
+    }
+    netlists = sorted((work / "runs" / "chipleap").glob("*-yosys-synthesis/*.nl.v"))
+    if netlists:
+        heights = {i: prep.views[c].view.height for i, c in prep.instances}
+        ins, outs = port_bits(netlists[-1].read_text(errors="replace"))
+        builddir.write_text(work, PINS, pin_order(ins, outs, fp, heights))
+        out["IO_PIN_ORDER_CFG"] = f"dir::{PINS}"
+    return out, fp
 
 
 def prepare(
