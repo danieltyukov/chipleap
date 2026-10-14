@@ -430,7 +430,7 @@ def test_names_that_collide_are_refused():
 
 def test_the_sdc_times_the_pads_core_side_pins():
     _, b = bind({"clk": "a", "inp": "v", "out": "c"})
-    sdc = netlist.sdc(b, {"a": 10.0})
+    sdc = netlist.sdc(b, {"a": 10.0}, netlist.CoreBudget(2.0, 2.0))
     assert "create_clock -name a -period 10 [get_pins pad_south_0/p2c]" in sdc
     assert "pad_south_0/p2c pad" not in sdc  # the clock pad has no input delay
     outputs = next(ln for ln in sdc.splitlines() if ln.startswith("set_output_delay"))
