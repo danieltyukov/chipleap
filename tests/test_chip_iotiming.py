@@ -45,9 +45,11 @@ def test_the_budget_defaults_to_a_fifth_of_the_period():
 def test_the_ports_are_constrained_at_the_pads():
     b = binding()
     assert iotiming.pad_ports(b) == (["pad_a", "pad_clk"], ["pad_y"])
-    sdc = iotiming.signoff_sdc(b, {"clk": 10.0}, iotiming.budget(IoBudget(), 10.0), 0.25)
+    sdc = iotiming.signoff_sdc(b, {"clk": 10.0}, iotiming.budget(IoBudget(), 10.0), 0.25, 5)
     assert "create_clock -name clk -period 10 [get_ports pad_clk]" in sdc
     assert "set_clock_uncertainty 0.25 [all_clocks]" in sdc
+    # The core's derate, as LibreLane timed it.
+    assert "set_timing_derate -early 0.95" in sdc and "set_timing_derate -late 1.05" in sdc
     assert "set_input_delay 2 -clock clk [get_ports {{pad_a}}]" in sdc
     assert "set_input_transition 1 [get_ports {{pad_a} {pad_clk}}]" in sdc
     assert "set_output_delay 2 -clock clk [get_ports {{pad_y}}]" in sdc
@@ -196,6 +198,9 @@ def test_a_corner_chipleap_cannot_match_is_an_error(tmp_path):
         iotiming.corners({**resolved, "LIB": libs, "STA_CORNERS": ["nom_slow_1p50V_125C"]}, io_dir)
     with pytest.raises(iotiming.IoTimingError, match="no clock uncertainty"):
         iotiming.uncertainty({"CLOCK_UNCERTAINTY_CONSTRAINT": "0.25"})
+    assert iotiming.derate({"TIME_DERATING_CONSTRAINT": 5}) == 5.0 and iotiming.derate({}) == 0
+    with pytest.raises(iotiming.IoTimingError, match="no usable timing derate"):
+        iotiming.derate({"TIME_DERATING_CONSTRAINT": "5"})
 
 
 def test_the_standard_cells_must_be_librelanes_pdk(tmp_path):

@@ -659,6 +659,9 @@ def sdc(b: Binding, clocks: Mapping[str, float]) -> str:
     lines += [
         "set_clock_uncertainty $::env(CLOCK_UNCERTAINTY_CONSTRAINT) [all_clocks]",
         "set_clock_transition $::env(CLOCK_TRANSITION_CONSTRAINT) [all_clocks]",
+        # The PDK's derate, as place and route has it (chipleap.rtl.pnr.sdc).
+        "set_timing_derate -early [expr 1-[expr $::env(TIME_DERATING_CONSTRAINT) / 100.0]]",
+        "set_timing_derate -late [expr 1+[expr $::env(TIME_DERATING_CONSTRAINT) / 100.0]]",
         "if { [info exists ::env(OPENLANE_SDC_IDEAL_CLOCKS)] && $::env(OPENLANE_SDC_IDEAL_CLOCKS) } {",
         "    unset_propagated_clock [all_clocks]",
         "} else {",

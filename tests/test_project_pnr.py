@@ -75,6 +75,26 @@ def test_own_sdc_and_several_clocks(counter_project, tmp_path):
     assert (tmp_path / "chipleap.sdc").read_text().endswith("-period 7\n")
 
 
+def derates(sdc_text: str, value: str) -> list[str]:
+    """The derates an SDC's ``set_timing_derate`` lines set, evaluated by Tcl with
+    TIME_DERATING_CONSTRAINT as LibreLane passes it (``5`` from 3.0.0.dev44)."""
+    tkinter = pytest.importorskip("tkinter")
+    tcl = tkinter.Tcl()
+    tcl.eval("set seen {}; proc set_timing_derate {args} { lappend ::seen $args }")
+    tcl.eval(f"set ::env(TIME_DERATING_CONSTRAINT) {value}")
+    for line in sdc_text.splitlines():
+        if line.startswith("set_timing_derate"):
+            tcl.eval(line)
+    return [str(x) for x in tcl.splitlist(tcl.eval("set seen"))]
+
+
+def test_the_derate_applies_whatever_form_librelane_passes_it_in(counter_project):
+    # dev44 passes the PDK's 5 as "5", 3.0.14 as "5.0"; 5 / 100 is 0 in Tcl.
+    text = sdc(load_project(counter_project))
+    for value in ("5", "5.0"):
+        assert derates(text, value) == ["-early 0.95", "-late 1.05"]
+
+
 def test_no_clock_uses_a_virtual_one(counter_project):
     proj = counter_project / "project.yaml"
     proj.write_text(proj.read_text().replace("clocks: [{port: clk_i, period_ns: 10}]\n", ""))
