@@ -457,6 +457,15 @@ def sdc(ports: Sequence[Port], period_ns: float) -> str:
         "    if { $i >= 0 } { set data_inputs [lreplace $data_inputs $i $i] }",
         "}",
         *io_lines("clk", period_ns),
+        # X-HEEP's I2S sends its word select and data on the falling edge of its own
+        # clock, which leaves on i2s_sck_o through the same clock gate: the receiver
+        # samples them against that clock, not against clk_i, so the base SDC's budget
+        # (a fifth of clk_i's period before the next clk_i edge) does not describe them.
+        # They are held only to leaving within the cycle, as i2s_sck_o is.
+        "set i2s_out [get_ports -quiet {i2s_ws_o i2s_sd_tx_o}]",
+        "if { [llength $i2s_out] } {",
+        "    set_output_delay 0 -clock [get_clocks clk] $i2s_out",
+        "}",
         "set groups {}",
         f"foreach c {{clk {' '.join(name for name, _, _, _ in clocks)}}} {{",
         "    set k [get_clocks -quiet $c]",
