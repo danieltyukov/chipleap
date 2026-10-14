@@ -11,13 +11,15 @@ so the shape stayed at 0.13145 and 0.128725 um2. Twice the stub had no patch at 
 on the first stub a larger patch still lands on metal the stub already has.
 
 ``check`` finds every such shape in a routed DEF. It merges each net's wires, vias and
-patches per layer and measures the shapes against the tech LEF's ``AREA``, the way the
-rule deck measures merged metal. ``repair`` extends each one at an end along its layer's
+patches per layer, with the port shapes (from the cells' and macros' LEFs) of every
+instance pin the net connects, and measures the shapes against the tech LEF's ``AREA``,
+the way the rule deck measures merged metal: a short stub that ends on a pad's or a
+macro's pin is part of that pin. ``repair`` extends each one at an end along its layer's
 routing direction, by a rectangle as wide as that end and long enough to pass the
 minimum with a margin. It places the rectangle only where no other net's metal, power
-grid, pin or cell with metal on that layer comes within the layer's spacing (plus a
-margin). It gives up, naming the shape, when neither end has room. LibreLane's signoff
-DRC checks the result as it checks everything else.
+grid, pin or obstruction comes within the layer's spacing (plus a margin). It gives up,
+naming the shape, when neither end has room. LibreLane's signoff DRC checks the result as
+it checks everything else.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -149,30 +151,69 @@ class Master:
     width: int
     height: int
     layers: frozenset[str]  # layers with a pin or an obstruction
+    # Each pin's port shapes and the obstructions, (layer, rect) in database units from
+    # the cell's lower left corner.
+    pins: dict[str, tuple[tuple[str, Rect], ...]] = field(default_factory=dict)
+    obs: tuple[tuple[str, Rect], ...] = ()
 
 
 def read_masters(text: str, dbu: int = 1000) -> dict[str, Master]:
-    """Each cell's size and the layers it has metal on, from a cell or macro LEF."""
+    """Each cell's size, its pins' port shapes and its obstructions, from a cell or macro
+    LEF."""
     out: dict[str, Master] = {}
     name: str | None = None
     size = (0, 0)
+    origin = (0, 0)
     found: set[str] = set()
+    pins: dict[str, list[tuple[str, Rect]]] = {}
+    obs: list[tuple[str, Rect]] = []
+    pin: str | None = None  # the PIN being read
+    in_obs = False
+    layer = ""
     for line in text.splitlines():
-        t = line.split()
+        t = line.replace(";", " ; ").split()
         if not t:
             continue
         key = t[0].upper()
         if key == "MACRO" and len(t) >= 2:
-            name, size, found = t[1], (0, 0), set()
+            name, size, origin, found = t[1], (0, 0), (0, 0), set()
+            pins, obs, pin, in_obs, layer = {}, [], None, False, ""
         elif name is None:
             continue
         elif key == "SIZE" and len(t) >= 4:
             size = (round(float(t[1]) * dbu), round(float(t[3]) * dbu))
+        elif key == "ORIGIN" and len(t) >= 3:
+            origin = (round(float(t[1]) * dbu), round(float(t[2]) * dbu))
+        elif key == "PIN" and len(t) >= 2:
+            pin, layer = t[1], ""
+            pins.setdefault(pin, [])
+        elif key == "OBS":
+            in_obs, layer = True, ""
         elif key == "LAYER" and len(t) >= 2:
-            found.add(t[1].rstrip(";"))
+            layer = t[1]
+            found.add(layer)
+        elif key == "RECT" and (pin is not None or in_obs):
+            nums = [v for v in t[1:] if v != ";"]
+            if nums and nums[0].upper() == "MASK":
+                nums = nums[2:]
+            if len(nums) >= 4:
+                x0, y0, x1, y1 = (round(float(v) * dbu) for v in nums[:4])
+                ox, oy = origin
+                r = (min(x0, x1) + ox, min(y0, y1) + oy, max(x0, x1) + ox, max(y0, y1) + oy)
+                (obs if in_obs else pins[pin or ""]).append((layer, r))
         elif key == "END" and len(t) >= 2 and t[1] == name:
-            out[name] = Master(size[0], size[1], frozenset(found))
+            out[name] = Master(
+                size[0],
+                size[1],
+                frozenset(found),
+                {p: tuple(shapes) for p, shapes in pins.items()},
+                tuple(obs),
+            )
             name = None
+        elif key == "END" and len(t) >= 2 and t[1] == pin:
+            pin = None
+        elif key == "END" and (len(t) == 1 or t[1] == ";") and in_obs:
+            in_obs = False
     return out
 
 
@@ -233,6 +274,13 @@ def _orient(rect: Rect, w: int, h: int, orient: str) -> Rect:
         max(p[0] for p in pts),
         max(p[1] for p in pts),
     )
+
+
+def _place(rect: Rect, master: Master, at: tuple[int, int, str]) -> Rect:
+    """``rect`` of a cell placed at ``(x, y)`` with an orientation, in the design."""
+    x, y, orient = at
+    o = _orient(rect, master.width, master.height, orient)
+    return (x + o[0], y + o[1], x + o[2], y + o[3])
 
 
 def _move(x: int, y: int, w: int, h: int, orient: str) -> tuple[int, int]:
@@ -336,8 +384,14 @@ def read_layout(text: str, tech: Tech, masters: dict[str, Master]) -> Layout:
     vias = {**tech.vias, **def_vias(text)}
     nets: dict[tuple[str, str], list[Rect]] = defaultdict(list)
     foreign: dict[str, list[tuple[str, Rect]]] = defaultdict(list)
+    # The net on each instance pin: (instance, pin) -> net.
+    joined: dict[tuple[str, str], str] = {}
     for item in _statements(_section(text, "NETS")):
         net = item.split()[1]
+        head = item.split(" + ", 1)[0]
+        for inst, pin in re.findall(r"\(\s*(\S+)\s+(\S+)\s*\)", head):
+            if inst != "PIN":
+                joined[(inst, pin)] = net
         for st in _routing(item):
             for layer, r in _route(st, tech, vias, special=False):
                 nets[(net, layer)].append(r)
@@ -374,14 +428,18 @@ def read_layout(text: str, tech: Tech, masters: dict[str, Master]) -> Layout:
         place_m = re.search(r"\+ (?:PLACED|FIXED|COVER) \(\s*(-?\d+) (-?\d+)\s*\) (\S+)", item)
         if master is None or not place_m or not master.layers:
             continue
-        x, y = int(place_m.group(1)), int(place_m.group(2))
-        bx = _orient(
-            (0, 0, master.width, master.height), master.width, master.height, place_m.group(3)
-        )
-        box = (x + bx[0], y + bx[1], x + bx[2], y + bx[3])
-        # A cell's pins and obstructions on a routing layer: the whole cell, to be safe.
-        for layer in master.layers:
-            foreign[layer].append((t[1], box))
+        inst, at = t[1], (int(place_m.group(1)), int(place_m.group(2)), place_m.group(3))
+        # A pin on a net is that net's metal, which a routed shape ending on it merges
+        # with; every other pin and the obstructions are another owner's.
+        for pin, shapes in master.pins.items():
+            net_of = joined.get((inst, pin))
+            for layer, r in shapes:
+                if net_of is None:
+                    foreign[layer].append((inst, _place(r, master, at)))
+                else:
+                    nets[(net_of, layer)].append(_place(r, master, at))
+        for layer, r in master.obs:
+            foreign[layer].append((inst, _place(r, master, at)))
     return Layout(tech, die, nets, foreign)  # type: ignore[arg-type]
 
 
@@ -437,7 +495,8 @@ def merged(rects: list[Rect]) -> list[list[Rect]]:
 
 def check(layout: Layout) -> list[Shape]:
     """Every net's shape on a routing layer under the layer's minimum area. Metal1 is left
-    out: the router's shapes there merge with the cells' pins, which are not read."""
+    out: the router's shapes there merge with the standard cells' own Metal1, which their
+    LEFs do not fully describe."""
     tech = layout.tech
     out = []
     for (net, layer), rects in sorted(layout.nets.items()):
