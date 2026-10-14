@@ -5,6 +5,7 @@ import os
 import pytest
 
 from chipleap.hw import Accel
+from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.verify import pnr
 from chipleap.verify.tools import librelane
 
@@ -195,4 +196,7 @@ def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch
     assert d["model_buffer_um2"] == round(4 * 784.48 * 118.78)
     assert d["synth_cell_um2"] == 250000 and d["pnr_cell_growth"] == pytest.approx(0.2)
     assert d["model_cell_error"] == pytest.approx((d["model_cell_um2"] - 250000) / 250000, abs=1e-4)
+    # The layout has macros, so the model's logic has the banks' interface.
+    kge = accel_logic_kge("gemv", 1, 8, 1) + accel_bank_kge(1, 8, True)
+    assert d["model_cell_um2"] == round(kge * 1000 * get_tech("ihp-sg13g2").ge_um2)
     assert "synthesis 0.250 mm2" in step.summary and "place and route adds 20%" in step.summary

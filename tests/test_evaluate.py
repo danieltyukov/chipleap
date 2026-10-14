@@ -158,3 +158,20 @@ def test_ihp_buffers_cost_the_macros_the_layout_places():
     # Other nodes keep the density model.
     other = get_tech("generic-16nm")
     assert buffer_mm2(one, other) == other.sram_mm2(2) * 2
+
+
+def test_logic_of_a_macro_backed_engine_has_the_banks_interface():
+    """Where the buffers are priced as banks of macros, the logic that writes them and
+    reads them a cycle ahead is priced too."""
+    from chipleap.hw.design import Accel
+    from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
+    from chipleap.model.evaluate import accel_kge
+
+    ihp, other = get_tech("ihp-sg13g2"), get_tech("generic-16nm")
+    for ports in (1, 2):
+        one = Accel("gemv", 1, 8, 8, ports=ports, abuf_kib=2, wbuf_kib=2)
+        flops = accel_logic_kge("gemv", 1, 8, ports)
+        assert accel_kge(one, ihp) == pytest.approx(flops + accel_bank_kge(1, 8, True))
+        assert accel_kge(one, other) == flops
+    ws = Accel("ws", 4, 4, 8, ports=1, abuf_kib=2, wbuf_kib=2)
+    assert accel_kge(ws, ihp) == accel_logic_kge("ws", 4, 4, 1)

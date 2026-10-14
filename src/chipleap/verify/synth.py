@@ -79,6 +79,7 @@ def _run(
     liberty: Path,
     workdir: Path,
     target_ns: float = TARGET_NS,
+    top: str = "chipleap_accel",
 ) -> tuple[float, int, int, float]:
     chparams = " ".join(f"-set {k} {v}" for k, v in params.items())
     # Map, buffer, size and time in one ABC call: once the logic is mapped to liberty cells,
@@ -102,8 +103,8 @@ def _run(
     abc_script.write_text(mapping.replace("; ", "\n") + "\n")
     script = [
         f"read_verilog -sv {verilog}",
-        f"chparam {chparams} chipleap_accel",
-        "synth -top chipleap_accel -flatten",
+        f"chparam {chparams} {top}",
+        f"synth -top {top} -flatten",
         f"dfflibmap -liberty {liberty}",
         f"abc -liberty {liberty} -script {abc_script}",
         "opt_clean",
@@ -127,10 +128,11 @@ def _run(
         proc.wait()
         raise
     log = out or ""
-    (workdir / f"yosys-{params.get('ABUF_WORDS', 0)}.log").write_text(log)
+    tag = "banked" if params.get("SRAM_BUF") else params.get("ABUF_WORDS", 0)
+    (workdir / f"yosys-{tag}.log").write_text(log)
     if proc.returncode != 0:
         raise SynthError("Yosys failed:\n" + "\n".join(log.splitlines()[-20:]))
-    area = re.findall(r"Chip area for module '\\chipleap_accel': ([\d.]+)", log)
+    area = re.findall(rf"Chip area for module '\\{top}': ([\d.]+)", log)
     cells = re.findall(r"Number of cells:\s+(\d+)", log)
     flops = sum(int(n) for n in re.findall(r"sg13g2_df\w+\s+(\d+)", log))
     delay = re.findall(r"Delay =\s+([\d.]+) ps", log)
@@ -193,4 +195,49 @@ def synthesize(
     period = delay + FLOP_OVERHEAD_NS
     return SynthResult(
         logic, cells, flops, delay, 1000 / period if period > 0 else 0.0, str(lib), tuple(runs)
+    )
+
+
+def synthesize_banked(
+    accel: Accel, liberty: Path | None = None, workdir: Path | None = None
+) -> SynthResult:
+    """The core of a macro-backed build (``SRAM_BUF``, ``chipleap.gen.banks``) on its own:
+    its logic with the bank interface, the macros outside it. Nothing is extrapolated,
+    since the core holds no buffer."""
+    from chipleap.gen import banks
+
+    reason = banks.unsupported(accel)
+    if reason is not None:
+        raise SynthError(f"no macro-backed build: {reason}")
+    tool = yosys()
+    if not tool.found or tool.path is None:
+        raise SynthError("Yosys is not installed")
+    lib = liberty or ihp_liberty()
+    if lib is None:
+        raise SynthError("IHP SG13G2 liberty not found")
+    work = (workdir or Path(tempfile.mkdtemp(prefix="chipleap-synth-"))).resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    src = work / "chipleap_accel.sv"
+    src.write_text(accel_sv())
+    verilog = work / "chipleap_accel.v"
+    _sv2v(src, verilog)
+    p = rtl_params(accel)
+    params = {
+        "DATAFLOW": p.dataflow,
+        "ROWS": p.rows,
+        "COLS": p.cols,
+        "WBITS": p.wbits,
+        "PORTS": p.ports,
+        "ABUF_WORDS": p.abuf_words,
+        "WBUF_WORDS": p.wbuf_words,
+        "DOUBLE_BUF": p.double_buf,
+        "ACC_ROWS": p.acc_rows,
+        "SRAM_BUF": 1,
+    }
+    area, cells, flops, delay = _run(
+        str(tool.path), verilog, params, lib, work, top="chipleap_accel_core"
+    )
+    period = delay + FLOP_OVERHEAD_NS
+    return SynthResult(
+        area, cells, flops, delay, 1000 / period if period > 0 else 0.0, str(lib), ()
     )

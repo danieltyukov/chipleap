@@ -15,7 +15,13 @@ from functools import lru_cache
 from chipleap.hw.cpu import CPUModel, get_cpu
 from chipleap.hw.design import Accel, Design
 from chipleap.hw.memory import MEMORIES, ExternalMemory, get_memory
-from chipleap.hw.tech import AXI_ADAPTER_KGE, Technology, accel_logic_kge, get_tech
+from chipleap.hw.tech import (
+    AXI_ADAPTER_KGE,
+    Technology,
+    accel_bank_kge,
+    accel_logic_kge,
+    get_tech,
+)
 from chipleap.model.accel import Bandwidth, TilingError, job_timing
 from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workload
 
@@ -419,14 +425,32 @@ def buffer_mm2(a: Accel, tech: Technology) -> float:
     return tech.sram_mm2(a.abuf_kib) + tech.sram_mm2(a.wbuf_kib)
 
 
+def accel_kge(a: Accel, tech: Technology) -> float:
+    """The accelerator's logic. On IHP SG13G2, a GEMV engine whose buffers are priced as
+    the banks of a macro-backed build (``buffer_mm2``) also has those banks' interface
+    (``accel_bank_kge``): the macros' write path and the registers that read a chunk a
+    cycle ahead."""
+    kge = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports)
+    if tech.key == "ihp-sg13g2" and _banked(a):
+        kge += accel_bank_kge(a.rows, a.cols, a.double_buffer)
+    return kge
+
+
+def _banked(a: Accel) -> bool:
+    """Whether ``a``'s buffers are banks of IHP macros, as a one-port build of it lays them
+    out; more ports read the same words, so they get the same banks."""
+    from chipleap.gen import banks
+
+    return banks.unsupported(replace(a, ports=1)) is None
+
+
 @lru_cache(maxsize=4096)
 def _ihp_buffer_mm2(a: Accel) -> float:
     from chipleap.gen import banks
     from chipleap.macro.sram import IHP_1P, choose
 
-    banked = replace(a, ports=1)
-    if banks.unsupported(banked) is None:
-        return banks.plan(banked, IHP_1P).area_um2 / 1e6
+    if _banked(a):
+        return banks.plan(replace(a, ports=1), IHP_1P).area_um2 / 1e6
     slots = 2 if a.double_buffer else 1
     total = 0.0
     for kib in (a.abuf_kib, a.wbuf_kib):
@@ -448,8 +472,7 @@ def area_breakdown(
     area["sram"] = d.banks * tech.sram_mm2(d.bank_kib) + d.il_banks * tech.sram_mm2(d.il_bank_kib)
     if d.accel:
         a = d.accel
-        kge = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports)
-        area["accelerator logic"] = tech.logic_mm2(kge)
+        area["accelerator logic"] = tech.logic_mm2(accel_kge(a, tech))
         area["accelerator buffers"] = buffer_mm2(a, tech)
         if d.platform == "standalone":
             area["axi adapter"] = tech.logic_mm2(AXI_ADAPTER_KGE)
