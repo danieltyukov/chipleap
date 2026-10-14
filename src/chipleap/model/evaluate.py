@@ -436,6 +436,23 @@ def _ihp_buffer_mm2(a: Accel) -> float:
     return total / 1e6
 
 
+def bank_mm2(kib: float, tech: Technology) -> float:
+    """One of X-HEEP's memory banks: on IHP SG13G2 the PDK's macros of 32-bit words with
+    a bit mask that hold it (X-HEEP writes bytes), as the SoC's layout builds it
+    (``chipleap.gen.soc``); other nodes use ``Technology.sram_mm2``."""
+    if tech.key == "ihp-sg13g2":
+        return _ihp_bank_mm2(kib)
+    return tech.sram_mm2(kib)
+
+
+@lru_cache(maxsize=256)
+def _ihp_bank_mm2(kib: float) -> float:
+    from chipleap.macro.sram import IHP_1P, choose
+
+    words = int(kib * 1024) // 4
+    return choose(IHP_1P, words, 32).area_um2 / 1e6 if words > 0 else 0.0
+
+
 def area_breakdown(
     d: Design, tech: Technology, cpu: CPUModel, mem: ExternalMemory | None
 ) -> dict[str, float]:
@@ -445,7 +462,7 @@ def area_breakdown(
     slaves = d.banks + d.il_banks + 6
     bus_kge = 8.0 if d.bus == "onetoM" else 0.6 * masters * slaves
     area["soc logic"] = tech.logic_mm2(XHEEP_BASE_KGE + bus_kge)
-    area["sram"] = d.banks * tech.sram_mm2(d.bank_kib) + d.il_banks * tech.sram_mm2(d.il_bank_kib)
+    area["sram"] = d.banks * bank_mm2(d.bank_kib, tech) + d.il_banks * bank_mm2(d.il_bank_kib, tech)
     if d.accel:
         a = d.accel
         kge = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports)

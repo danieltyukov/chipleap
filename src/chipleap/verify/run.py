@@ -195,6 +195,8 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         "drc_errors": r.drc_errors,
         "lvs_errors": r.lvs_errors,
         "antenna_nets": r.antenna_nets,
+        "max_slew_violations": r.max_slew_violations,
+        "max_cap_violations": r.max_cap_violations,
         "power_mw": round(r.power_mw, 3),
         "model_cell_um2": round(model_cell),
         "buffers": r.buffers,
@@ -226,9 +228,7 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     # Signed off where the model's clock limit for the node is measured: setup at the slow
     # corner (1.08 V, 125 C), hold at every corner. The typical corner is reported beside it.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
-    checks = "DRC and LVS clean" if r.clean else f"{r.drc_errors} DRC and {r.lvs_errors} LVS errors"
-    if r.antenna_nets:
-        checks += f", {r.antenna_nets} antenna violations"
+    checks, signed = _checks(r)
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
@@ -250,7 +250,113 @@ def place_route(design: Design, workdir: Path) -> StepResult:
             )
     elif r.buffers:
         msg += f"; {r.buffers}"
-    return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)
+    return StepResult("pnr", "pass" if met and signed else "fail", msg, data)
+
+
+def _checks(r: pnr.PnrResult) -> tuple[str, bool]:
+    """The layout's checks for a summary, and whether they sign it off: DRC and LVS, and
+    the slew and capacitance limits STA checks at every corner. Antenna violations are
+    reported."""
+    text = "DRC and LVS clean" if r.clean else f"{r.drc_errors} DRC and {r.lvs_errors} LVS errors"
+    if r.antenna_nets:
+        text += f", {r.antenna_nets} antenna violations"
+    drv = r.max_slew_violations + r.max_cap_violations
+    if drv:
+        text += f", {r.max_slew_violations} slew and {r.max_cap_violations} capacitance violations"
+    else:
+        text += ", no slew or capacitance violations"
+    return text, r.clean and drv == 0
+
+
+def place_route_soc(design: Design, bundle: Path, checkout: Path | None, fetch: bool) -> StepResult:
+    """The whole SoC, X-HEEP with the accelerator and every memory in IHP's macros, placed
+    and routed as one block in LibreLane (``chipleap.verify.soc``)."""
+    from chipleap.chip import io
+    from chipleap.verify import soc
+
+    if design.platform != "xheep":
+        return StepResult("soc", "skipped", "not an X-HEEP design (standalone AXI4 IP)")
+    if design.accel is None:
+        return StepResult("soc", "skipped", "no accelerator in this design")
+    if design.tech != "ihp-sg13g2":
+        return StepResult("soc", "skipped", f"the SoC is laid out on IHP SG13G2, not {design.tech}")
+    co = xheep.find_checkout(checkout)
+    if co is None and fetch:
+        try:
+            co = xheep.fetch()
+        except xheep.XheepError as exc:
+            return StepResult("soc", "skipped", str(exc))
+    if co is None:
+        return StepResult(
+            "soc",
+            "skipped",
+            "no X-HEEP checkout (pass --xheep DIR, set CHIPLEAP_XHEEP_DIR, or use --fetch-xheep)",
+        )
+    pdk = io.pdk_dir()
+    if pdk is None:
+        return StepResult("soc", "skipped", f"no IHP PDK with its SRAM macros ({io.PDK_ENV})")
+    # As in the xheep step, X-HEEP's generator runs the configuration ChipLeap writes from
+    # design.yaml, never the bundle's own file.
+    text, _ = _regenerated_xheep(bundle, design)
+    try:
+        s = soc.place_and_route(design, text, co, builddir.work_dir(bundle, "verify", "soc"), pdk)
+    except (soc.SocError, pnr.PnrError) as exc:
+        msg = str(exc).splitlines()[0]
+        status = "skipped" if "not installed" in msg else "fail"
+        return StepResult("soc", status, msg, {"error": str(exc)})
+    r = s.pnr
+    counts: dict[str, int] = {}
+    for _, cell in s.macros:
+        counts[cell] = counts.get(cell, 0) + 1
+    macros = ", ".join(f"{n} x {c}" for c, n in sorted(counts.items()))
+    model = s.model_cell_um2 + s.model_macro_um2
+    measured = r.cell_um2 + r.macro_um2
+    data: dict[str, object] = {
+        "clock_mhz": design.freq_mhz,
+        "die_um2": round(r.die_um2),
+        "core_um2": round(r.core_um2),
+        "cell_um2": round(r.cell_um2),
+        "utilisation": round(r.utilisation, 3),
+        "cells": r.cells,
+        "setup_slack_typ_ns": round(r.setup_slack_typ_ns, 3),
+        "setup_slack_ns": round(r.setup_slack_ns, 3),
+        "hold_slack_ns": round(r.hold_slack_ns, 3),
+        "fmax_mhz": round(r.fmax_mhz, 1),
+        "fmax_worst_mhz": round(r.fmax_worst_mhz, 1),
+        "drc_errors": r.drc_errors,
+        "lvs_errors": r.lvs_errors,
+        "antenna_nets": r.antenna_nets,
+        "max_slew_violations": r.max_slew_violations,
+        "max_cap_violations": r.max_cap_violations,
+        "power_mw": round(r.power_mw, 3),
+        "macros": [{"instance": i, "cell": c} for i, c in s.macros],
+        "macro_um2": round(r.macro_um2),
+        "model_macro_um2": round(s.model_macro_um2),
+        "model_cell_um2": round(s.model_cell_um2),
+        "synth_cell_um2": round(r.synth_cell_um2),
+        "measured_um2": round(measured),
+        "model_um2": round(model),
+        "gds": str(r.gds) if r.gds else None,
+    }
+    met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
+    checks, signed = _checks(r)
+    msg = (
+        f"X-HEEP with the accelerator, placed and routed on IHP SG13G2: "
+        f"{r.core_um2 / 1e6:.3f} mm2 core at {r.utilisation * 100:.0f}% utilisation, "
+        f"{r.cells} cells; {design.freq_mhz:g} MHz {'met' if met else 'missed'} at the slow "
+        f"corner (about {r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the "
+        f"typical one); {checks}; macros {macros}: {r.macro_um2 / 1e6:.3f} mm2, the model "
+        f"{s.model_macro_um2 / 1e6:.3f} mm2; standard cells: the model "
+        f"{s.model_cell_um2 / 1e6:.3f} mm2"
+    )
+    if r.synth_cell_um2 > 0:
+        msg += (
+            f", synthesis {r.synth_cell_um2 / 1e6:.3f} mm2 "
+            f"({(s.model_cell_um2 - r.synth_cell_um2) / r.synth_cell_um2 * 100:+.1f}%), and "
+            f"place and route adds {(r.cell_um2 / r.synth_cell_um2 - 1) * 100:.0f}% "
+            f"({r.cell_um2 / 1e6:.3f} mm2)"
+        )
+    return StepResult("soc", "pass" if met and signed else "fail", msg, data)
 
 
 def _count(n: object, noun: str) -> str:
@@ -451,6 +557,8 @@ def verify_bundle(
             results.append(_place_route_on(design, synth_tech, bundle, remote))
         elif step == "pnr":
             results.append(place_route(design, builddir.work_dir(bundle, "verify", "pnr")))
+        elif step == "soc":
+            results.append(place_route_soc(design, bundle, xheep_dir, fetch_xheep))
         else:
             raise ValueError(f"unknown verification step {step!r}")
     out = builddir.work_dir(bundle, "verify")

@@ -786,7 +786,8 @@ def build_parser() -> argparse.ArgumentParser:
         "project lint,sim,coverage,formal,cdc,synth,equiv; pnr (place and route), gls "
         "(gate-level simulation of its netlist), the steps after it (eco, dft, power, "
         "ir_drop, upf) and chip (the whole chip with its pad ring and macros) are opt-in, and "
-        "all runs every step",
+        "all runs every step; a bundle's soc (X-HEEP with the accelerator, placed and routed "
+        "in one block) runs only when named",
     )
     s.add_argument("--xheep", help="X-HEEP checkout (default: CHIPLEAP_XHEEP_DIR or the cache)")
     s.add_argument("--fetch-xheep", action="store_true", help="clone the tested X-HEEP commit")

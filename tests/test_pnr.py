@@ -153,6 +153,19 @@ def test_the_floorplan_puts_macros_in_two_rows_under_supply_pairs():
         place.rows(ms, 1000, util=1.5)
 
 
+def test_the_core_ends_at_the_widest_rows_last_halo():
+    """No sliver of rows between the last macro's halo and the core's edge: pdngen cannot
+    reach the rails of rows a few sites wide (the SoC's six-macro rows left 2.4 um)."""
+    from chipleap.macro import place
+
+    ms = [place.Macro(f"b{i}", 416.64, 336.46) for i in range(8)]
+    ms += [place.Macro(f"a{i}", 784.48, 118.78) for i in range(4)]
+    fp = place.rows(ms, 3.2e6)
+    size = {m.instance: m for m in ms}
+    right = max(p.x + size[p.instance].width for p in fp.macros) + place.HALO_UM
+    assert 0 <= fp.core[2] - right < place.SITE_UM[0]
+
+
 def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch):
     from dataclasses import replace
 

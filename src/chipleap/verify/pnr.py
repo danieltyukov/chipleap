@@ -60,6 +60,8 @@ class PnrResult:
     macro_um2: float = 0.0
     buffers: str = ""  # what the buffers are in the layout, and why when they are flops
     synth_cell_um2: float = 0.0  # LibreLane's synthesis, before placement's repairs
+    max_slew_violations: int = 0  # pins over their slew limit, at any corner
+    max_cap_violations: int = 0  # nets over their capacitance limit, at any corner
 
     @property
     def clean(self) -> bool:
@@ -181,20 +183,32 @@ def parse(metrics: dict[str, Any], clock_mhz: float, gds: Path | None) -> PnrRes
         power_mw=_num(metrics, "power__total") * 1000,
         gds=gds,
         metrics=metrics,
+        max_slew_violations=int(_num(metrics, "design__max_slew_violation__count")),
+        max_cap_violations=int(_num(metrics, "design__max_cap_violation__count")),
     )
 
 
 def run_librelane(
-    workdir: Path, cfg: dict[str, Any], tag: str = "chipleap"
+    workdir: Path,
+    cfg: dict[str, Any],
+    tag: str = "chipleap",
+    *,
+    to: str | None = None,
+    resume_from: str | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
-    Returns the final metrics and the GDS."""
+    Returns the final metrics and the GDS. With ``to`` the run stops after that step and
+    returns no metrics; with ``resume_from`` it goes on in the same run from that step,
+    with the state the run's last step left and the configuration given now."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
-    cmd = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", tag, "--overwrite", "config.json"]
-    log = workdir / "librelane.log"
+    cmd = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", tag]
+    cmd += ["--from", resume_from] if resume_from else ["--overwrite"]
+    cmd += ["--to", to] if to else []
+    cmd.append("config.json")
+    log = workdir / ("librelane.log" if resume_from is None else "librelane-resumed.log")
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
     try:
         code = launch.run(cmd, workdir, log, limit)
@@ -202,6 +216,10 @@ def run_librelane(
         raise PnrError(f"LibreLane did not start: {exc}") from None
     except launch.TimedOut as exc:
         raise PnrError(_timed_out(exc, log)) from None
+    if to is not None:
+        if code != 0:
+            raise PnrError(f"LibreLane stopped before {to} (exit {code}):\n{_tail(log)}")
+        return {}, None
     final = workdir / "runs" / tag / "final"
     metrics_file = final / "metrics.json"
     if not metrics_file.is_file():
