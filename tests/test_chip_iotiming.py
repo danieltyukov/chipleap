@@ -4,12 +4,14 @@ liberty's arcs and the reports. OpenSTA itself runs in the gated chip test."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
-from chipleap.chip import assemble, io, iotiming
+from chipleap.chip import assemble, io, iotiming, netlist
 from chipleap.chip.config import ChipConfig, IoBudget, Pad
+from chipleap.chip.io import PAD_CELLS
 from chipleap.chip.netlist import Port, bind
 from chipleap.rtl.project import ProjectError, load_project
 
@@ -382,6 +384,9 @@ def test_a_run_times_every_corner_and_names_the_pads_it_cannot_time(
     assert not t.met and t.to_dict()["untimed_pads"] == t.untimed
     sdc = (work / "io_timing_slow" / "chip_io.sdc").read_text()
     assert "create_clock -name clk -period 10 [get_ports pad_clk]" in sdc
+    # chip.io's own numbers at the ports: the pads are in the paths, not the constraints.
+    assert "set_input_delay 2 -clock clk [get_ports {{pad_a}}]" in sdc
+    assert "set_output_delay 2 -clock clk [get_ports {{pad_y}}]" in sdc
     script = (work / "io_timing_slow" / "io_timing_slow.tcl").read_text()
     assert "read_liberty {inputs/io.lib}" in script and "report_checks" in script
     assert "report_checks" not in (work / "io_timing_typ" / "io_timing_typ.tcl").read_text()
@@ -390,10 +395,10 @@ def test_a_run_times_every_corner_and_names_the_pads_it_cannot_time(
 # The budget LibreLane times the core against at its side of the pads
 
 
-def pad_liberty(scale: float, out_arc: bool = True) -> str:
+def pad_liberty(scale: float, in_arc: bool = True, out_arc: bool = True) -> str:
     """An IO liberty whose input pad's arc is ``scale`` times (rise) and 4 times that
-    (fall) a plain table, and whose output pad's is 10 times it; ``out_arc`` False leaves
-    the output pad without an arc."""
+    (fall) a plain table, and whose output pad's is 10 times it; ``in_arc`` or
+    ``out_arc`` False leaves that pad without an arc."""
 
     def arc(src: str, rise: float, fall: float) -> str:
         def table(kind: str, k: float) -> str:
@@ -407,16 +412,17 @@ def pad_liberty(scale: float, out_arc: bool = True) -> str:
             f"{table('cell_rise', rise)} {table('cell_fall', fall)} }}"
         )
 
+    ins = arc("pad", scale, 4 * scale) if in_arc else ""
     out = arc("c2p", 10 * scale, 10 * scale) if out_arc else ""
     return (
         "library (io) {\n"
-        f"  cell (sg13g2_IOPadIn) {{ pin (p2c) {{ direction : output; {arc('pad', scale, 4 * scale)} }} }}\n"
+        f"  cell (sg13g2_IOPadIn) {{ pin (p2c) {{ direction : output; {ins} }} }}\n"
         f"  cell (sg13g2_IOPadOut4mA) {{ pin (pad) {{ direction : output; {out} }} }}\n"
         "}\n"
     )
 
 
-def budget_dir(tmp_path: Path, out_arc: bool = True) -> Path:
+def budget_dir(tmp_path: Path, in_arc: bool = True, out_arc: bool = True) -> Path:
     io_dir = tmp_path / "io"
     io_dir.mkdir()
     for name, scale in (
@@ -424,8 +430,26 @@ def budget_dir(tmp_path: Path, out_arc: bool = True) -> Path:
         ("slow_1p08V_3p0V_125C", 0.3),
         ("fast_1p32V_3p6V_m40C", 0.1),
     ):
-        (io_dir / f"sg13g2_io_{name}.lib").write_text(pad_liberty(scale, out_arc))
+        (io_dir / f"sg13g2_io_{name}.lib").write_text(pad_liberty(scale, in_arc, out_arc))
     return io_dir
+
+
+PAD_CELL = {"input": PAD_CELLS["in"], "output": PAD_CELLS["out"]}
+# chip.io's numbers halfway along the stand-in tables' edge and load axes.
+HALFWAY = {
+    "input_delay_ns": 2.0,
+    "output_delay_ns": 3.0,
+    "input_transition_ns": 0.6,
+    "output_load_pf": 0.04,
+}
+
+
+@pytest.fixture
+def halfway(monkeypatch):
+    """The core's edge and load halfway along the stand-in tables' axes too."""
+    monkeypatch.setattr(iotiming, "CORE_EDGE_NS", 0.6)
+    monkeypatch.setattr(iotiming, "CORE_LOAD_PF", 0.04)
+    return HALFWAY
 
 
 def test_a_delay_table_is_interpolated_and_extrapolated_as_opensta_does():
@@ -435,19 +459,11 @@ def test_a_delay_table_is_interpolated_and_extrapolated_as_opensta_does():
     assert iotiming.lookup(timing, "cell_rise", 0.1, 0.0) == pytest.approx(0.0)
 
 
-def test_the_core_budget_takes_each_pads_arc_at_each_corner(tmp_path, monkeypatch):
+def test_the_core_budget_takes_each_pads_arc_at_each_corner(tmp_path, halfway):
     """Each table is k * (1 + 2 t + u), t and u how far along its edge and load axes the
     point lies: (CORE_EDGE_NS, chip.io's output load) for an output pad, (chip.io's input
     edge rate, CORE_LOAD_PF) for an input pad."""
-    monkeypatch.setattr(iotiming, "CORE_EDGE_NS", 0.6)  # halfway along index_1
-    monkeypatch.setattr(iotiming, "CORE_LOAD_PF", 0.04)  # halfway along index_2
-    numbers = {
-        "input_delay_ns": 2.0,
-        "output_delay_ns": 3.0,
-        "input_transition_ns": 0.6,
-        "output_load_pf": 0.04,
-    }
-    budget = iotiming.core_budget(budget_dir(tmp_path), numbers)
+    budget = iotiming.core_budget(budget_dir(tmp_path), halfway)
     slow = next(p for p in budget.pads if p.corner == "slow")
     # Halfway on both axes: k * 2.5. The input pad: rise 0.3 k, fall 1.2 k.
     assert slow.clock == pytest.approx(0.75) and slow.input_min == pytest.approx(0.75)
@@ -455,33 +471,140 @@ def test_the_core_budget_takes_each_pads_arc_at_each_corner(tmp_path, monkeypatc
     assert slow.output_max == pytest.approx(7.5) == slow.output_min
     assert (budget.input_ns, budget.output_ns) == (2.0, 3.0)
     assert [p.corner for p in budget.pads] == ["typ", "slow", "fast"]
-    # The SDC, evaluated by Tcl with LibreLane's 5 % derate: the latest corner bounds the
-    # -max delay, the earliest the -min.
-    b = binding()
-    delays = tcl_delays(sdc(b, budget))
-    d = 0.05
-    fast = next(p for p in budget.pads if p.corner == "fast")
+
+
+def corner_delays(budget, pad: str) -> tuple[list, list]:
+    """Each corner's (pad, clock pad) delays for the core's latest and its earliest bound,
+    as ``chipleap.chip.netlist.sdc`` takes them."""
+    if pad == "input":
+        late = [(p.input_max, p.clock) for p in budget.pads]
+        return late, [(p.input_min, p.clock) for p in budget.pads]
+    late = [(p.output_max, p.clock) for p in budget.pads]
+    return late, [(p.output_min, p.clock) for p in budget.pads]
+
+
+def test_a_data_input_pads_core_pin_sees_its_data_after_the_pad(tmp_path, halfway):
+    """The data reaches the input pad's core pin ``input + pad`` after the clock edge at
+    the clock pad, and the clock reaches the core ``clock_pad`` after it: late data with a
+    slower pad and an early clock bound setup, early data and a late clock bound hold."""
+    budget = iotiming.core_budget(budget_dir(tmp_path), halfway)
+    delays, d = tcl_delays(sdc(binding(), budget)), 0.05
+    late, early = corner_delays(budget, "input")
+    assert delays["input -max"] == pytest.approx(
+        max(2 + pad * (1 + d) - clk * (1 - d) for pad, clk in late)
+    )
+    assert delays["input -min"] == pytest.approx(
+        min(2 + pad * (1 - d) - clk * (1 + d) for pad, clk in early)
+    )
+    # The slow corner bounds both: 3 ns through the pad's slower edge (0.3 * 4 * 2.5),
+    # 0.75 ns through its faster one and the clock pad's.
     assert delays["input -max"] == pytest.approx(2 + 3.0 * (1 + d) - 0.75 * (1 - d))
     assert delays["input -min"] == pytest.approx(2 + 0.75 * (1 - d) - 0.75 * (1 + d))
+
+
+def test_an_output_pads_core_pin_must_leave_the_pad_its_delay(tmp_path, halfway):
+    """The data leaves the core ``clock_pad`` after the clock edge at the clock pad and
+    takes ``pad`` to reach the port, where the world outside needs it ``output`` before
+    the next edge: both delays slower for setup, faster for hold."""
+    budget = iotiming.core_budget(budget_dir(tmp_path), halfway)
+    delays, d = tcl_delays(sdc(binding(), budget)), 0.05
+    late, early = corner_delays(budget, "output")
+    assert delays["output -max"] == pytest.approx(
+        max(3 + (pad + clk) * (1 + d) for pad, clk in late)
+    )
+    assert delays["output -min"] == pytest.approx(
+        min(3 + (pad + clk) * (1 - d) for pad, clk in early)
+    )
+    # The slow corner bounds the latest, the fast the earliest.
     assert delays["output -max"] == pytest.approx(3 + (7.5 + 0.75) * (1 + d))
-    assert delays["output -min"] == pytest.approx(3 + (fast.output_min + 0.25) * (1 - d))
+    assert delays["output -min"] == pytest.approx(3 + (2.5 + 0.25) * (1 - d))
 
 
-def test_a_pad_without_an_arc_gets_no_delay_and_stays_untimed_at_the_ports(tmp_path):
+def test_without_a_clock_pad_the_clock_takes_nothing_off(tmp_path, halfway):
+    """A chip without a clock is timed against a virtual clock, which has no pad: only the
+    data pads' own delays come off the budget."""
+    pads = {
+        "south": (Pad("signal", "a"), Pad("vdd"), Pad("vss")),
+        "east": (Pad("signal", "y"), Pad("iovdd"), Pad("iovss")),
+    }
+    ports = {"a": Port("a", "input", 1), "y": Port("y", "output", 1)}
+    b = bind(ChipConfig("c", pads, (), 100.0, None), ports, {}, {}, (), "core")
+    budget = iotiming.core_budget(budget_dir(tmp_path), halfway)
+    text = netlist.sdc(b, {}, budget)
+    assert "create_clock -name __VIRTUAL_CLK__" in text
+    delays, d = tcl_delays(text), 0.05
+    assert delays["input -max"] == pytest.approx(2 + 3.0 * (1 + d))
+    assert delays["input -min"] == pytest.approx(2 + 0.25 * (1 - d))
+    assert delays["output -max"] == pytest.approx(3 + 7.5 * (1 + d))
+    assert delays["output -min"] == pytest.approx(3 + 2.5 * (1 - d))
+
+
+@pytest.mark.parametrize("missing", ["input", "output"])
+def test_a_pad_without_an_arc_gets_no_delay_and_stays_untimed_at_the_ports(tmp_path, missing):
+    """A pad type whose IO cell has no arc adds nothing to the core's budget, so its pins
+    get the world outside alone, as before the budget, and the timing at the ports still
+    lists it as untimed and fails the chip."""
     numbers = iotiming.budget(IoBudget(), 10.0)
-    budget = iotiming.core_budget(budget_dir(tmp_path, out_arc=False), numbers)
-    assert all(p.output_max is None for p in budget.pads)
+    io_dir = budget_dir(tmp_path, in_arc=missing != "input", out_arc=missing != "output")
+    budget = iotiming.core_budget(io_dir, numbers)
     delays = tcl_delays(sdc(binding(), budget))
-    # The output pads' budget is the world outside alone, as before; the timing at the
-    # ports still lists the pad as untimed and fails the chip (missing_arcs).
-    assert delays["output -max"] == pytest.approx(2.0) == delays["output -min"]
-    lib = (tmp_path / "io" / "sg13g2_io_slow_1p08V_3p0V_125C.lib").read_text()
-    assert "sg13g2_IOPadOut4mA" in iotiming.missing_arcs(lib, ["sg13g2_IOPadOut4mA"])
+    cell = PAD_CELL[missing]
+    if missing == "input":
+        # Without the input pad's arc there is no clock pad delay either.
+        assert all(p.input_max is p.input_min is p.clock is None for p in budget.pads)
+        assert delays["input -max"] == pytest.approx(2.0) == delays["input -min"]
+        assert delays["output -max"] > 2.0
+    else:
+        assert all(p.output_max is p.output_min is None for p in budget.pads)
+        assert delays["output -max"] == pytest.approx(2.0) == delays["output -min"]
+        assert delays["input -max"] > 2.0
+    lib = (io_dir / "sg13g2_io_slow_1p08V_3p0V_125C.lib").read_text()
+    assert list(iotiming.missing_arcs(lib, PAD_CELL.values())) == [cell]
+    ok, summary = assemble.verdict(chip_data(untimed_pads=[f"{cell} has no arc"]))
+    assert not ok and f"not timed: {cell}" in summary
+
+
+def test_the_ports_take_the_world_outside_alone_so_the_pads_count_once(tmp_path):
+    """The core's constraints take the pads' delays off its budget; the timing at the
+    ports has the pads in its paths, through IHP's liberty, so its constraints are
+    chip.io's numbers as they are, whatever the pads' delays."""
+    b = binding()
+    numbers = iotiming.budget(IoBudget(input_delay_ns=1.5, output_delay_ns=2.5), 10.0)
+    core = tcl_delays(sdc(b, iotiming.core_budget(budget_dir(tmp_path), numbers)))
+    assert core["input -max"] > 1.5 and core["output -max"] > 2.5
+    ports = iotiming.signoff_sdc(b, {"clk": 10.0}, numbers, 0.25, 5)
+    delays = [ln.split()[:2] for ln in ports.splitlines() if ln.startswith("set_")]
+    assert ["set_input_delay", "1.5"] in delays and ["set_output_delay", "2.5"] in delays
+    assert not any(m in ports for m in ("-max", "-min", "$derate", "expr"))
+
+
+def test_ihps_pads_are_read_at_the_edge_and_the_load(tmp_path):
+    """IHP's delay tables have the input edge on their first axis and the load on their
+    second, as ``lookup`` reads them; the slow corner's pads are the slowest."""
+    pdk = io.pdk_dir()
+    if pdk is None:
+        pytest.skip("IHP-Open-PDK is not installed")
+    io_dir = pdk / "libs.ref" / "sg13g2_io" / "lib"
+    for process, volts, temp in SIGNOFF:
+        text = iotiming.io_library(io_dir, process, volts, temp).read_text()
+        for cell in iotiming.PAD_ARCS:
+            body = iotiming._first(iotiming._plain_liberty(text), "cell", cell)
+            for template in set(re.findall(r"\bcell_(?:rise|fall)\s*\(\s*(\w+)\s*\)", body)):
+                head = re.search(
+                    rf"lu_table_template\s*\(\s*{template}\s*\)\s*\{{([^}}]*)\}}", text
+                )
+                assert head is not None, template
+                assert re.search(r"variable_1\s*:\s*input_net_transition\s*;", head.group(1))
+                assert re.search(
+                    r"variable_2\s*:\s*total_output_net_capacitance\s*;", head.group(1)
+                )
+    budget = iotiming.core_budget(io_dir, iotiming.budget(IoBudget(), 10.0))
+    by = {p.corner: p for p in budget.pads}
+    for field in ("input_max", "input_min", "clock", "output_max", "output_min"):
+        assert getattr(by["fast"], field) < getattr(by["typ"], field) < getattr(by["slow"], field)
 
 
 def sdc(b, budget) -> str:
-    from chipleap.chip import netlist
-
     return netlist.sdc(b, {"clk": 10.0}, budget)
 
 
