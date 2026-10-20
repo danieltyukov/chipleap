@@ -12,7 +12,9 @@ A bundle carries everything X-HEEP needs: a configuration for its generator, the
 - the code and data linker sections (X-HEEP's default 58 KiB of code, less when the banks are small);
 - the external slave window: X-HEEP's default 1 GiB at `0xC0000000`, or 2 GiB at `0x80000000` when more than 1 GiB lives in external memory.
 
-Everything else (peripherals, interrupts, address map) is X-HEEP's default. Generate the MCU with:
+- the peripherals: X-HEEP's default without the SPI host, the I2C, the second SPI host (SPI2) and the I2S, which nothing in ChipLeap's model uses and which are most of X-HEEP's logic (the two SPI hosts about 62 kGE each on IHP SG13G2); the DMA with one master port, as the model's DMA moves 4 bytes per cycle, and two channels.
+
+The interrupts, the address map and the pads (`configs/pad_cfg.py`) are X-HEEP's default; the pads keep the pins of the peripherals left out, since X-HEEP's MCU template wires them whatever it has. Generate the MCU with:
 
 ```sh
 make mcu-gen X_HEEP_CFG=<bundle>/xheep/<name>.py
@@ -31,7 +33,7 @@ make mcu-gen X_HEEP_CFG=<bundle>/xheep/<name>.py
 | `wr_req_o`, `wr_resp_i` | one more external master |
 | `irq_o` | a free fast interrupt |
 
-The accelerator reads activations from the SRAM banks and weights from wherever they live. With the NtoM bus and interleaved banks, each read port moves a word per cycle. For weights in external memory, the memory controller sits behind X-HEEP's external slave port(s). It needs as many slave ports as the accelerator has read ports to reach the bandwidth the model assumed, or a wider AXI path through X-HEEP's OBI-to-AXI bridge.
+The accelerator reads activations from the SRAM banks and weights from wherever they live. With the NtoM bus and interleaved banks, each read port moves a word per cycle. For weights in external memory, the model assumes the accelerator streams them through its own ports, with the memory controller exposing as many slave ports as the accelerator has read ports. X-HEEP does not route its external masters there: its crossbar reaches the banks, the peripherals, the debug module and the flash, and only its own masters (the CPU, the debug module and the DMA) have ports to the external slave window, one each. An integrator connects the accelerator's masters to the memory controller beside X-HEEP's, or the DMA copies weights into the banks first, which the model does not price.
 
 `rtl/chipleap_accel.core` is a FuseSoC core file for the three RTL files; add it to your top level's core alongside `openhwgroup.org:systems:core-v-mini-mcu`.
 

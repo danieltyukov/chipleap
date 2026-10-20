@@ -431,3 +431,18 @@ def test_pins_go_west_and_east_within_the_band():
     # Virtual pins fill the edge beside each macro row, in proportion to its height.
     below = int(lines[west + 1][1:])
     assert 0 < below < 36 and "#N" not in cfg and "#S" not in cfg
+
+
+def test_the_soc_reports_setup_and_hold_at_every_corner():
+    from chipleap.verify.run import corner_slacks
+
+    metrics = {
+        "timing__setup__ws__corner:nom_slow_1p08V_125C": 0.51,
+        "timing__hold__ws__corner:nom_slow_1p08V_125C": 0.2,
+        "timing__hold__ws__corner:min_fast_1p32V_m40C": 0.04,
+        "timing__setup__ws": 0.51,
+    }
+    assert corner_slacks(metrics) == {
+        "min_fast_1p32V_m40C": {"hold": 0.04},
+        "nom_slow_1p08V_125C": {"setup": 0.51, "hold": 0.2},
+    }

@@ -6,11 +6,12 @@ This page lists what ChipLeap models, every number it uses and where each comes 
 
 `chipleap.model.evaluate.evaluate(workload, design)`:
 
-1. Places data: firmware, then live activations, then the KV cache, then weights go into on-chip SRAM until it is full. Whatever is left goes to external memory.
-2. Works out the bandwidth of each data path (on-chip SRAM, external memory, the CPU's DMA).
-3. Times every operator: matrix multiplies on the accelerator with the tile schedule below (or on the CPU when there is no accelerator or its PEs are too narrow), element-wise operators and requantization on the CPU.
-4. Adds up energy (MACs, buffers, SRAM, external memory, CPU, leakage) and area (CPU, SoC logic, bus, SRAM macros, accelerator, memory interface).
-5. Checks feasibility and returns violations in words.
+1. Picks the clock: the design's, or on an X-HEEP SoC on IHP SG13G2 what the SoC meets, when that is lower ([the SoC's clock](#the-socs-clock)). The CPU, its bus and the accelerator share it.
+2. Places data: firmware, then live activations, then the KV cache, then weights go into on-chip SRAM until it is full. Whatever is left goes to external memory.
+3. Works out the bandwidth of each data path (on-chip SRAM, external memory, the CPU's DMA).
+4. Times every operator: matrix multiplies on the accelerator with the tile schedule below (or on the CPU when there is no accelerator or its PEs are too narrow), element-wise operators and requantization on the CPU.
+5. Adds up energy (MACs, buffers, SRAM, external memory, CPU, leakage) and area (CPU, SoC logic, bus, SRAM macros, accelerator, memory interface).
+6. Checks feasibility and returns violations in words.
 
 Each operator records which component bounds it (compute, external memory, accelerator ports, on-chip memory, control), and the time shares add up to the step time. Weights streamed from external memory count against the accelerator's ports instead of the memory when the ports, at 32 bits per cycle each, take in less than the memory can sustain: then more ports or a faster clock helps, and a faster memory does not. That is what the agent reads when it names a bottleneck.
 
@@ -73,7 +74,7 @@ The DMA deals the words of a transfer to the read ports in turn: port `p` reads 
 ### Bandwidth
 
 - On chip: each 32-bit port moves one word per cycle. A continuous X-HEEP bank serves one word per cycle however many masters ask; interleaved banks spread consecutive words, so `min(ports, interleaved banks)` words per cycle reach the accelerator. The one-to-many bus allows one master at a time, so several ports need the many-to-many (NtoM) bus.
-- External: `min(memory sustained bandwidth x channels, 4 bytes x ports x clock)`. The memory controller has to expose as many slave ports as the accelerator has read ports.
+- External: `min(memory sustained bandwidth x channels, 4 bytes x ports x clock)`. The memory controller has to expose as many slave ports as the accelerator has read ports, and the accelerator's masters have to reach it, which inside X-HEEP they do not ([known limitations](#known-limitations)).
 - The CPU's DMA moves at most 4 bytes per cycle.
 - First-word latency: 2 cycles on chip, 60 ns plus 4 cycles off chip.
 
@@ -179,5 +180,6 @@ The bandwidth bound is what decode tracks, and published systems confirm it. For
 - The CPU kernel cycle counts and core areas are estimates.
 - Logic energies outside IHP SG13G2 are scaled, not measured.
 - Bank conflicts between the CPU, the DMA and the accelerator are not modelled; the accelerator is assumed to own its interleaved banks while it runs.
+- Weights in external memory stream to the accelerator through its own ports. X-HEEP's crossbar does not route its external masters, the accelerator's, to its external slave window: only the CPU, the debug module and the DMA have ports there. In ChipLeap's SoC the accelerator reaches the banks and the peripherals, and weights in external memory reach it only after the DMA copies them into a bank, which the model does not price; a chip that streams them needs the memory controller on the accelerator's masters, beside X-HEEP.
 - The CPU and the accelerator do not overlap work within a step.
 - Power is reported at full throughput; a duty-cycled always-on design draws proportionally less, plus leakage.

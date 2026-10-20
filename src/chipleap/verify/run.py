@@ -277,6 +277,17 @@ def _checks(r: pnr.PnrResult) -> tuple[str, bool]:
     return text, r.clean and drv == 0
 
 
+def corner_slacks(metrics: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """The worst setup and hold slack at each corner LibreLane signed off at."""
+    out: dict[str, dict[str, float]] = {}
+    for key, value in metrics.items():
+        for kind in ("setup", "hold"):
+            prefix = f"timing__{kind}__ws__corner:"
+            if key.startswith(prefix) and isinstance(value, (int, float)):
+                out.setdefault(key[len(prefix) :], {})[kind] = round(float(value), 3)
+    return dict(sorted(out.items()))
+
+
 def place_route_soc(
     design: Design,
     bundle: Path,
@@ -345,6 +356,7 @@ def place_route_soc(
         "setup_slack_typ_ns": round(r.setup_slack_typ_ns, 3),
         "setup_slack_ns": round(r.setup_slack_ns, 3),
         "hold_slack_ns": round(r.hold_slack_ns, 3),
+        "slack_by_corner_ns": corner_slacks(r.metrics),
         "fmax_mhz": round(r.fmax_mhz, 1),
         "fmax_worst_mhz": round(r.fmax_worst_mhz, 1),
         "drc_errors": r.drc_errors,
