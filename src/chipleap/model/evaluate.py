@@ -26,9 +26,16 @@ from chipleap.hw.tech import (
 from chipleap.model.accel import Bandwidth, TilingError, job_timing
 from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workload
 
-# Logic outside the CPU, memories and accelerator: debug module, DMA, boot ROM, power
-# manager, timers, interrupt controllers, UART, SPI, I2C, GPIO, pad control.
-XHEEP_BASE_KGE = 110.0
+# X-HEEP's logic outside the CPU, its bus, the memories and the accelerator, as ChipLeap
+# configures it (chipleap.gen.xheep): the debug module with its SPI slave, the DMA, the
+# flash's SPI host and controller, boot ROM, power manager, timers, interrupt controllers,
+# GPIO, UART and pad control. Measured on the SmolLM2 SoC with Yosys and ABC against
+# IHP SG13G2's typical liberty, the hierarchy kept: 208.4 kGE of X-HEEP's 288.0, besides
+# the CPU (33.9), the accelerator (39.6) and the one-to-many bus (6.1). With X-HEEP's
+# default peripherals (two more SPI hosts, I2C, I2S, a DMA with two master ports) it was
+# 401.8 kGE.
+XHEEP_BASE_KGE = 208.4
+ONE_TO_M_BUS_KGE = 6.1
 # Area entries that make up the generated accelerator IP (see Evaluation.ip_area).
 IP_AREA_KEYS = ("accelerator logic", "accelerator buffers", "axi adapter")
 # Firmware code, data and stack kept in the first banks.
@@ -494,7 +501,7 @@ def area_breakdown(
     area["cpu"] = tech.logic_mm2(cpu.kge)
     masters = 4 + 2 + (d.accel.ports + 1 if d.accel else 0)
     slaves = d.banks + d.il_banks + 6
-    bus_kge = 8.0 if d.bus == "onetoM" else 0.6 * masters * slaves
+    bus_kge = ONE_TO_M_BUS_KGE if d.bus == "onetoM" else 0.6 * masters * slaves
     area["soc logic"] = tech.logic_mm2(XHEEP_BASE_KGE + bus_kge)
     area["sram"] = d.banks * bank_mm2(d.bank_kib, tech) + d.il_banks * bank_mm2(d.il_bank_kib, tech)
     if d.accel:
