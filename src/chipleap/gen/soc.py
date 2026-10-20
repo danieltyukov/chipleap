@@ -5,11 +5,12 @@ leaves to a technology, written for IHP SG13G2.
 - ``chipleap_soc``, the top. The accelerator's read and write masters are X-HEEP's
   external crossbar masters, its registers the external peripheral slave and its
   interrupt the external peripheral interrupt, as the datasheet tells an integrator.
-  Every other port of ``core_v_mini_mcu`` that a chip brings out (the pads' signals, the
-  external memory's OBI ports, the pad control bus) is a port of the top, with X-HEEP's
-  own types; the rest is tied off as a chip without coprocessor, external power domains
-  or hardware FIFOs ties it (``TIED`` and ``OPEN``). A port this module does not know
-  stops it, so a different X-HEEP cannot be wired by guess.
+  Every other port of ``core_v_mini_mcu`` that a chip brings out (the pads' signals of
+  the peripherals the configuration has, the external memory's OBI ports that something
+  uses, ``EXT_SLAVE_USED``, the pad control bus) is a port of the top, with X-HEEP's own
+  types; the rest is tied off as a chip without coprocessor, external power domains or
+  hardware FIFOs ties it (``TIED``, ``OPEN`` and ``ABSENT_PINS``). A port this module
+  does not know stops it, so a different X-HEEP cannot be wired by guess.
 - ``sram_wrapper``, X-HEEP's bank, in IHP's single-port macros with a bit mask
   (``chipleap.macro.sram.choose``), for each bank size the design has: X-HEEP writes
   bytes, and a macro without ``A_BM`` cannot.
@@ -66,6 +67,13 @@ OPEN = {
     "peripheral_subsystem_powergate_switch_no": "peripheral_subsystem_powergate_switch_n",
     "external_subsystem_powergate_switch_no": "external_subsystem_powergate_switch_n",
 }
+# The pads' signals of peripherals X-HEEP's default pads have and ChipLeap's configuration
+# does not (``chipleap.gen.xheep.REMOVED``: the SPI host, I2C, SPI2 and I2S), and of the
+# PDM2PCM and the serial link, which X-HEEP's default configuration leaves out too. The
+# MCU keeps the ports, since its template wires them whatever it has; the top ties their
+# inputs low and leaves their outputs open.
+TIE_LOW = "'0"
+ABSENT_PINS = ("spi_sck_", "spi_cs_", "spi_sd_", "spi2_", "i2c_", "i2s_", "pdm2pcm_", "ddr_")
 # The accelerator's connections.
 ACCEL = {
     "ext_xbar_master_req_i": "acc_obi_req",
@@ -83,23 +91,24 @@ TYPES = {
     "fifo_req_t": "xheep_fifo_pkg::xheep_fifo_req_t",
     "fifo_rsp_t": "xheep_fifo_pkg::xheep_fifo_rsp_t",
 }
-# Through the top: X-HEEP's own types, only on these ports.
-THROUGH_TYPED = {
-    "pad_req_o",
-    "pad_resp_i",
-    "ext_core_instr_req_o",
-    "ext_core_instr_resp_i",
-    "ext_core_data_req_o",
-    "ext_core_data_resp_i",
-    "ext_debug_master_req_o",
-    "ext_debug_master_resp_i",
-    "ext_dma_read_req_o",
-    "ext_dma_read_resp_i",
-    "ext_dma_write_req_o",
-    "ext_dma_write_resp_i",
-    "ext_dma_addr_req_o",
-    "ext_dma_addr_resp_i",
-}
+# Through the top: X-HEEP's own types, only on these ports and those of EXT_SLAVE_USED.
+THROUGH_TYPED = {"pad_req_o", "pad_resp_i"}
+# X-HEEP's ports to its external slave window, where the external memory is: one OBI port
+# per master of its bus (``<name>_req_o``, ``<name>_resp_i``), with no crossbar among
+# them. In ChipLeap's model the CPU's data port and the DMA use the external memory (the
+# CPU reads and writes data there, the DMA moves data between it and the banks). The
+# firmware runs from the banks; the debug module and the DMA's address port, its address
+# mode off, have nothing there. Their ports, and every port of a design without external
+# memory, are tied off inside the top as X-HEEP ties its own absent slave: never granted.
+EXT_SLAVES = (
+    "ext_core_instr",
+    "ext_core_data",
+    "ext_debug_master",
+    "ext_dma_read",
+    "ext_dma_write",
+    "ext_dma_addr",
+)
+EXT_SLAVE_USED = ("ext_core_data", "ext_dma_read", "ext_dma_write")
 
 _HEADER_RE = re.compile(rf"\bmodule\s+{MCU}\s*#\s*\((.*?)\)\s*\((.*?)\);", re.S)
 _PORT_RE = re.compile(r"^(input|output)\s+(\w+)\s*((?:\[[^\]]+\]\s*)*)([A-Za-z_]\w*)$")
@@ -153,13 +162,27 @@ def _strip_comments(text: str) -> str:
     return re.sub(r"//[^\n]*", "", text)
 
 
-def top_sv(ports: Sequence[Port], accel_ports: int, accel_module: str = banks.TOP) -> str:
+def top_sv(
+    ports: Sequence[Port],
+    accel_ports: int,
+    accel_module: str = banks.TOP,
+    ext_memory: bool = True,
+) -> str:
     """``chipleap_soc``: ``core_v_mini_mcu`` and the accelerator (``accel_module``, the
-    flat ports of ``chipleap_accel``, one OBI master per read port and one for writes)."""
+    flat ports of ``chipleap_accel``, one OBI master per read port and one for writes).
+    With ``ext_memory`` the ports of ``EXT_SLAVE_USED`` are ports of the top; the other
+    external slave ports are tied off."""
     names = {p.name for p in ports}
     for known in ACCEL:
         if known not in names:
             raise SocError(f"{MCU} has no port {known}, which the accelerator needs")
+    tied, open_, through = dict(TIED), dict(OPEN), set(THROUGH_TYPED)
+    for slave in EXT_SLAVES:
+        if ext_memory and slave in EXT_SLAVE_USED:
+            through |= {f"{slave}_req_o", f"{slave}_resp_i"}
+        else:
+            tied[f"{slave}_resp_i"] = "'0"
+            open_[f"{slave}_req_o"] = ""
     head: list[str] = []
     conns: list[str] = []
     for p in ports:
@@ -167,11 +190,13 @@ def top_sv(ports: Sequence[Port], accel_ports: int, accel_module: str = banks.TO
             conns.append(f".{p.name}(xif)")
         elif p.name in ACCEL:
             conns.append(f".{p.name}({ACCEL[p.name]})")
-        elif p.name in TIED:
-            conns.append(f".{p.name}({TIED[p.name]})")
-        elif p.name in OPEN:
-            conns.append(f".{p.name}({OPEN[p.name]})")
-        elif p.kind == "logic" or p.name in THROUGH_TYPED:
+        elif p.name in tied:
+            conns.append(f".{p.name}({tied[p.name]})")
+        elif p.name in open_:
+            conns.append(f".{p.name}({open_[p.name]})")
+        elif p.kind == "logic" and p.name.startswith(ABSENT_PINS):
+            conns.append(f".{p.name}({TIE_LOW if p.direction == 'input' else ''})")
+        elif p.kind == "logic" or p.name in through:
             if p.kind != "logic" and p.kind not in TYPES:
                 raise SocError(f"port {p.name} of {MCU} has an unknown type {p.kind}")
             kind = "logic" if p.kind == "logic" else TYPES[p.kind]

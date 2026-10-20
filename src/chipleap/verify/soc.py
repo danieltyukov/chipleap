@@ -35,6 +35,7 @@ import yaml
 from chipleap.gen import banks, soc
 from chipleap.gen.rtl import accel_sv
 from chipleap.hw.design import Design
+from chipleap.hw.memory import NONE_KEY
 from chipleap.hw.tech import get_tech
 from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
@@ -297,7 +298,9 @@ def generate(
         "sram_wrapper.sv": soc.sram_wrapper_sv(plans),
         "chipleap_accel.sv": accel_sv(),
         f"{banks.TOP}.v": banks.top_sv(accel_banks),
-        f"{soc.TOP}.sv": soc.top_sv(ports, design.accel.ports),
+        f"{soc.TOP}.sv": soc.top_sv(
+            ports, design.accel.ports, ext_memory=design.ext_mem != NONE_KEY
+        ),
     }
     for name, text in out.items():
         builddir.write_text(src, name, text)
@@ -400,6 +403,8 @@ def pin_order(inputs: int, outputs: int, fp: place.Floorplan, heights: dict[str,
     return "\n".join(lines) + "\n"
 
 
+# The layout of the SoC takes 6 to 10 hours on 22 cores, most of it in detailed routing.
+TIMEOUT_S = 86400
 SDC = "chipleap_soc.sdc"
 PINS = "pins.cfg"
 # The step LibreLane's Classic flow runs after synthesis: the layout run resumes there.
@@ -569,7 +574,7 @@ def place_and_route(
     cfg, prep = prepare(design, config_text, checkout, work, pdk, clock)
     model_cells, model_macros = model_areas_um2(design)
     first, _ = with_floorplan(cfg, prep, model_cells, work)
-    pnr.run_librelane(work, first, to="Yosys.Synthesis")
+    pnr.run_librelane(work, first, to="Yosys.Synthesis", timeout_s=TIMEOUT_S)
     run = work / "runs" / "chipleap"
     if problems := netlist_problems(run):
         raise SocError(f"Yosys's check of the synthesized netlist found {problems}")
@@ -577,7 +582,7 @@ def place_and_route(
     if synth <= 0:
         raise SocError("LibreLane's synthesis reported no standard-cell area")
     full, _ = with_floorplan(cfg, prep, synth, work)
-    metrics, gds = pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS)
+    metrics, gds = pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S)
     from chipleap.rtl.pnr import check_merged
 
     check_merged(run, work, soc.TOP)

@@ -25,6 +25,11 @@ module core_v_mini_mcu #(
     input logic clk_i,
     input logic uart_rx_i,
     output logic uart_tx_o,
+    input logic spi_flash_sck_i,
+    input logic spi_sck_i,
+    output logic spi_sck_o,
+    output logic i2s_sck_oe_o,
+    input logic ddr_rcv_clk_i,
     output logic [31:0] exit_value_o,
     input logic [31:0] hart_id_i,
     if_xif.cpu_issue xif_issue_if,
@@ -34,6 +39,10 @@ module core_v_mini_mcu #(
     output obi_rsp_t  [EXT_XBAR_NMASTER_RND-1:0] ext_xbar_master_resp_o,
     output obi_req_t  [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0] ext_dma_read_req_o,
     input  obi_rsp_t  [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0] ext_dma_read_resp_i,
+    output obi_req_t  [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0] ext_dma_addr_req_o,
+    input  obi_rsp_t  [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0] ext_dma_addr_resp_i,
+    output obi_req_t ext_core_instr_req_o,
+    input  obi_rsp_t ext_core_instr_resp_i,
     output reg_req_t ext_peripheral_slave_req_o,
     input  reg_rsp_t ext_peripheral_slave_resp_i,
     input logic intr_ext_peripheral_i,
@@ -70,9 +79,24 @@ def test_the_top_wires_the_accelerator_and_brings_the_rest_out():
         "output xheep_obi_pkg::xheep_obi_req_t [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0]"
         " ext_dma_read_req_o" in head
     )
-    # Tied, open, the interface and the accelerator's connections are not ports.
-    for name in ("hart_id_i", "dma_done_o", "xif_issue_if", "ext_xbar_master_req_i"):
+    # Tied, open, the interface and the accelerator's connections are not ports, nor are
+    # the external slave ports nothing uses: the instruction port and the DMA's address port.
+    for name in (
+        "hart_id_i",
+        "dma_done_o",
+        "xif_issue_if",
+        "ext_xbar_master_req_i",
+        "ext_core_instr_req_o",
+        "ext_dma_addr_resp_i",
+    ):
         assert name not in head
+    assert ".ext_core_instr_resp_i('0)" in top and ".ext_core_instr_req_o()" in top
+    # The pins of peripherals the configuration leaves out are tied off; the flash's stay.
+    assert "input logic spi_flash_sck_i" in head
+    for name in ("spi_sck_i", "spi_sck_o", "i2s_sck_oe_o", "ddr_rcv_clk_i"):
+        assert name not in head
+    assert ".spi_sck_i('0)" in top and ".spi_sck_o()" in top and ".ddr_rcv_clk_i('0)" in top
+    assert ".ext_dma_addr_resp_i('0)" in top and ".ext_dma_addr_req_o()" in top
     assert ".EXT_XBAR_NMASTER(2)" in top
     assert ".ext_xbar_master_req_i(acc_obi_req)" in top
     assert ".ext_peripheral_slave_req_o(acc_reg_req)" in top
@@ -85,6 +109,14 @@ def test_the_top_wires_the_accelerator_and_brings_the_rest_out():
     # The write port is the master after the read ports.
     assert "assign acc_obi_req[1].we = 1'b1;" in top
     assert f"{banks.TOP} {soc.ACCEL_INST} (" in top
+
+
+def test_without_external_memory_every_external_slave_port_is_tied_off():
+    top = soc.top_sv(soc.mcu_ports(MCU), accel_ports=1, ext_memory=False)
+    head = top[: top.index(");")]
+    assert "ext_dma_read" not in head and "ext_core_instr" not in head
+    assert ".ext_dma_read_resp_i('0)" in top and ".ext_dma_read_req_o()" in top
+    assert "pad_req_o" in head
 
 
 def test_a_port_the_top_does_not_know_stops_it():
