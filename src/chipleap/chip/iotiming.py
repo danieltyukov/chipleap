@@ -569,14 +569,12 @@ def run(
     spef = _inside(
         run_dir / "final" / "spef" / "nom" / f"{name}.nom.spef", run_dir, f"{name}.nom.spef"
     )
+    # The nominal corner's tech LEF: LibreLane 3.0.0.dev44 names one per corner
+    # ("nom_*"), LibreLane 3.0 one for all of them ("*").
     tech = resolved.get("TECH_LEFS")
-    tech_lef = next(
-        (
-            v
-            for k, v in (tech.items() if isinstance(tech, dict) else [])
-            if str(k).startswith("nom")
-        ),
-        None,
+    techs = list(tech.items()) if isinstance(tech, dict) else []
+    tech_lef = next((v for k, v in techs if str(k).startswith("nom")), None) or next(
+        (v for k, v in techs if k == "*"), None
     )
     cell_lefs = resolved.get("CELL_LEFS")
     if tech_lef is None or not isinstance(cell_lefs, list) or not cell_lefs:
