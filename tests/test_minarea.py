@@ -468,6 +468,38 @@ def test_a_second_part_that_stops_is_not_read_from_the_first_parts_final(
     assert not (run / "final").exists() and (run / pnr.ROUTED_FINAL / "metrics.json").is_file()
 
 
+def test_a_first_part_that_stops_names_the_step_it_stopped_in(tmp_path, monkeypatch):
+    """OpenROAD crashed in the repair after clock-tree synthesis: the error says so,
+    not that detailed routing failed."""
+    (tmp_path / "librelane").write_text("#!/bin/sh\n")
+    (tmp_path / "librelane").chmod(0o755)
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(tmp_path / "librelane"))
+
+    def fake(cmd, workdir, log, timeout, limit, env):
+        run = workdir / "runs" / "chipleap"
+        run.mkdir(parents=True)
+        (run / "flow.log").write_text(
+            "Running 'OpenROAD.CTS' at 'runs/chipleap/31-openroad-cts'…\n"
+            "Running 'OpenROAD.ResizerTimingPostCTS' at "
+            "'runs/chipleap/33-openroad-resizertimingpostcts'…\n"
+            "[RSZ-0064] Unable to repair all hold checks within margin.\n"
+        )
+        log.write_text("Signal 11 received\n")
+        return 1
+
+    monkeypatch.setattr(pnr, "_librelane", fake)
+    (tmp_path / "pnr").mkdir()
+    with pytest.raises(pnr.PnrError) as err:
+        pnr.run_librelane(tmp_path / "pnr", {})
+    first = str(err.value).splitlines()[0]
+    assert first == (
+        "LibreLane stopped in OpenROAD.ResizerTimingPostCTS, before detailed routing "
+        "finished (exit 1):"
+    )
+    assert "Signal 11" in str(err.value)
+    assert pnr.last_step(tmp_path / "nowhere") == ""
+
+
 def test_a_second_part_that_ends_on_an_error_is_not_read(tmp_path, monkeypatch):
     def second(run, log):
         _finishes({"timing__setup__ws": 0.5})(run, log)

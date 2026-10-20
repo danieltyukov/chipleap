@@ -461,6 +461,20 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
         **pnr.signoff(),
+        # The SoC's wires are millimetres long, and the extraction after detailed routing
+        # puts 14 to 20 % more capacitance on them than the global router's estimate that
+        # the repairs work against: at 50 MHz a 0.0576 pF net (LibreLane's 10 % margin
+        # under an SRAM output's 0.064 pF) came out 0.0657 pF, and hold at the fast corner
+        # lost up to 0.1 ns. The repair after global routing keeps that much margin.
+        "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 25,
+        "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 25,
+        "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.2,
+        # The clock tree hangs the accelerator's macros, at the top and bottom of the core,
+        # and X-HEEP's clock gates on one net of its first level, about 3 mm of wire on a
+        # buf_8: 0.73 ns at the macros' clock pins after routing, against their 0.595 ns
+        # limit. IHP's strongest buffer drives the tree's long nets.
+        "CTS_CLK_BUFFERS": [f"sg13g2_buf_{n}" for n in (16, 8, 4, 2, 1)],
+        "CTS_ROOT_BUFFER": "sg13g2_buf_16",
     }
 
 

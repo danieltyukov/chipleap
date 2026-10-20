@@ -386,9 +386,13 @@ def run_librelane(
         raise PnrError(str(exc)) from None
     routed = step_state(run, DETAILED_ROUTING)
     if routed is None:
-        raise PnrError(
-            f"LibreLane did not finish detailed routing (exit {code}):\n{_tail(route_log)}"
+        stopped = last_step(run)
+        where = (
+            f"stopped in {stopped}, before detailed routing finished"
+            if stopped
+            else "did not finish detailed routing"
         )
+        raise PnrError(f"LibreLane {where} (exit {code}):\n{_tail(route_log)}")
     rest, state_in = patch_min_area(workdir, run, routed, cfg)
     log = workdir / "librelane.log"
     args = [*base, "--from", rest]
@@ -419,6 +423,19 @@ def _librelane(
 
 def _step_dir(step_id: str) -> str:
     return step_id.replace(".", "-").lower()
+
+
+_RUNNING_RE = re.compile(r"^Running '([^']+)' at ", re.MULTILINE)
+
+
+def last_step(run: Path) -> str:
+    """The step LibreLane started last in ``run``, from its ``flow.log``, which every
+    invocation in the run appends to; empty when the log names none."""
+    try:
+        found = _RUNNING_RE.findall((run / "flow.log").read_text(errors="replace"))
+    except OSError:
+        return ""
+    return found[-1] if found else ""
 
 
 def step_state(run: Path, step_id: str) -> Path | None:
