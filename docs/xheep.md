@@ -33,7 +33,7 @@ make mcu-gen X_HEEP_CFG=<bundle>/xheep/<name>.py
 | `wr_req_o`, `wr_resp_i` | one more external master |
 | `irq_o` | a free fast interrupt |
 
-The accelerator reads activations from the SRAM banks and weights from wherever they live. With the NtoM bus and interleaved banks, each read port moves a word per cycle. For weights in external memory, the model assumes the accelerator streams them through its own ports, with the memory controller exposing as many slave ports as the accelerator has read ports. X-HEEP does not route its external masters there: its crossbar reaches the banks, the peripherals, the debug module and the flash, and only its own masters (the CPU, the debug module and the DMA) have ports to the external slave window, one each. An integrator connects the accelerator's masters to the memory controller beside X-HEEP's, or the DMA copies weights into the banks first, which the model does not price.
+The accelerator reads activations from the SRAM banks and weights from wherever they live. With the NtoM bus and interleaved banks, each read port moves a word per cycle. For weights in external memory, the memory controller sits behind X-HEEP's external slave port(s). It needs as many slave ports as the accelerator has read ports to reach the bandwidth the model assumed, or a wider AXI path through X-HEEP's OBI-to-AXI bridge.
 
 `rtl/chipleap_accel.core` is a FuseSoC core file for the three RTL files; add it to your top level's core alongside `openhwgroup.org:systems:core-v-mini-mcu`.
 

@@ -74,7 +74,7 @@ The DMA deals the words of a transfer to the read ports in turn: port `p` reads 
 ### Bandwidth
 
 - On chip: each 32-bit port moves one word per cycle. A continuous X-HEEP bank serves one word per cycle however many masters ask; interleaved banks spread consecutive words, so `min(ports, interleaved banks)` words per cycle reach the accelerator. The one-to-many bus allows one master at a time, so several ports need the many-to-many (NtoM) bus.
-- External: `min(memory sustained bandwidth x channels, 4 bytes x ports x clock)`. The memory controller has to expose as many slave ports as the accelerator has read ports, and the accelerator's masters have to reach it, which inside X-HEEP they do not ([known limitations](#known-limitations)).
+- External: `min(memory sustained bandwidth x channels, 4 bytes x ports x clock)`. The memory controller has to expose as many slave ports as the accelerator has read ports.
 - The CPU's DMA moves at most 4 bytes per cycle.
 - First-word latency: 2 cycles on chip, 60 ns plus 4 cycles off chip.
 
@@ -180,6 +180,5 @@ The bandwidth bound is what decode tracks, and published systems confirm it. For
 - The CPU kernel cycle counts and core areas are estimates.
 - Logic energies outside IHP SG13G2 are scaled, not measured.
 - Bank conflicts between the CPU, the DMA and the accelerator are not modelled; the accelerator is assumed to own its interleaved banks while it runs.
-- Weights in external memory stream to the accelerator through its own ports. X-HEEP's crossbar does not route its external masters, the accelerator's, to its external slave window: only the CPU, the debug module and the DMA have ports there. In ChipLeap's SoC the accelerator reaches the banks and the peripherals, and weights in external memory reach it only after the DMA copies them into a bank, which the model does not price; a chip that streams them needs the memory controller on the accelerator's masters, beside X-HEEP.
 - The CPU and the accelerator do not overlap work within a step.
 - Power is reported at full throughput; a duty-cycled always-on design draws proportionally less, plus leakage.
