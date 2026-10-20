@@ -384,11 +384,19 @@ def with_def_to_odb(cfg: dict[str, Any]) -> dict[str, Any]:
 # SmolLM2 accelerator's write-data nets to its SRAMs (800 um, eight macro pins) too slow
 # at the slow corner and changed nothing: resizing a driver cannot fix a wire, and the
 # length LibreLane derives (about 5 mm) never splits it.
+# The macros' inputs allow a slew of 0.595 ns at the slow corner, a quarter of the standard
+# cells' 2.5 ns, and the estimates repair works from under-read them: in the GEMV 1 x 4
+# build, five activation-bank address pins at 190 um from a weak gate passed repair after
+# global routing with its 10 % margin and came out of detailed routing at up to 0.80 ns. So
+# repair aims at half the limit (MACRO_SLEW_PCT), which only nets near a macro's pins reach.
 MACRO_WIRE_UM = 300
+MACRO_SLEW_PCT = 50
 MACRO_REPAIR = {
     "RUN_POST_GRT_DESIGN_REPAIR": True,
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
+    "DESIGN_REPAIR_MAX_SLEW_PCT": MACRO_SLEW_PCT,
+    "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": MACRO_SLEW_PCT,
 }
 
 
