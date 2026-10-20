@@ -15,6 +15,7 @@ import re
 import statistics
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
-from chipleap.model.evaluate import buffer_mm2
+from chipleap.model.evaluate import buffer_mm2, soc_limit_mhz
 from chipleap.rtl import builddir
 from chipleap.verify import backends, pnr, sim, synth, xheep
 from chipleap.verify.drc import describe_markers
@@ -313,6 +314,7 @@ def place_route_soc(
     # As in the xheep step, X-HEEP's generator runs the configuration ChipLeap writes from
     # design.yaml, never the bundle's own file.
     text, _ = _regenerated_xheep(bundle, design)
+    start = time.monotonic()
     try:
         s = soc.place_and_route(
             design, text, co, builddir.work_dir(bundle, "verify", "soc"), pdk, clock_mhz
@@ -329,9 +331,12 @@ def place_route_soc(
     macros = ", ".join(f"{n} x {c}" for c, n in sorted(counts.items()))
     model = s.model_cell_um2 + s.model_macro_um2
     measured = r.cell_um2 + r.macro_um2
+    limit = soc_limit_mhz(design, get_tech(design.tech))
     data: dict[str, object] = {
         "clock_mhz": clock,
         "design_clock_mhz": design.freq_mhz,
+        "model_soc_limit_mhz": round(limit, 1) if limit else None,
+        "runtime_s": round(time.monotonic() - start),
         "die_um2": round(r.die_um2),
         "core_um2": round(r.core_um2),
         "cell_um2": round(r.cell_um2),
@@ -367,7 +372,8 @@ def place_route_soc(
         f"{'' if clock == design.freq_mhz else f' (the design asks {design.freq_mhz:g})'} "
         f"{'met' if met else 'missed'} at the slow "
         f"corner (about {r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the "
-        f"typical one); {checks}; macros {macros}: {r.macro_um2 / 1e6:.3f} mm2, the model "
+        f"typical one{f'; the model puts the SoC at about {limit:.0f} MHz' if limit else ''}); "
+        f"{checks}; macros {macros}: {r.macro_um2 / 1e6:.3f} mm2, the model "
         f"{s.model_macro_um2 / 1e6:.3f} mm2; standard cells: the model "
         f"{s.model_cell_um2 / 1e6:.3f} mm2"
     )

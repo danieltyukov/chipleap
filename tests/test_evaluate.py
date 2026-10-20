@@ -175,3 +175,38 @@ def test_logic_of_a_macro_backed_engine_has_the_banks_interface():
         assert accel_kge(one, other) == flops
     ws = Accel("ws", 4, 4, 8, ports=1, abuf_kib=2, wbuf_kib=2)
     assert accel_kge(ws, ihp) == accel_logic_kge("ws", 4, 4, 1)
+
+
+SMOL_SOC = Design(
+    tech="ihp-sg13g2",
+    freq_mhz=90,
+    cpu="cv32e20",
+    bus="onetoM",
+    banks=1,
+    bank_kib=32,
+    ext_mem="octal-psram",
+    ext_channels=2,
+    accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2),
+)
+
+
+def test_x_heeps_soc_runs_at_what_it_meets_and_the_accelerator_is_reported_apart(smol):
+    from chipleap.hw.tech import SOC_MEASURED_NS
+    from chipleap.report.text import clock_note
+
+    fast = evaluate(smol, SMOL_SOC)
+    assert fast.soc_limit_mhz == pytest.approx(1000 / SOC_MEASURED_NS)
+    assert fast.soc_mhz == fast.soc_limit_mhz and fast.accel_limit_mhz > 90
+    assert any("X-HEEP reads its SRAM in one cycle" in w for w in fast.warnings)
+    assert clock_note(fast).startswith(f"{fast.soc_mhz:.1f} MHz, what X-HEEP's SoC meets")
+    # The CPU and the accelerator share the clock: the same design asked for the limit.
+    at_limit = evaluate(smol, SMOL_SOC.with_(freq_mhz=fast.soc_mhz))
+    assert at_limit.throughput == pytest.approx(fast.throughput)
+    slow = evaluate(smol, SMOL_SOC.with_(freq_mhz=50))
+    assert slow.soc_mhz == 50 and slow.throughput < fast.throughput
+    assert not any("one cycle" in w for w in slow.warnings)
+    # A smaller bank is a faster macro; the standalone IP and other nodes have no X-HEEP limit.
+    small = evaluate(smol, SMOL_SOC.with_(bank_kib=2, banks=16))
+    assert small.soc_limit_mhz > fast.soc_limit_mhz
+    assert evaluate(smol, SMOL_SOC.with_(platform="standalone")).soc_mhz == 90
+    assert evaluate(smol, SMOL_SOC.with_(tech="generic-65nm")).soc_limit_mhz is None

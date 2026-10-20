@@ -47,6 +47,21 @@ def headline(ev: Evaluation) -> str:
     )
 
 
+def clock_note(ev: Evaluation) -> str:
+    """The clock the SoC runs at and, where they were measured, what X-HEEP's SoC and the
+    accelerator meet on their own after routing, at the slow corner."""
+    d = ev.design
+    accel = (
+        f"the accelerator alone meets about {ev.accel_limit_mhz:.0f}" if ev.accel_limit_mhz else ""
+    )
+    if ev.soc_mhz < d.freq_mhz:
+        notes = [f"the design asks {d.freq_mhz:g}", *([accel] if accel else [])]
+        return f"{ev.soc_mhz:.1f} MHz, what X-HEEP's SoC meets ({'; '.join(notes)})"
+    notes = [f"X-HEEP's SoC meets about {ev.soc_limit_mhz:.0f}"] if ev.soc_limit_mhz else []
+    notes += [accel] if accel else []
+    return f"{d.freq_mhz:g} MHz" + (f" ({'; '.join(notes)})" if notes else "")
+
+
 def ip_note(ev: Evaluation) -> str:
     """On the standalone platform, what is generated and what the model only assumes."""
     if ev.design.platform != "standalone":
@@ -84,6 +99,7 @@ def format_evaluation(ev: Evaluation) -> str:
         f"Design: {ev.design.summary()}",
         f"Workload: {ev.workload.description}",
         f"Result: {headline(ev)}",
+        f"Clock: {clock_note(ev)}",
     ]
     if ev.violations:
         lines += ["", "Cannot work as specified:"] + [f"  {v}" for v in ev.violations]

@@ -215,3 +215,24 @@ def test_the_models_catalog_is_the_pdks():
     if pdk is None:
         pytest.skip("no IHP PDK")
     assert catalog(pdk) == list(IHP_1P)
+
+
+def test_the_soc_clocks_bank_macros_are_the_pdks():
+    """The SoC's clock limit takes each bank macro's clock to output from the PDK's slow
+    liberty: the sharpest clock edge, the largest load in the table."""
+    import re
+
+    from chipleap.chip import io
+    from chipleap.hw.tech import SOC_BANK_CLK_TO_Q_NS
+    from chipleap.macro.sram import LIBRARY
+
+    pdk = io.pdk_dir()
+    if pdk is None:
+        pytest.skip("no IHP PDK")
+    for cell, ns in SOC_BANK_CLK_TO_Q_NS.items():
+        lib = (pdk / "libs.ref" / LIBRARY / "lib" / f"{cell}_slow_1p08V_125C.lib").read_text()
+        dout = lib[lib.index("bus(A_DOUT)") :]
+        arc = dout[re.search(r'related_pin\s*:\s*"A_CLK"', dout).start() :]
+        rise = re.search(r'cell_rise\(\w+\)\s*\{.*?values\s*\(\s*"([^"]+)"', arc, re.S)
+        assert rise is not None, cell
+        assert float(rise.group(1).split(",")[-1]) == pytest.approx(ns, abs=0.001), cell

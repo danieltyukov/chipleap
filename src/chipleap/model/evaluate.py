@@ -21,6 +21,7 @@ from chipleap.hw.tech import (
     accel_bank_kge,
     accel_logic_kge,
     get_tech,
+    soc_signoff_mhz,
 )
 from chipleap.model.accel import Bandwidth, TilingError, job_timing
 from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workload
@@ -84,6 +85,15 @@ class Evaluation:
     warnings: list[str]
     bandwidth: dict[str, float]  # bytes per second of each data path
     severity: int = 0  # weighted violations, see Issues
+    # The clock the SoC runs at, the CPU, its bus and the accelerator alike: the design's,
+    # or less where X-HEEP's SoC cannot meet it (soc_limit_mhz). 0 means the design's.
+    clock_mhz: float = 0.0
+    soc_limit_mhz: float | None = None  # what X-HEEP's SoC meets, where it was measured
+    accel_limit_mhz: float | None = None  # what the accelerator meets on its own
+
+    @property
+    def soc_mhz(self) -> float:
+        return self.clock_mhz or self.design.freq_mhz
 
     @property
     def feasible(self) -> bool:
@@ -500,6 +510,18 @@ def area_breakdown(
     return area
 
 
+def soc_limit_mhz(design: Design, tech: Technology) -> float | None:
+    """The clock X-HEEP's SoC meets after routing at the slow corner, on a node where it was
+    measured (``chipleap.hw.tech.soc_signoff_mhz``, from the macros of the design's banks);
+    None on the standalone platform and other nodes."""
+    if design.platform != "xheep" or not tech.soc_timing:
+        return None
+    from chipleap.macro.sram import IHP_1P, choose
+
+    kibs = [design.bank_kib] + ([design.il_bank_kib] if design.il_banks else [])
+    return soc_signoff_mhz(choose(IHP_1P, int(k * 1024) // 4, 32).macro.cell for k in kibs)
+
+
 def evaluate(
     workload: Workload, design: Design, *, firmware_kib: float = DEFAULT_FIRMWARE_KIB
 ) -> Evaluation:
@@ -507,9 +529,20 @@ def evaluate(
     tech = get_tech(design.tech)
     cpu = get_cpu(design.cpu)
     mem = get_memory(design.ext_mem)
-    f = design.freq_mhz * 1e6
     violations = Issues()
     warnings: list[str] = []
+    # The CPU, its bus and the accelerator share X-HEEP's clock: the design's, unless the
+    # SoC cannot meet it.
+    soc_limit = soc_limit_mhz(design, tech)
+    clock = min(design.freq_mhz, soc_limit) if soc_limit else design.freq_mhz
+    f = clock * 1e6
+    if soc_limit and design.freq_mhz > soc_limit:
+        warnings.append(
+            f"the SoC runs at {clock:.1f} MHz, not {design.freq_mhz:g}: X-HEEP reads its SRAM "
+            f"in one cycle, which closes timing at about {soc_limit:.1f} MHz on {tech.name} "
+            "after routing, at the slow corner"
+        )
+    accel_limit = None
 
     if design.freq_mhz > tech.max_freq_mhz:
         violations.add(
@@ -518,7 +551,7 @@ def evaluate(
         )
     elif design.accel and tech.accel_timing:
         a = design.accel
-        limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows)
+        limit = accel_limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows)
         if design.freq_mhz > limit + 1e-9:
             violations.add(
                 f"the {a.dataflow} {a.rows}x{a.cols} accelerator with {a.ports} port"
@@ -632,4 +665,7 @@ def evaluate(
         severity=violations.severity,
         warnings=warnings,
         bandwidth=bandwidth,
+        clock_mhz=clock,
+        soc_limit_mhz=soc_limit,
+        accel_limit_mhz=accel_limit,
     )

@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from chipleap import __version__
 from chipleap.explore.engine import Candidate, ExploreResult
 from chipleap.model.evaluate import Evaluation
-from chipleap.report.text import headline, ip_note, num
+from chipleap.report.text import clock_note, headline, ip_note, num
 
 BOUND_COLORS = {
     "external memory": "var(--c-ext)",
@@ -260,7 +260,7 @@ def _design_table(c: Candidate) -> str:
     d = c.design
     rows = [
         ("Technology", d.tech),
-        ("Clock", f"{d.freq_mhz:g} MHz"),
+        ("Clock", clock_note(c.evaluation)),
         ("CPU", d.cpu),
         ("Bus", d.bus),
         (
