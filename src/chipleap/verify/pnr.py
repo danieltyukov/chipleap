@@ -17,7 +17,9 @@ logic with 16-word flop buffers, and the result says why.
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -30,6 +32,7 @@ from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.hw.tech import accel_logic_kge, get_tech
 from chipleap.macro import grid, layer, place, sram
+from chipleap.rtl import builddir
 from chipleap.verify import launch, librelane_pdk, minarea
 from chipleap.verify.drc import DrcReportError, DrcResult, pdk_cells, read_lyrdb
 from chipleap.verify.synth import _sv2v
@@ -241,6 +244,83 @@ DEF_TO_ODB = "OpenROAD.DEFtoODB"
 MIN_AREA_DIR = "minarea"
 # Beside config.json: LibreLane resolves dir:: paths and puts runs/ beside the file.
 MIN_AREA_CONFIG = "config.minarea.json"
+# LibreLane writes final/ at the end of each invocation, the first part's too. Before the
+# second part starts, the first part's final/ goes to ROUTED_FINAL beside it (never
+# deleted) and SECOND_PART marks the start, so a run's result is only ever read from a
+# final/ the second part wrote: a second part that stops, or ends on an error, leaves none.
+ROUTED_FINAL = "final-routed"
+SECOND_PART = "chipleap-second-part"
+# No timing analysis gives a worst slack this large; the first part's metrics held
+# -1.3e16 ns at the corners its timing had not reached.
+MAX_SLACK_NS = 1e6
+_SLACK_RE = re.compile(r"timing__(setup|hold)\w*__w(n)?s(__.*)?")
+
+
+def check_metrics(metrics: Mapping[str, Any], clock: Any = None) -> None:
+    """Refuse metrics whose worst slacks are not a timing analysis's: not a number, minus
+    infinity, or a finite slack beyond ``MAX_SLACK_NS``. Plus infinity is a group with no
+    constrained path, such as register to register in a design whose flip-flops all
+    face its ports or a macro; but a design whose worst setup slack is plus infinity had
+    nothing timed at all, against ``clock`` (LibreLane's ``CLOCK_PORT``): a clock that
+    names no port, or constraints that were not read."""
+    setup = metrics.get("timing__setup__ws")
+    if isinstance(setup, float) and setup == math.inf:
+        ports = clock if isinstance(clock, list) else [clock] if clock else []
+        named = " against clock " + ", ".join(str(p) for p in ports) if ports else ""
+        raise PnrError(
+            f"no path was timed{named}: LibreLane's worst setup slack is plus infinity, so "
+            "the clock names no port of the design or its constraints were not read"
+        )
+    for k, v in metrics.items():
+        if not _SLACK_RE.fullmatch(k) or isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v == math.inf:
+            continue
+        if not math.isfinite(v) or abs(v) > MAX_SLACK_NS:
+            raise PnrError(
+                f"LibreLane's metrics give {k} = {v:g} ns, which no timing analysis gives; "
+                "the run's results are not read"
+            )
+
+
+def begin_second_part(run: Path) -> Path:
+    """Set the first part's final/ aside (``ROUTED_FINAL``) and mark the second part's
+    start (``SECOND_PART``, on the run's own file system); returns the marker."""
+    final = run / "final"
+    if final.is_symlink() or (final.exists() and not final.is_dir()):
+        raise PnrError(f"LibreLane's {final} is not a directory")
+    if final.is_dir():
+        aside = run / ROUTED_FINAL
+        if aside.exists() or aside.is_symlink():
+            raise PnrError(f"{aside} is there already, in a run LibreLane's first part made")
+        final.rename(aside)
+    try:
+        return builddir.write_text(run, SECOND_PART, "")
+    except (builddir.BuildDirError, OSError) as exc:
+        raise PnrError(f"cannot mark the second part of the run: {exc}") from None
+
+
+def second_part_result(
+    run: Path, code: int, marker: Path, clock: Any = None
+) -> tuple[dict[str, Any], Path | None] | None:
+    """The metrics and GDS of the second part (``begin_second_part``), or None when it did
+    not finish: LibreLane exited with an error or wrote no final/. A final/ older than the
+    marker, or metrics no timing analysis gives (``check_metrics``, against ``clock``),
+    raise ``PnrError``."""
+    final = run / "final"
+    metrics_file = final / "metrics.json"
+    if code != 0 or final.is_symlink() or not metrics_file.is_file():
+        return None
+    if metrics_file.stat().st_mtime < marker.stat().st_mtime:
+        raise PnrError(f"{metrics_file} is older than the second part of the run")
+    try:
+        metrics = json.loads(metrics_file.read_text())
+    except (OSError, ValueError) as exc:
+        raise PnrError(f"LibreLane's {metrics_file.name}: {exc}") from None
+    if not isinstance(metrics, dict):
+        raise PnrError(f"LibreLane's {metrics_file.name} is not a mapping")
+    check_metrics(metrics, clock)
+    return metrics, next(iter(sorted((final / "gds").glob("*.gds"))), None)
 
 
 def run_librelane(
@@ -292,14 +372,13 @@ def run_librelane(
         args += ["--with-initial-state", str(state_in), MIN_AREA_CONFIG]
     else:
         args.append("config.json")
+    marker = begin_second_part(run)
     left = limit - (time.monotonic() - start)
     code = _librelane(args, workdir, log, max(left, 1.0), limit, env)
-    final = run / "final"
-    metrics_file = final / "metrics.json"
-    if not metrics_file.is_file():
+    result = second_part_result(run, code, marker, cfg.get("CLOCK_PORT"))
+    if result is None:
         raise PnrError(f"LibreLane did not finish (exit {code}):\n{_tail(log)}")
-    gds = next(iter(sorted((final / "gds").glob("*.gds"))), None)
-    return json.loads(metrics_file.read_text()), gds
+    return result
 
 
 def _librelane(

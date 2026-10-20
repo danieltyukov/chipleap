@@ -393,8 +393,17 @@ def test_a_clean_layout_resumes_where_routing_stopped(tmp_path):
     assert not (work / "minarea").exists()
 
 
-def test_run_librelane_routes_then_finishes(tmp_path, monkeypatch):
-    calls = []
+PART1_METRICS = {
+    "route__drc_errors": 0,
+    "timing__setup__ws": 1.3,
+    "timing__setup__ws__corner:nom_typ_1p20V_25C": -13093539370310584,
+}
+
+
+def _fake_librelane(tmp_path, monkeypatch, second, calls):
+    """LibreLane in two parts: the first routes and, as LibreLane does at the end of every
+    invocation, writes final/ with what it has; ``second(run, log)`` is the rest and
+    returns its exit code."""
     tool = tmp_path / "librelane"
     tool.write_text("#!/bin/sh\n")
     tool.chmod(0o755)
@@ -403,30 +412,137 @@ def test_run_librelane_routes_then_finishes(tmp_path, monkeypatch):
     def fake(cmd, workdir, log, timeout, limit, env):
         calls.append(cmd[cmd.index("--run-tag") + 2 :])
         run = workdir / "runs" / "chipleap"
-        if "--to" in cmd:
-            step = run / "45-openroad-detailedrouting"
-            step.mkdir(parents=True)
-            (tmp_path / "tech.lef").write_text(TECH)
-            (step / "chipleap_accel.def").write_text(_def(_net("net14185", STUB)))
-            (step / "state_out.json").write_text(
-                json.dumps({"def": str(step / "chipleap_accel.def")})
-            )
-            (run / "resolved.json").write_text(
-                json.dumps({"TECH_LEFS": {"nom_*": str(tmp_path / "tech.lef")}})
-            )
-        else:
-            (run / "final").mkdir()
-            (run / "final" / "metrics.json").write_text('{"timing__setup__ws": 0.5}')
         log.write_text("")
+        if "--to" not in cmd:
+            return second(run, log)
+        step = run / "45-openroad-detailedrouting"
+        step.mkdir(parents=True)
+        (tmp_path / "tech.lef").write_text(TECH)
+        (step / "chipleap_accel.def").write_text(_def(_net("net14185", STUB)))
+        (step / "state_out.json").write_text(json.dumps({"def": str(step / "chipleap_accel.def")}))
+        (run / "resolved.json").write_text(
+            json.dumps({"TECH_LEFS": {"nom_*": str(tmp_path / "tech.lef")}})
+        )
+        (run / "final").mkdir()
+        (run / "final" / "metrics.json").write_text(json.dumps(PART1_METRICS))
         return 0
 
     monkeypatch.setattr(pnr, "_librelane", fake)
     (tmp_path / "pnr").mkdir()
+    return tmp_path / "pnr" / "runs" / "chipleap"
+
+
+def _finishes(metrics):
+    def second(run, log):
+        (run / "final").mkdir()
+        (run / "final" / "metrics.json").write_text(json.dumps(metrics))
+        return 0
+
+    return second
+
+
+def test_run_librelane_routes_then_finishes(tmp_path, monkeypatch):
+    calls = []
+    run = _fake_librelane(tmp_path, monkeypatch, _finishes({"timing__setup__ws": 0.5}), calls)
     metrics, gds = pnr.run_librelane(tmp_path / "pnr", {})
     assert metrics == {"timing__setup__ws": 0.5} and gds is None
     assert calls[0] == ["--overwrite", "--to", "OpenROAD.DetailedRouting", "config.json"]
     assert calls[1][:2] == ["--from", "OpenROAD.DEFtoODB"]
     assert calls[1][-1] == pnr.MIN_AREA_CONFIG
+    # The first part's final/ is kept beside the run's, not read and not deleted.
+    kept = json.loads((run / pnr.ROUTED_FINAL / "metrics.json").read_text())
+    assert kept == PART1_METRICS
+
+
+@pytest.mark.parametrize("code", [2, 0])
+def test_a_second_part_that_stops_is_not_read_from_the_first_parts_final(
+    tmp_path, monkeypatch, code
+):
+    """LibreLane wrote final/ after routing; the rest stopped (KLayout's DRC crashed, or a
+    checker ended the flow) and wrote none. That is a run that did not finish, never the
+    first part's metrics read as a signoff."""
+    calls = []
+    run = _fake_librelane(tmp_path, monkeypatch, lambda run, log: code, calls)
+    with pytest.raises(pnr.PnrError, match=f"LibreLane did not finish \\(exit {code}\\)"):
+        pnr.run_librelane(tmp_path / "pnr", {})
+    assert not (run / "final").exists() and (run / pnr.ROUTED_FINAL / "metrics.json").is_file()
+
+
+def test_a_second_part_that_ends_on_an_error_is_not_read(tmp_path, monkeypatch):
+    def second(run, log):
+        _finishes({"timing__setup__ws": 0.5})(run, log)
+        return 2
+
+    _fake_librelane(tmp_path, monkeypatch, second, [])
+    with pytest.raises(pnr.PnrError, match=r"did not finish \(exit 2\)"):
+        pnr.run_librelane(tmp_path / "pnr", {})
+
+
+def test_slacks_no_timing_analysis_gives_are_refused(tmp_path, monkeypatch):
+    _fake_librelane(tmp_path, monkeypatch, _finishes(PART1_METRICS), [])
+    with pytest.raises(pnr.PnrError, match=r"nom_typ_1p20V_25C = -1\.30935e\+16 ns"):
+        pnr.run_librelane(tmp_path / "pnr", {})
+    pnr.check_metrics({"timing__setup__ws": -31.79, "timing__setup__tns": -2.5e7})
+    # No path in a group is a slack of plus infinity: the memory chip's flip-flops all
+    # face its ports or its macro, so it has no register-to-register hold path.
+    pnr.check_metrics({"timing__hold_r2r__ws__corner:nom_fast_1p32V_m40C": float("inf")})
+    for bad in (float("-inf"), float("nan"), 2e6, -1.3e16):
+        with pytest.raises(pnr.PnrError, match="no timing analysis gives"):
+            pnr.check_metrics({"timing__hold__ws__corner:nom_fast_1p32V_m40C": bad})
+
+
+def test_a_group_without_paths_is_read(tmp_path, monkeypatch):
+    """LibreLane writes a group with no path as Infinity, as for the memory chip's
+    register-to-register paths."""
+    inf = float("inf")
+    metrics = {
+        "timing__setup__ws": 6.049,
+        "timing__hold__ws": 0.2,
+        "timing__setup_r2r__ws": inf,
+        "timing__hold_r2r__ws": inf,
+        "timing__hold_r2r__ws__corner:nom_fast_1p32V_m40C": inf,
+    }
+    _fake_librelane(tmp_path, monkeypatch, _finishes(metrics), [])
+    assert pnr.run_librelane(tmp_path / "pnr", {"CLOCK_PORT": "clk_i"})[0] == metrics
+
+
+def test_a_design_with_no_path_timed_is_refused(tmp_path, monkeypatch):
+    """A clock constraint that names no port of the design times nothing: every worst
+    slack is plus infinity, and that is no signoff."""
+    inf = float("inf")
+    metrics = {
+        "timing__setup__ws": inf,
+        "timing__hold__ws": inf,
+        "timing__setup__ws__corner:nom_slow_1p08V_125C": inf,
+        "timing__setup_r2r__ws": inf,
+    }
+    _fake_librelane(tmp_path, monkeypatch, _finishes(metrics), [])
+    with pytest.raises(pnr.PnrError, match="no path was timed against clock clk_typo"):
+        pnr.run_librelane(tmp_path / "pnr", {"CLOCK_PORT": "clk_typo"})
+    with pytest.raises(pnr.PnrError, match="against clock a, b: "):
+        pnr.check_metrics(metrics, ["a", "b"])
+    with pytest.raises(pnr.PnrError, match=r"^no path was timed: "):
+        pnr.check_metrics(metrics)
+
+
+def test_a_final_older_than_the_second_part_is_refused(tmp_path):
+    import os
+
+    run = tmp_path / "run"
+    (run / "final").mkdir(parents=True)
+    (run / "final" / "metrics.json").write_text("{}")
+    marker = pnr.begin_second_part(run)
+    assert not (run / "final").exists() and marker == run / pnr.SECOND_PART
+    (run / "final").mkdir()
+    (run / "final" / "metrics.json").write_text('{"timing__setup__ws": 0.5}')
+    assert pnr.second_part_result(run, 0, marker) == ({"timing__setup__ws": 0.5}, None)
+    old = marker.stat().st_mtime - 60
+    os.utime(run / "final" / "metrics.json", (old, old))
+    with pytest.raises(pnr.PnrError, match="older than the second part"):
+        pnr.second_part_result(run, 0, marker)
+    # A run whose first part's final/ is already set aside is not one the first part made.
+    with pytest.raises(pnr.PnrError, match="is there already"):
+        pnr.begin_second_part(run)
 
 
 def test_def_to_odb_follows_routing_in_a_step_list_or_as_a_substitution():
@@ -441,3 +557,46 @@ def test_def_to_odb_follows_routing_in_a_step_list_or_as_a_substitution():
     assert chip["meta"]["substituting_steps"] == {"A.B": None}  # the original is unchanged
     with pytest.raises(pnr.PnrError, match=r"no OpenROAD\.DetailedRouting"):
         pnr.with_def_to_odb({"meta": {"flow": ["KLayout.DRC"]}})
+
+
+@pytest.mark.parametrize("finishes", [True, False])
+def test_an_ecos_second_part_is_read_only_from_its_own_final(tmp_path, monkeypatch, finishes):
+    from types import SimpleNamespace
+
+    from chipleap.rtl import eco
+
+    work = tmp_path / "pnr"
+    work.mkdir()
+    run = work / "runs" / "eco"
+
+    def fake(cmd, w, log, timeout, env):
+        log.write_text("")
+        if "--to" not in cmd:
+            if finishes:
+                _finishes({"timing__setup__ws": 0.2})(run, log)
+            return 0 if finishes else 2
+        step = run / "45-openroad-detailedrouting"
+        step.mkdir(parents=True)
+        (tmp_path / "tech.lef").write_text(TECH)
+        clean = _net("ok", "\n      + ROUTED Metal2 ( 5000 5000 ) ( * 7000 )")
+        (step / "counter.def").write_text(_def(clean))
+        (step / "state_out.json").write_text(json.dumps({"def": str(step / "counter.def")}))
+        (run / "resolved.json").write_text(
+            json.dumps({"TECH_LEFS": {"nom_*": str(tmp_path / "tech.lef")}})
+        )
+        (run / "final").mkdir()
+        (run / "final" / "metrics.json").write_text(json.dumps(PART1_METRICS))
+        return 0
+
+    monkeypatch.setattr(eco, "librelane", lambda: SimpleNamespace(found=True, path="ll"))
+    monkeypatch.setattr(eco, "librelane_pdk_args", lambda: [])
+    monkeypatch.setattr(eco, "librelane_env", lambda: {})
+    monkeypatch.setattr(eco, "_launch", fake)
+    state = tmp_path / "state_in.json"
+    state.write_text("{}")
+    if finishes:
+        assert eco._run_librelane(work, {}, state) == ({"timing__setup__ws": 0.2}, None)
+    else:
+        with pytest.raises(eco.EcoError, match=r"did not finish the ECO \(exit 2\)"):
+            eco._run_librelane(work, {}, state)
+    assert (run / pnr.ROUTED_FINAL / "metrics.json").is_file()
