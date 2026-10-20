@@ -47,7 +47,6 @@ from chipleap.rtl.openroad import (
     failure,
     pdk_views,
     pnr_sealed,
-    read_json,
     read_limited,
     routed_views,
     run_dir,
@@ -62,11 +61,13 @@ from chipleap.verify.pnr import (
     DETAILED_ROUTING,
     PnrError,
     PnrResult,
+    begin_second_part,
     klayout_drc,
     klayout_report,
     parse,
     parse_run,
     patch_min_area,
+    second_part_result,
     step_state,
 )
 from chipleap.verify.result import StepResult
@@ -599,16 +600,16 @@ def _run_librelane(
     else:
         args.append("config.eco.json")
     log = work / "librelane-eco.log"
-    code = _launch(args, work, log, max(limit - (time.monotonic() - start), 1.0), env)
-    final = run / "final"
-    if not (final / "metrics.json").is_file():
+    try:
+        marker = begin_second_part(run)
+        code = _launch(args, work, log, max(limit - (time.monotonic() - start), 1.0), env)
+        result = second_part_result(run, code, marker)
+    except PnrError as exc:
+        raise EcoError(str(exc)) from None
+    if result is None:
         tail = "\n".join(read_limited(log).splitlines()[-15:])
         raise EcoError(f"LibreLane did not finish the ECO (exit {code}):\n{tail}")
-    gds = next(iter(sorted((final / "gds").glob("*.gds"))), None)
-    metrics = read_json(final / "metrics.json")
-    if not isinstance(metrics, dict):
-        raise EcoError("the ECO's metrics.json is not a mapping")
-    return metrics, gds
+    return result
 
 
 def _launch(cmd: list[str], work: Path, log: Path, timeout: float, env: dict[str, str]) -> int:
