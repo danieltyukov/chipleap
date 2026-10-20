@@ -483,9 +483,20 @@ def test_slacks_no_timing_analysis_gives_are_refused(tmp_path, monkeypatch):
     with pytest.raises(pnr.PnrError, match=r"nom_typ_1p20V_25C = -1\.30935e\+16 ns"):
         pnr.run_librelane(tmp_path / "pnr", {})
     pnr.check_metrics({"timing__setup__ws": -31.79, "timing__setup__tns": -2.5e7})
-    for bad in (float("inf"), float("nan"), 2e6):
+    # No path in a group is a slack of plus infinity: the memory chip's flip-flops all
+    # face its ports or its macro, so it has no register-to-register hold path.
+    pnr.check_metrics({"timing__hold_r2r__ws__corner:nom_fast_1p32V_m40C": float("inf")})
+    for bad in (float("-inf"), float("nan"), 2e6, -1.3e16):
         with pytest.raises(pnr.PnrError, match="no timing analysis gives"):
             pnr.check_metrics({"timing__hold__ws__corner:nom_fast_1p32V_m40C": bad})
+
+
+def test_a_group_without_paths_is_read(tmp_path, monkeypatch):
+    """LibreLane writes a group with no path as Infinity, as for the memory chip's
+    register-to-register paths."""
+    metrics = {"timing__setup__ws": 6.0, "timing__setup_r2r__ws": float("inf")}
+    _fake_librelane(tmp_path, monkeypatch, _finishes(metrics), [])
+    assert pnr.run_librelane(tmp_path / "pnr", {})[0] == metrics
 
 
 def test_a_final_older_than_the_second_part_is_refused(tmp_path):

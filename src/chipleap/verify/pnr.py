@@ -257,10 +257,14 @@ _SLACK_RE = re.compile(r"timing__(setup|hold)\w*__w(n)?s(__.*)?")
 
 
 def check_metrics(metrics: Mapping[str, Any]) -> None:
-    """Refuse metrics whose worst slacks are not a timing analysis's: not finite, or
-    beyond ``MAX_SLACK_NS``."""
+    """Refuse metrics whose worst slacks are not a timing analysis's: not a number, minus
+    infinity, or a finite slack beyond ``MAX_SLACK_NS``. Plus infinity is a group with no
+    constrained path, such as register to register in a design whose flip-flops all
+    face its ports or a macro."""
     for k, v in metrics.items():
         if not _SLACK_RE.fullmatch(k) or isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v == math.inf:
             continue
         if not math.isfinite(v) or abs(v) > MAX_SLACK_NS:
             raise PnrError(
