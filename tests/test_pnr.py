@@ -240,3 +240,28 @@ def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch
     kge = accel_logic_kge("gemv", 1, 8, 1) + accel_bank_kge(1, 8, True)
     assert d["model_cell_um2"] == round(kge * 1000 * get_tech("ihp-sg13g2").ge_um2)
     assert "synthesis 0.250 mm2" in step.summary and "place and route adds 20%" in step.summary
+
+
+def test_an_antenna_violation_fails_the_step(tmp_path, monkeypatch):
+    """As in a project's and a chip's place and route: a net over the PDK's antenna ratio
+    fails the step, with DRC and LVS clean and timing met."""
+    from dataclasses import replace
+
+    from chipleap.hw.design import Design
+    from chipleap.verify import run
+
+    metrics = {
+        "design__instance__area__stdcell": 300000.0,
+        "design__core__area": 1.1e6,
+        "timing__setup__ws": 1.0,
+        "timing__hold__ws": 0.1,
+    }
+    clean = pnr.parse(metrics, 90.0, None)
+    for antenna, status, words in (
+        (0, "pass", "DRC, LVS and antenna clean"),
+        (1, "fail", "0 DRC, 0 LVS and 1 antenna violations"),
+    ):
+        r = replace(clean, antenna_nets=antenna)
+        monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work, r=r: r)
+        step = run.place_route(Design(accel=SMOLLM2, freq_mhz=90.0), tmp_path)
+        assert step.status == status and words in step.summary and "90 MHz met" in step.summary
