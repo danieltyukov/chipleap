@@ -31,7 +31,6 @@ from chipleap.chip import io
 from chipleap.gen import banks
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
-from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
 from chipleap.verify import launch, minarea
@@ -529,11 +528,7 @@ def sram_config(
 def model_cell_um2(accel: Accel, banked: bool = False) -> float:
     """The model's standard-cell area for the accelerator's logic on SG13G2; ``banked``
     for a macro-backed build, whose logic also has its banks' interface."""
-    ihp = get_tech("ihp-sg13g2")
-    kge = accel_logic_kge(accel.dataflow, accel.rows, accel.cols, accel.ports)
-    if banked:
-        kge += accel_bank_kge(accel.rows, accel.cols, accel.double_buffer)
-    return kge * 1000 * ihp.ge_um2
+    return banks.cell_um2(accel, banked)
 
 
 def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
@@ -546,34 +541,8 @@ def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
         if not catalog:
             reason = f"the PDK at {pdk} has no single-port SRAM macros"
         else:
-            reason = _too_flat(accel, catalog)
+            reason = banks.layout_reason(accel, catalog)
     return reason
-
-
-# The flattest macro floorplan that routed: the GEMV 2 x 8 build's two rows of three 784 um
-# macros, a core of 2444 x 658 um (3.7 to 1). The GEMV 1 x 16's two rows of four (two
-# 64 x 64 macros for each 16-byte bank word) made a core of 3249 x 438 um (7.4 to 1): at
-# 45 % utilisation its global routing overflowed, and at 35 % repair after placement
-# buffered 10,000 long wires and detailed placement failed.
-MACRO_ASPECT_MAX = 4.0
-
-
-def _too_flat(accel: Accel, catalog: list[sram.Sram]) -> str | None:
-    """Why the floorplan of ``accel``'s macros cannot route, or None when it can."""
-    plan = banks.plan(accel, catalog)
-    dims = {s.cell: (s.width_um, s.height_um) for s in catalog}
-    fp = place.rows(
-        [place.Macro(inst, *dims[cell]) for inst, cell in plan.instances()],
-        model_cell_um2(accel, banked=True),
-    )
-    x0, y0, x1, y1 = fp.core
-    w, h = x1 - x0, y1 - y0
-    if w / h <= MACRO_ASPECT_MAX:
-        return None
-    return (
-        f"its {len(plan.instances())} macros, in two rows, leave a core of {w:.0f} x {h:.0f} um "
-        f"({w / h:.1f} to 1), too flat to route (at most {MACRO_ASPECT_MAX:g} to 1)"
-    )
 
 
 def place_and_route(
