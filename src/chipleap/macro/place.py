@@ -106,22 +106,34 @@ def rows(macros: Sequence[Macro], cell_um2: float, util: float = 0.45) -> Floorp
     # The widest first, each to the narrower row: the rows come out about as wide.
     for m in sorted(macros, key=lambda m: (-m.width, -m.height, m.instance)):
         (top if width(top) <= width(bottom) else bottom).append(m)
-    edges = SIDE_UM + 2 * HALO_UM
-    core_w = _up(max(MIN_CORE_UM, width(top) + edges, width(bottom) + edges), SITE_UM[0])
+    x0, y0 = _up(MARGIN_UM, SITE_UM[0]), _up(MARGIN_UM, SITE_UM[1])
+
+    def xs(row: list[Macro]) -> list[float]:
+        """Each macro's left edge on the site grid, the row packed from the left."""
+        out, x = [], x0 + SIDE_UM + HALO_UM
+        for m in row:
+            out.append(round(_up(x, SITE_UM[0]), 4))
+            x = out[-1] + m.width + 2 * HALO_UM
+        return out
+
+    # The core ends at the widest row's last halo, so no sliver of rows is left between
+    # it and the core's edge: pdngen cannot reach the rails of rows a few sites wide.
+    ends = [
+        x + m.width + HALO_UM for row in (top, bottom) for x, m in zip(xs(row), row, strict=True)
+    ]
+    core_w = _up(max(MIN_CORE_UM, *(e - x0 for e in ends)), SITE_UM[0])
 
     def depth(row: list[Macro]) -> float:
         return max((m.height for m in row), default=-2 * HALO_UM) + 2 * HALO_UM
 
     band = max(MIN_BAND_UM, cell_um2 / util / core_w)
     core_h = _up(max(MIN_CORE_UM, depth(top) + band + depth(bottom)), SITE_UM[1])
-    x0, y0 = _up(MARGIN_UM, SITE_UM[0]), _up(MARGIN_UM, SITE_UM[1])
     x1, y1 = round(x0 + core_w, 4), round(y0 + core_h, 4)
     die = (_up(x1 + MARGIN_UM, SITE_UM[0]), _up(y1 + MARGIN_UM, SITE_UM[1]))
 
     placed: list[Placed] = []
     for row, orient in ((top, "N"), (bottom, "FS")):
-        x = x0 + SIDE_UM + HALO_UM
-        for m in row:
+        for x, m in zip(xs(row), row, strict=True):
             top_y = round(y1 - HALO_UM - m.height, 4)
             y: float | None = top_y if orient == "N" else round(y0 + HALO_UM, 4)
             if m.gridded and orient == "N":
@@ -133,8 +145,7 @@ def rows(macros: Sequence[Macro], cell_um2: float, util: float = 0.45) -> Floorp
                     f"macro {m.instance} ({m.width:g} x {m.height:g} um) has no place under a "
                     "supply pair of the core's grid"
                 )
-            placed.append(Placed(m.instance, round(_up(x, SITE_UM[0]), 4), y, orient))
-            x = _up(x, SITE_UM[0]) + m.width + 2 * HALO_UM
+            placed.append(Placed(m.instance, x, y, orient))
     out = Floorplan(die, (x0, y0, x1, y1), tuple(placed))
     check(out, macros)
     return out
