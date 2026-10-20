@@ -254,6 +254,7 @@ def run_librelane(
     *,
     to: str | None = None,
     resume_from: str | None = None,
+    timeout_s: float = 10800,
 ) -> tuple[dict[str, Any], Path | None]:
     """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
     Returns the final metrics and the GDS.
@@ -266,7 +267,8 @@ def run_librelane(
 
     With ``to`` (a step before detailed routing) the run stops after that step and
     returns no metrics; with ``resume_from`` it goes on in the same run from that step,
-    with the state the run's last step left and the configuration given now."""
+    with the state the run's last step left and the configuration given now.
+    ``CHIPLEAP_PNR_TIMEOUT`` (seconds) bounds the run, ``timeout_s`` when it is unset."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
@@ -278,7 +280,7 @@ def run_librelane(
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
     base = [tool.path, *pdk_args, "--run-tag", tag]
     first = ["--from", resume_from] if resume_from else ["--overwrite"]
-    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", timeout_s))
     start = time.monotonic()
     run = workdir / "runs" / tag
     if to is not None:
