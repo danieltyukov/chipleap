@@ -340,6 +340,28 @@ def test_a_routed_run_from_elsewhere_is_refused(counter_project, ihp_pdk, fake_f
     assert ran(fake_flow) == []
 
 
+def test_a_macro_projects_place_and_route_constraints_are_passed_on(counter_project):
+    """With macros, placement and routing read chipleap.pnr.sdc, which the routed run
+    records; the ECO passes it on, and signoff's chipleap.sdc."""
+    from chipleap.rtl.pnr import PNR_SDC_NAME, pnr_sdc
+
+    run = routed(counter_project)
+    pnr = run.parent.parent
+    (pnr / PNR_SDC_NAME).write_text(pnr_sdc())
+    seal_routed(pnr, with_macros=True)
+    p = load_project(counter_project)
+    _, sealed, _, _ = E.base(p)
+    cfg = {
+        "DESIGN_NAME": "counter",
+        "PNR_SDC_FILE": f"dir::{PNR_SDC_NAME}",
+        "SIGNOFF_SDC_FILE": f"dir::{SDC_NAME}",
+    }
+    assert E._settings(p, cfg, sealed) == cfg
+    (pnr / PNR_SDC_NAME).write_text("set_max_transition 9 [current_design]\n")
+    with pytest.raises(E.EcoError):
+        E._settings(p, cfg, sealed)
+
+
 def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     """Even in a recorded run, a variable that names a script, hook or plugin, a
     substitution, or a file outside the sources ChipLeap copied is not passed on."""

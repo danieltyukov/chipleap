@@ -51,7 +51,7 @@ from chipleap.rtl.openroad import (
     routed_views,
     run_dir,
 )
-from chipleap.rtl.pnr import SDC_NAME, margins, pnr_data
+from chipleap.rtl.pnr import PNR_SDC_NAME, SDC_NAME, margins, pnr_data
 from chipleap.rtl.project import CORNERS, EcoChange, Project
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.verify import launch
@@ -513,7 +513,7 @@ def _recorded(key: str, item: Any, kind: str, sealed: Sealed) -> None:
         not item.startswith("dir::")
         or rel.is_absolute()
         or ".." in rel.parts
-        or not (rel.parts[:1] == ("src",) or text == SDC_NAME)
+        or not (rel.parts[:1] == ("src",) or text in (SDC_NAME, PNR_SDC_NAME))
     ):
         raise EcoError(
             f"the routed run's configuration sets {key} to {item!r}, not a file ChipLeap "
