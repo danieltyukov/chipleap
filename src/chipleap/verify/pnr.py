@@ -28,7 +28,7 @@ from chipleap.chip import io
 from chipleap.gen import banks
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
-from chipleap.hw.tech import accel_logic_kge, get_tech
+from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.macro import grid, layer, place, sram
 from chipleap.verify import launch, minarea
 from chipleap.verify.drc import DrcReportError, DrcResult, pdk_cells, read_lyrdb
@@ -418,10 +418,14 @@ def sram_config(
     }
 
 
-def model_cell_um2(accel: Accel) -> float:
-    """The model's standard-cell area for the accelerator's logic on SG13G2."""
+def model_cell_um2(accel: Accel, banked: bool = False) -> float:
+    """The model's standard-cell area for the accelerator's logic on SG13G2; ``banked``
+    for a macro-backed build, whose logic also has its banks' interface."""
     ihp = get_tech("ihp-sg13g2")
-    return accel_logic_kge(accel.dataflow, accel.rows, accel.cols, accel.ports) * 1000 * ihp.ge_um2
+    kge = accel_logic_kge(accel.dataflow, accel.rows, accel.cols, accel.ports)
+    if banked:
+        kge += accel_bank_kge(accel.rows, accel.cols, accel.double_buffer)
+    return kge * 1000 * ihp.ge_um2
 
 
 def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
@@ -485,7 +489,7 @@ def sram_flow(
             place.Macro(inst, views[cell].view.width, views[cell].view.height)
             for inst, cell in plan.instances()
         ],
-        model_cell_um2(accel),
+        model_cell_um2(accel, banked=True),
     )
     (workdir / "src" / f"{banks.TOP}.v").write_text(banks.top_sv(plan))
     placements = [

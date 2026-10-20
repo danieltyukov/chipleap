@@ -117,6 +117,14 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     # Two macros a row, pins facing the logic between the rows.
     orients = sorted(i["orientation"] for i in entry["instances"].values())
     assert orients == ["FS", "FS", "N", "N"]
+    # The band between the rows holds the build's logic with its banks' interface at 45 %,
+    # not the logic of the flop-buffer build.
+    x0, _, x1, _ = cfg["CORE_AREA"]
+    ys = {i["orientation"]: i["location"][1] for i in entry["instances"].values()}
+    band = (ys["N"] - ys["FS"] - 118.78) * (x1 - x0)
+    banked = pnr.model_cell_um2(SMOLLM2, banked=True)
+    assert banked > pnr.model_cell_um2(SMOLLM2)
+    assert banked / 0.45 <= band < banked / 0.45 + 30 * (x1 - x0)
     pdn = (work / "pdn.tcl").read_text()
     assert "source $::env(SCRIPTS_DIR)/openroad/common/pdn_cfg.tcl" in pdn
     assert f"define_pdn_grid -macro -cells {{{cell}}}" in pdn
