@@ -108,8 +108,13 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     # The macros' long input nets are repaired after global routing too.
     assert cfg["RUN_POST_GRT_DESIGN_REPAIR"] is True
     assert cfg["DESIGN_REPAIR_MAX_WIRE_LENGTH"] == cfg["GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH"] == 300
-    # Their pins' slew is repaired to half its limit, since routing exceeds the estimate.
-    assert cfg["DESIGN_REPAIR_MAX_SLEW_PCT"] == cfg["GRT_DESIGN_REPAIR_MAX_SLEW_PCT"] == 50
+    # Placed and routed against a slew limit under the macros' own, signed off against
+    # LibreLane's constraints and every cell's own limit.
+    assert cfg["PNR_SDC_FILE"] == "dir::pnr.sdc" and cfg["SIGNOFF_SDC_FILE"] == "dir::signoff.sdc"
+    pnr_sdc, signoff_sdc = ((work / n).read_text() for n in ("pnr.sdc", "signoff.sdc"))
+    assert "source $::env(SCRIPTS_DIR)/base.sdc" in pnr_sdc and "base.sdc" in signoff_sdc
+    assert "set_max_transition 0.3 [current_design]" in pnr_sdc
+    assert "set_max_transition" not in signoff_sdc
     assert cfg["VERILOG_FILES"] == ["dir::src/chipleap_accel.v", "dir::src/chipleap_accel_sram.v"]
     assert set(cfg["MACROS"]) == {cell}
     entry = cfg["MACROS"][cell]

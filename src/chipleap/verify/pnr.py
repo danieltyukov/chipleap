@@ -448,20 +448,38 @@ def with_def_to_odb(cfg: dict[str, Any]) -> dict[str, Any]:
 # SmolLM2 accelerator's write-data nets to its SRAMs (800 um, eight macro pins) too slow
 # at the slow corner and changed nothing: resizing a driver cannot fix a wire, and the
 # length LibreLane derives (about 5 mm) never splits it.
-# The macros' inputs allow a slew of 0.595 ns at the slow corner, a quarter of the standard
-# cells' 2.5 ns, and the estimates repair works from under-read them: in the GEMV 1 x 4
-# build, five activation-bank address pins at 190 um from a weak gate passed repair after
-# global routing with its 10 % margin and came out of detailed routing at up to 0.80 ns. So
-# repair aims at half the limit (MACRO_SLEW_PCT), which only nets near a macro's pins reach.
 MACRO_WIRE_UM = 300
-MACRO_SLEW_PCT = 50
 MACRO_REPAIR = {
     "RUN_POST_GRT_DESIGN_REPAIR": True,
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
-    "DESIGN_REPAIR_MAX_SLEW_PCT": MACRO_SLEW_PCT,
-    "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": MACRO_SLEW_PCT,
 }
+# IHP's SRAMs allow a slew of 0.595 ns at their inputs at the slow corner, a quarter of the
+# standard cells' 2.5 ns, and OpenROAD's repair_design holds a net to its driver's limit
+# and the design's, not to its loads': in the macro-backed GEMV 1 x 4 build, an address bit
+# driven 190 um from an o21ai_1 was estimated at 0.54 ns at the macro's pin, nothing
+# repaired it (not with a 50 % slew margin either), and routed it reached 0.80 ns, its
+# wire 45 to 60 % more capacitive than estimated. So a macro-backed accelerator is placed
+# and routed against a design-wide limit of MACRO_PNR_SLEW_NS (PNR_SDC), under which a
+# routed slew stays within the macros', and signed off against LibreLane's own constraints
+# (SIGNOFF_SDC), with every cell's own limit: in that build the repair added about 400
+# buffers, 1.6 % of its cells, and took the address pins to 0.09 ns estimated.
+MACRO_PNR_SLEW_NS = 0.3
+PNR_SDC = "pnr.sdc"
+SIGNOFF_SDC = "signoff.sdc"
+
+
+def macro_sdc(pnr: bool) -> str:
+    """The constraints of a macro-backed accelerator: LibreLane's own (base.sdc), and for
+    placement and routing the design-wide slew limit ``MACRO_PNR_SLEW_NS``."""
+    lines = ["# LibreLane's own constraints.", "source $::env(SCRIPTS_DIR)/base.sdc"]
+    if pnr:
+        lines += [
+            "# A slew target for repair under the SRAM macros' input limit (0.595 ns at the",
+            "# slow corner), since repair holds nets to their drivers' limits, not their loads'.",
+            f"set_max_transition {MACRO_PNR_SLEW_NS} [current_design]",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def sram_config(
@@ -484,6 +502,8 @@ def sram_config(
         "PL_TARGET_DENSITY_PCT": 55,
         "MACROS": macros,
         "PDN_CFG": "dir::pdn.tcl",
+        "PNR_SDC_FILE": f"dir::{PNR_SDC}",
+        "SIGNOFF_SDC_FILE": f"dir::{SIGNOFF_SDC}",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
         **signoff(),
@@ -569,6 +589,8 @@ def sram_flow(
         for p in fp.macros
     ]
     (workdir / "pdn.tcl").write_text(grid.core_script(placements, fp.core[1]))
+    (workdir / PNR_SDC).write_text(macro_sdc(pnr=True))
+    (workdir / SIGNOFF_SDC).write_text(macro_sdc(pnr=False))
     macros, _ = sram.librelane_macros(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )
