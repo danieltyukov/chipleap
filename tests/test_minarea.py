@@ -494,9 +494,35 @@ def test_slacks_no_timing_analysis_gives_are_refused(tmp_path, monkeypatch):
 def test_a_group_without_paths_is_read(tmp_path, monkeypatch):
     """LibreLane writes a group with no path as Infinity, as for the memory chip's
     register-to-register paths."""
-    metrics = {"timing__setup__ws": 6.0, "timing__setup_r2r__ws": float("inf")}
+    inf = float("inf")
+    metrics = {
+        "timing__setup__ws": 6.049,
+        "timing__hold__ws": 0.2,
+        "timing__setup_r2r__ws": inf,
+        "timing__hold_r2r__ws": inf,
+        "timing__hold_r2r__ws__corner:nom_fast_1p32V_m40C": inf,
+    }
     _fake_librelane(tmp_path, monkeypatch, _finishes(metrics), [])
-    assert pnr.run_librelane(tmp_path / "pnr", {})[0] == metrics
+    assert pnr.run_librelane(tmp_path / "pnr", {"CLOCK_PORT": "clk_i"})[0] == metrics
+
+
+def test_a_design_with_no_path_timed_is_refused(tmp_path, monkeypatch):
+    """A clock constraint that names no port of the design times nothing: every worst
+    slack is plus infinity, and that is no signoff."""
+    inf = float("inf")
+    metrics = {
+        "timing__setup__ws": inf,
+        "timing__hold__ws": inf,
+        "timing__setup__ws__corner:nom_slow_1p08V_125C": inf,
+        "timing__setup_r2r__ws": inf,
+    }
+    _fake_librelane(tmp_path, monkeypatch, _finishes(metrics), [])
+    with pytest.raises(pnr.PnrError, match="no path was timed against clock clk_typo"):
+        pnr.run_librelane(tmp_path / "pnr", {"CLOCK_PORT": "clk_typo"})
+    with pytest.raises(pnr.PnrError, match="against clock a, b: "):
+        pnr.check_metrics(metrics, ["a", "b"])
+    with pytest.raises(pnr.PnrError, match=r"^no path was timed: "):
+        pnr.check_metrics(metrics)
 
 
 def test_a_final_older_than_the_second_part_is_refused(tmp_path):
