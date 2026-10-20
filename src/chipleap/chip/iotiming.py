@@ -45,6 +45,7 @@ DELAY_TABLES = ("cell_rise", "cell_fall")
 PATHS_SHOWN = 5
 LIBERTY_MAX = 64 << 20
 UNCERTAINTY_MAX_NS = 100.0
+DERATE_MAX_PCT = 50.0
 # LibreLane's signoff corners: parasitics (nom, min, max), process, core supply, temperature.
 STA_CORNER_RE = re.compile(r"(nom|min|max)_(typ|slow|fast)_(\d+p\d+)V_(m?\d+)C")
 # IHP's IO liberty: process, core supply, IO supply, temperature.
@@ -123,11 +124,16 @@ def reference_period(b: Binding, clocks: Mapping[str, float]) -> float:
 
 
 def signoff_sdc(
-    b: Binding, clocks: Mapping[str, float], numbers: Mapping[str, float], uncertainty: float
+    b: Binding,
+    clocks: Mapping[str, float],
+    numbers: Mapping[str, float],
+    uncertainty: float,
+    derate_pct: float = 0.0,
 ) -> str:
     """Constraints at the chip's ports: each clock on its pad's port, so its input pad is
     part of its insertion delay; the data ports with the outside world's budget, the
-    same number for the earliest and the latest arrival (as LibreLane's IO constraint)."""
+    same number for the earliest and the latest arrival (as LibreLane's IO constraint);
+    the PDK's derate, as LibreLane timed the core with."""
     ins, outs = pad_ports(b)
     clock_ports = {f"pad_{flat(p)}" for p in b.clocks}
     lines = ["# Written by ChipLeap: the chip timed at its ports, through its pads."]
@@ -146,6 +152,8 @@ def signoff_sdc(
     lines += [
         "set_propagated_clock [all_clocks]",
         f"set_clock_uncertainty {q.number(uncertainty)} [all_clocks]",
+        f"set_timing_derate -early {q.number(1 - derate_pct / 100)}",
+        f"set_timing_derate -late {q.number(1 + derate_pct / 100)}",
     ]
     if data_in:
         lines.append(
@@ -354,6 +362,14 @@ def uncertainty(resolved: Mapping[str, Any]) -> float:
     return float(v)
 
 
+def derate(resolved: Mapping[str, Any]) -> float:
+    """The timing derate LibreLane timed the core with, in percent (0 without one)."""
+    v = resolved.get("TIME_DERATING_CONSTRAINT", 0)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= DERATE_MAX_PCT:
+        raise IoTimingError("LibreLane's resolved configuration has no usable timing derate")
+    return float(v)
+
+
 # OpenSTA
 
 SCRIPT_CATEGORIES = {
@@ -479,7 +495,7 @@ def run(
         raise IoTimingError("LibreLane's resolved configuration names no LEF")
     lefs = [_pdk_file(tech_lef, root), *(_pdk_file(f, root) for f in cell_lefs)]
     numbers = budget(io, reference_period(b, clocks))
-    sdc_text = signoff_sdc(b, clocks, numbers, uncertainty(resolved))
+    sdc_text = signoff_sdc(b, clocks, numbers, uncertainty(resolved), derate(resolved))
     ins, outs = pad_ports(b)
     clock_ports = {f"pad_{flat(p)}" for p in b.clocks}
     data_in = [p for p in ins if p not in clock_ports]

@@ -220,7 +220,9 @@ def test_counter_eco_signs_off_again(counter_project):
 def fake_flow(tmp_path, monkeypatch, ihp_pdk):
     """OpenROAD and LibreLane stand-ins outside the project. Each notes that it ran;
     OpenROAD applies one edit and writes the DEF, LibreLane copies the configuration and
-    the state it was given to ``seen/`` and finishes the run."""
+    the state it was given to ``seen/``. Asked to stop after detailed routing, it leaves
+    a routed state with nothing under the minimum metal area; asked for the rest, it
+    finishes the run."""
     bin_dir = tmp_path / "trusted-bin"
     seen = tmp_path / "seen"
     bin_dir.mkdir()
@@ -236,11 +238,21 @@ def fake_flow(tmp_path, monkeypatch, ihp_pdk):
             f'echo librelane >> "{seen}/ran"\n'
             'for a in "$@"; do last=$a; done\n'
             f'cp "$last" "{seen}/config.json"\n'
+            "to=\n"
             "while [ $# -gt 0 ]; do\n"
             f'  if [ "$1" = --with-initial-state ]; then cp "$2" "{seen}/state.json"; fi\n'
+            '  if [ "$1" = --to ]; then to=1; fi\n'
             "  shift\n"
             "done\n"
-            "mkdir -p runs/eco/final && echo '{}' > runs/eco/final/metrics.json\n"
+            'if [ -n "$to" ]; then\n'
+            "  d=runs/eco/03-openroad-detailedrouting && mkdir -p $d\n"
+            "  printf 'UNITS DISTANCE MICRONS 1000 ;\\nNETS 0 ;\\nEND NETS\\n' > $d/counter.def\n"
+            '  echo "{\\"def\\": \\"$PWD/$d/counter.def\\"}" > $d/state_out.json\n'
+            "  echo 'MANUFACTURINGGRID 0.005 ;' > runs/eco/tech.lef\n"
+            '  echo "{\\"TECH_LEFS\\": {\\"nom_*\\": \\"$PWD/runs/eco/tech.lef\\"}}" > runs/eco/resolved.json\n'
+            "else\n"
+            "  mkdir -p runs/eco/final && echo '{}' > runs/eco/final/metrics.json\n"
+            "fi\n"
         ),
     }
     for name, body in tools.items():
@@ -270,7 +282,8 @@ def test_an_eco_passes_on_only_what_chipleap_recorded(counter_project, ihp_pdk, 
     (planted_step / "config.json").write_text(json.dumps({"meta": {"step": "Odb.PlantedHook"}}))
     r = E.eco(load_project(counter_project), RESIZE)
     assert r.status == "pass", r.summary
-    assert ran(fake_flow) == ["openroad", "librelane"]
+    # LibreLane twice: up to detailed routing, then the rest.
+    assert ran(fake_flow) == ["openroad", "librelane", "librelane"]
     cfg = (fake_flow / "config.json").read_text()
     state = json.loads((fake_flow / "state.json").read_text())
     assert "planted" not in cfg.lower() and "planted" not in json.dumps(state).lower()

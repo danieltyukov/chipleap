@@ -693,11 +693,12 @@ module chipleap_accel_core #(
   // Operand access. X element (row, k) of the current slot; W element (row, e) where e
   // indexes the tile's K range.
   // ---------------------------------------------------------------------------
-  logic c_slot;
+  // The core's slot and its descriptor. cd is a register that always holds desc[c_slot]
+  // (below), so the slot select does not sit between the descriptors and the datapath.
+  logic c_slot, c_slot_n;
   /* verilator lint_off UNUSEDSIGNAL */  // first_k is unused by the output-stationary core
   desc_t cd;
   /* verilator lint_on UNUSEDSIGNAL */
-  assign cd = desc[c_slot];
   wire [31:0] a_base = cfg_xres ? 32'd0 : 32'(c_slot) * A_SLOT;
   wire [31:0] a_stride = cfg_xres ? (cfg_k >> 2) : (cfg_tk >> 2);
   wire [31:0] a_koff = cfg_xres ? cd.k0 : 32'd0;
@@ -756,16 +757,27 @@ module chipleap_accel_core #(
     if (cs == C_FREE) desc_clr[c_slot] = 1'b1;
   end
 
+  // The slot the core uses next cycle, and its descriptor as it will be then: the one the
+  // loader writes this cycle, or the one already there. Loading cd from them a cycle ahead
+  // keeps it equal to desc[c_slot] in every cycle. Selected by c_slot after the registers,
+  // the descriptor's fields reached the GEMV engine's operand registers and accumulators
+  // through a select and the buffer tree of a net with a few hundred loads, and that path
+  // set the clock of the routed GEMV 1 x 8 engine with eight ports and the 4 x 8 with two.
+  always_comb begin
+    c_slot_n = start ? 1'b0 : c_slot;
+    if (cs == C_FREE && DB) c_slot_n = ~c_slot;
+  end
+
+  always_ff @(posedge clk_i) cd <= desc_set[c_slot_n] ? desc_new : desc[c_slot_n];
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       cs <= C_IDLE;
       c_slot <= 1'b0;
       tiles_done <= '0;
     end else begin
-      if (start) begin
-        c_slot <= 1'b0;
-        tiles_done <= '0;
-      end
+      c_slot <= c_slot_n;
+      if (start) tiles_done <= '0;
       unique case (cs)
         C_IDLE: if (desc_v[c_slot]) cs <= C_RUN;
         C_RUN: if (core_done) cs <= cd.last_k ? C_STORE : C_FREE;
@@ -773,7 +785,6 @@ module chipleap_accel_core #(
         C_STWAIT: if (st_done) cs <= C_FREE;
         C_FREE: begin
           tiles_done <= tiles_done + 32'd1;
-          if (DB) c_slot <= ~c_slot;
           cs <= C_IDLE;
         end
         default: cs <= C_IDLE;

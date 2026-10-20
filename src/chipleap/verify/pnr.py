@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -27,10 +29,11 @@ from chipleap.gen import banks
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.hw.tech import accel_logic_kge, get_tech
-from chipleap.macro import grid, place, sram
-from chipleap.verify import launch
+from chipleap.macro import grid, layer, place, sram
+from chipleap.verify import launch, minarea
+from chipleap.verify.drc import DrcReportError, DrcResult, pdk_cells, read_lyrdb
 from chipleap.verify.synth import _sv2v
-from chipleap.verify.tools import librelane
+from chipleap.verify.tools import librelane, librelane_env, librelane_pdk_args, librelane_ran
 
 PNR_WORDS = 16
 
@@ -62,6 +65,9 @@ class PnrResult:
     synth_cell_um2: float = 0.0  # LibreLane's synthesis, before placement's repairs
     max_slew_violations: int = 0  # pins over their slew limit, at any corner
     max_cap_violations: int = 0  # nets over their capacitance limit, at any corner
+    # Off-grid pin markers inside the PDK's own macros, left out of drc_errors
+    # (``chipleap.verify.drc``): rule, cell, the macros that hold it, count.
+    pin_markers: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -159,11 +165,13 @@ def _corner(metrics: dict[str, Any], prefix: str, corner: str) -> float | None:
     return None
 
 
-def parse(metrics: dict[str, Any], clock_mhz: float, gds: Path | None) -> PnrResult:
-    drc = sum(
-        int(_num(metrics, k))
-        for k in ("route__drc_errors", "klayout__drc_error__count", "magic__drc_error__count")
-    )
+def parse(
+    metrics: dict[str, Any], clock_mhz: float, gds: Path | None, klayout: DrcResult | None = None
+) -> PnrResult:
+    """The result of a run from its metrics; with ``klayout`` (``klayout_drc``), its KLayout
+    DRC count is that report's, off-grid pin markers inside the PDK's macros set apart."""
+    drc = sum(int(_num(metrics, k)) for k in ("route__drc_errors", "magic__drc_error__count"))
+    drc += klayout.total if klayout else int(_num(metrics, "klayout__drc_error__count"))
     return PnrResult(
         clock_mhz=clock_mhz,
         die_um2=_num(metrics, "design__die__area"),
@@ -185,7 +193,58 @@ def parse(metrics: dict[str, Any], clock_mhz: float, gds: Path | None) -> PnrRes
         metrics=metrics,
         max_slew_violations=int(_num(metrics, "design__max_slew_violation__count")),
         max_cap_violations=int(_num(metrics, "design__max_cap_violation__count")),
+        pin_markers=klayout.markers_data() if klayout else [],
     )
+
+
+def klayout_report(run: Path) -> Path | None:
+    """The report database of a run's last KLayout DRC."""
+    steps = sorted(run.glob("*-klayout-drc"), key=lambda p: int(p.name.split("-")[0]))
+    report = steps[-1] / "reports" / "drc.klayout.lyrdb" if steps else None
+    return report if report is not None and report.is_file() else None
+
+
+def klayout_drc(
+    metrics: dict[str, Any], report: Path | None, held: Mapping[str, tuple[str, ...]]
+) -> DrcResult | None:
+    """A run's KLayout DRC report read as the chip step reads IHP's (``chipleap.verify.drc``),
+    ``held`` naming the cells of the PDK's own macros; None when the run counted no KLayout
+    violation. The report must hold what LibreLane counted."""
+    counted = int(_num(metrics, "klayout__drc_error__count"))
+    if counted == 0:
+        return None
+    if report is None:
+        raise PnrError(f"LibreLane's KLayout DRC counted {counted} violations and left no report")
+    result = DrcResult()
+    try:
+        read_lyrdb(report, result, held)
+    except (DrcReportError, OSError) as exc:
+        raise PnrError(f"LibreLane's KLayout DRC report: {exc}") from None
+    if result.total + result.markers != counted:
+        raise PnrError(
+            f"LibreLane's KLayout DRC counted {counted} violations, its report holds "
+            f"{result.total + result.markers}"
+        )
+    return result
+
+
+def parse_run(
+    metrics: dict[str, Any],
+    clock_mhz: float,
+    gds: Path | None,
+    run: Path,
+    held: Mapping[str, tuple[str, ...]],
+) -> PnrResult:
+    """``parse`` with the run's own KLayout DRC report (``klayout_drc``)."""
+    return parse(metrics, clock_mhz, gds, klayout_drc(metrics, klayout_report(run), held))
+
+
+DETAILED_ROUTING = "OpenROAD.DetailedRouting"
+AFTER_ROUTING = "Odb.RemoveRoutingObstructions"  # the Classic flow's next step
+DEF_TO_ODB = "OpenROAD.DEFtoODB"
+MIN_AREA_DIR = "minarea"
+# Beside config.json: LibreLane resolves dir:: paths and puts runs/ beside the file.
+MIN_AREA_CONFIG = "config.minarea.json"
 
 
 def run_librelane(
@@ -197,35 +256,151 @@ def run_librelane(
     resume_from: str | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
-    Returns the final metrics and the GDS. With ``to`` the run stops after that step and
+    Returns the final metrics and the GDS.
+
+    LibreLane runs in two parts, in one run directory: up to detailed routing, then the
+    rest. Between them, routed shapes under a layer's minimum area get a patch
+    (``chipleap.verify.minarea``): the router leaves one now and then, and it would fail
+    signoff. The patched layout goes back into LibreLane's database through
+    ``OpenROAD.DEFtoODB`` and the rest of the flow runs on it, signoff included.
+
+    With ``to`` (a step before detailed routing) the run stops after that step and
     returns no metrics; with ``resume_from`` it goes on in the same run from that step,
     with the state the run's last step left and the configuration given now."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
-    (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
-    cmd = [tool.path, "--pdk", "ihp-sg13g2", "--run-tag", tag]
-    cmd += ["--from", resume_from] if resume_from else ["--overwrite"]
-    cmd += ["--to", to] if to else []
-    cmd.append("config.json")
-    log = workdir / ("librelane.log" if resume_from is None else "librelane-resumed.log")
-    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
     try:
-        code = launch.run(cmd, workdir, log, limit)
-    except launch.Busy as exc:
-        raise PnrError(f"LibreLane did not start: {exc}") from None
-    except launch.TimedOut as exc:
-        raise PnrError(_timed_out(exc, log)) from None
+        pdk_args = librelane_pdk_args()
+        env = librelane_env()
+    except ValueError as exc:
+        raise PnrError(str(exc)) from None
+    (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
+    base = [tool.path, *pdk_args, "--run-tag", tag]
+    first = ["--from", resume_from] if resume_from else ["--overwrite"]
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    start = time.monotonic()
+    run = workdir / "runs" / tag
     if to is not None:
-        if code != 0:
+        log = workdir / f"librelane-{_step_dir(to)}.log"
+        code = _librelane(
+            [*base, *first, "--to", to, "config.json"], workdir, log, limit, limit, env
+        )
+        if code != 0 or step_state(run, to) is None:
             raise PnrError(f"LibreLane stopped before {to} (exit {code}):\n{_tail(log)}")
         return {}, None
-    final = workdir / "runs" / tag / "final"
+    route_log = workdir / "librelane-route.log"
+    code = _librelane(
+        [*base, *first, "--to", DETAILED_ROUTING, "config.json"],
+        workdir,
+        route_log,
+        limit,
+        limit,
+        env,
+    )
+    try:
+        librelane_ran(run)
+    except ValueError as exc:
+        raise PnrError(str(exc)) from None
+    routed = step_state(run, DETAILED_ROUTING)
+    if routed is None:
+        raise PnrError(
+            f"LibreLane did not finish detailed routing (exit {code}):\n{_tail(route_log)}"
+        )
+    rest, state_in = patch_min_area(workdir, run, routed, cfg)
+    log = workdir / "librelane.log"
+    args = [*base, "--from", rest]
+    if state_in is not None:
+        args += ["--with-initial-state", str(state_in), MIN_AREA_CONFIG]
+    else:
+        args.append("config.json")
+    left = limit - (time.monotonic() - start)
+    code = _librelane(args, workdir, log, max(left, 1.0), limit, env)
+    final = run / "final"
     metrics_file = final / "metrics.json"
     if not metrics_file.is_file():
         raise PnrError(f"LibreLane did not finish (exit {code}):\n{_tail(log)}")
     gds = next(iter(sorted((final / "gds").glob("*.gds"))), None)
     return json.loads(metrics_file.read_text()), gds
+
+
+def _librelane(
+    cmd: list[str], workdir: Path, log: Path, timeout: float, limit: float, env: dict[str, str]
+) -> int:
+    try:
+        return launch.run(cmd, workdir, log, timeout, env)
+    except launch.Busy as exc:
+        raise PnrError(f"LibreLane did not start: {exc}") from None
+    except launch.TimedOut as exc:
+        exc.seconds = limit  # the whole run's limit, not what was left of it
+        raise PnrError(_timed_out(exc, log)) from None
+
+
+def _step_dir(step_id: str) -> str:
+    return step_id.replace(".", "-").lower()
+
+
+def step_state(run: Path, step_id: str) -> Path | None:
+    """The state a step of the run left, by its directory (``45-openroad-detailedrouting``)."""
+    name = _step_dir(step_id)
+    dirs = sorted(run.glob(f"*-{name}"), key=lambda p: int(p.name.split("-")[0]))
+    state = dirs[-1] / "state_out.json" if dirs else None
+    return state if state is not None and state.is_file() else None
+
+
+def patch_min_area(
+    workdir: Path,
+    run: Path,
+    routed: Path,
+    cfg: dict[str, Any],
+    out_dir: str = MIN_AREA_DIR,
+    config_name: str = MIN_AREA_CONFIG,
+) -> tuple[str, Path | None]:
+    """Patch the routed shapes under the minimum area. Returns the step to resume LibreLane
+    from and, with patches, the state it starts from; its configuration is then
+    ``config_name`` beside the run's, with ``OpenROAD.DEFtoODB`` after detailed routing."""
+    state = json.loads(routed.read_text())
+    def_path = Path(state.get("def") or "")
+    resolved = run / "resolved.json"
+    if not def_path.is_file() or not resolved.is_file():
+        raise PnrError("LibreLane's routed state has no DEF or resolved configuration")
+    try:
+        layout = minarea.load(def_path, json.loads(resolved.read_text()))
+        patches = minarea.repair(layout)
+        if not patches:
+            return AFTER_ROUTING, None
+        out = workdir / out_dir
+        out.mkdir(exist_ok=True)
+        patched = out / def_path.name
+        patched.write_text(minarea.apply(def_path.read_text(errors="replace"), patches))
+    except (minarea.MinAreaError, OSError) as exc:
+        raise PnrError(f"minimum metal area after routing: {exc}") from None
+    (out / "patches.txt").write_text(
+        "".join(f"{minarea.describe(p.shape)}: {p.statement()}\n" for p in patches)
+    )
+    (workdir / config_name).write_text(json.dumps(with_def_to_odb(cfg), indent=2))
+    state_in = out / "state_in.json"
+    state_in.write_text(json.dumps({**state, "def": str(patched)}, indent=1))
+    return DEF_TO_ODB, state_in
+
+
+def with_def_to_odb(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``cfg`` with a step after detailed routing that reads the (patched) DEF into a new
+    database: in the step list of a flow given as one, else as a substitution."""
+    meta = dict(cfg.get("meta") or {"version": 2, "flow": "Classic"})
+    flow = meta.get("flow")
+    if isinstance(flow, list):
+        steps = [s for s in flow if s != DEF_TO_ODB]
+        if DETAILED_ROUTING not in steps:
+            raise PnrError(f"the flow has no {DETAILED_ROUTING} step")
+        i = steps.index(DETAILED_ROUTING)
+        meta["flow"] = [*steps[: i + 1], DEF_TO_ODB, *steps[i + 1 :]]
+    else:
+        meta["substituting_steps"] = {
+            **(meta.get("substituting_steps") or {}),
+            f"+{DETAILED_ROUTING}": DEF_TO_ODB,
+        }
+    return {**cfg, "meta": meta}
 
 
 # A design with hard macros has long nets to the macros' pins (a word written to every
@@ -297,18 +472,21 @@ def place_and_route(
     _sv2v(src / "chipleap_accel.sv", src / "chipleap_accel.v")
     pdk = pdk or io.pdk_dir()
     reason = sram_reason(accel, pdk)
+    run = workdir / "runs" / "chipleap"
     if reason is not None or pdk is None:
         metrics, gds = run_librelane(workdir, config(accel, clock_mhz))
-        result = parse(metrics, clock_mhz, gds)
+        result = parse_run(metrics, clock_mhz, gds, run, {})
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
     cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
     metrics, gds = run_librelane(workdir, cfg)
     from chipleap.rtl.pnr import check_merged
 
-    check_merged(workdir / "runs" / "chipleap", workdir, banks.TOP)
-    result = replace(
-        parse(metrics, clock_mhz, gds), synth_cell_um2=synth_area(workdir / "runs" / "chipleap")
+    check_merged(run, workdir, banks.TOP)
+    held = pdk_cells(
+        ((s.cell, layer.pdk_macro_cells(pdk, s.cell, sram.LIBRARY)) for s in plan.cells()),
+        (banks.TOP,),
     )
+    result = replace(parse_run(metrics, clock_mhz, gds, run, held), synth_cell_um2=synth_area(run))
     counts: dict[str, int] = {}
     for _, cell in plan.instances():
         counts[cell] = counts.get(cell, 0) + 1

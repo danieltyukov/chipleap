@@ -172,23 +172,26 @@ def sram(pdk: Path) -> str:
     return SRAM
 
 
-def _gds(cell: str) -> bytes:
+def _gds(cell: str, *cells: str) -> bytes:
+    """An empty structure ``cell``, and one of each of ``cells`` (the cells a macro is
+    made of)."""
     import struct
 
     def rec(rtype: int, dtype: int, body: bytes = b"") -> bytes:
         return struct.pack(">HBB", 4 + len(body), rtype, dtype) + body
 
-    name = cell.encode() + b"\0" * (len(cell) % 2)
     units = bytes([0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0])  # 1e-3
     meters = bytes([0x39, 0x44, 0xB8, 0x2F, 0xA0, 0x9B, 0x5A, 0x54])  # 1e-9
+    structures = b"".join(
+        rec(0x05, 2, b"\0" * 24) + rec(0x06, 6, c.encode() + b"\0" * (len(c) % 2)) + rec(0x07, 0)
+        for c in (cell, *cells)
+    )
     return (
         rec(0x00, 2, struct.pack(">h", 600))
         + rec(0x01, 2, b"\0" * 24)
         + rec(0x02, 6, b"lib\0")
         + rec(0x03, 5, units + meters)
-        + rec(0x05, 2, b"\0" * 24)
-        + rec(0x06, 6, name)
-        + rec(0x07, 0)
+        + structures
         + rec(0x04, 0)
     )
 

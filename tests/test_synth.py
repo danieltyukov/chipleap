@@ -24,3 +24,16 @@ def test_gemv_area_and_timing(tmp_path):
     assert 1.0 < r.delay_ns < 9.0
     assert r.fmax_mhz > 100
     assert (tmp_path / "yosys-8.log").exists()
+
+
+def test_a_macro_backed_core_against_the_model(tmp_path):
+    from chipleap.hw.tech import accel_bank_kge
+
+    a = Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2)
+    r = synth.synthesize_banked(a, workdir=tmp_path)
+    kge = accel_logic_kge("gemv", 1, 8, 1) + accel_bank_kge(1, 8, True)
+    model = kge * 1000 * get_tech("ihp-sg13g2").ge_um2 / 1e6
+    assert abs(model - r.logic_mm2) / r.logic_mm2 < 0.05
+    assert (tmp_path / "yosys-banked.log").exists()
+    with pytest.raises(synth.SynthError, match="no macro-backed build"):
+        synth.synthesize_banked(Accel("ws", 4, 4, 8, ports=1))

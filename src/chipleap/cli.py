@@ -485,6 +485,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             else liberty_settings_problem() or "open PDK for synthesis (set CHIPLEAP_LIBERTY)",
         ]
     )
+    from chipleap.verify.tools import LIBRELANE_PDK_ENV, librelane_pdk_commit, librelane_pdk_root
+
+    try:
+        ll_root = librelane_pdk_root()
+        ll_note = (
+            f"LibreLane runs on {ll_root}"
+            if ll_root
+            else f"LibreLane installs the PDK it pins (set {LIBRELANE_PDK_ENV} for another)"
+        )
+    except ValueError as exc:
+        ll_root, ll_note = None, str(exc)
+    rows.append(
+        [
+            "LibreLane PDK",
+            "yes" if ll_root else "no",
+            librelane_pdk_commit(ll_root)[:7] if ll_root else "",
+            ll_note,
+        ]
+    )
     co = find_checkout()
     rows.append(
         [

@@ -36,9 +36,10 @@ from chipleap.gen import banks, soc
 from chipleap.gen.rtl import accel_sv
 from chipleap.hw.design import Design
 from chipleap.hw.tech import get_tech
-from chipleap.macro import grid, place, sram
+from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
 from chipleap.verify import pnr
+from chipleap.verify.drc import pdk_cells
 from chipleap.verify.tools import Tool, clean_env, fusesoc, riscv_gcc
 
 CORE = "chipleap:soc:xheep:0"
@@ -581,8 +582,12 @@ def place_and_route(
 
     check_merged(run, work, soc.TOP)
     area = {s.cell: s.area_um2 for s in sram.catalog(pdk)}
+    held = pdk_cells(
+        ((cell, layer.pdk_macro_cells(pdk, cell, sram.LIBRARY)) for cell in prep.views),
+        (soc.TOP,),
+    )
     result = replace(
-        pnr.parse(metrics, clock, gds),
+        pnr.parse_run(metrics, clock, gds, run, held),
         synth_cell_um2=synth,
         macros=tuple(prep.instances),
         macro_um2=sum(area[cell] for _, cell in prep.instances),

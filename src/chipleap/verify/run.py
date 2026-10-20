@@ -21,10 +21,11 @@ from typing import Any
 from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
-from chipleap.hw.tech import accel_logic_kge, get_tech
+from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.model.evaluate import buffer_mm2
 from chipleap.rtl import builddir
 from chipleap.verify import backends, pnr, sim, synth, xheep
+from chipleap.verify.drc import describe_markers
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import clean_env, verilator
@@ -178,7 +179,11 @@ def place_route(design: Design, workdir: Path) -> StepResult:
             "pnr", "skipped" if "not installed" in msg else "fail", msg, {"error": str(exc)}
         )
     a = design.accel
-    model_cell = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports) * 1000 * ihp.ge_um2
+    kge = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports)
+    if r.macros:
+        # The layout's buffers are macros, and its logic has their interface.
+        kge += accel_bank_kge(a.rows, a.cols, a.double_buffer)
+    model_cell = kge * 1000 * ihp.ge_um2
     model_buffers = buffer_mm2(a, ihp) * 1e6
     data = {
         "clock_mhz": clock,
@@ -197,6 +202,7 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         "antenna_nets": r.antenna_nets,
         "max_slew_violations": r.max_slew_violations,
         "max_cap_violations": r.max_cap_violations,
+        **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
         "power_mw": round(r.power_mw, 3),
         "model_cell_um2": round(model_cell),
         "buffers": r.buffers,
@@ -265,6 +271,8 @@ def _checks(r: pnr.PnrResult) -> tuple[str, bool]:
         text += f", {r.max_slew_violations} slew and {r.max_cap_violations} capacitance violations"
     else:
         text += ", no slew or capacitance violations"
+    if r.pin_markers:
+        text += f"; {describe_markers(r.pin_markers)}"
     return text, r.clean and drv == 0
 
 
@@ -339,6 +347,7 @@ def place_route_soc(
         "antenna_nets": r.antenna_nets,
         "max_slew_violations": r.max_slew_violations,
         "max_cap_violations": r.max_cap_violations,
+        **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
         "power_mw": round(r.power_mw, 3),
         "macros": [{"instance": i, "cell": c} for i, c in s.macros],
         "macro_um2": round(r.macro_um2),

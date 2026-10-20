@@ -36,7 +36,15 @@ from chipleap.rtl.openroad import ECO_MANIFEST, PNR_MANIFEST, RUN_TAG
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
-from chipleap.verify.pnr import MACRO_REPAIR, PnrError, PnrResult, parse, run_librelane, signoff
+from chipleap.verify.drc import describe_markers
+from chipleap.verify.pnr import (
+    MACRO_REPAIR,
+    PnrError,
+    PnrResult,
+    parse_run,
+    run_librelane,
+    signoff,
+)
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane
 
@@ -111,8 +119,10 @@ def io_lines(ref: str, period: float) -> list[str]:
         "set_load [expr $::env(OUTPUT_CAP_LOAD) / 1000.0] [all_outputs]",
         "set_clock_uncertainty $::env(CLOCK_UNCERTAINTY_CONSTRAINT) [all_clocks]",
         "set_clock_transition $::env(CLOCK_TRANSITION_CONSTRAINT) [all_clocks]",
-        "set_timing_derate -early [expr 1-[expr $::env(TIME_DERATING_CONSTRAINT) / 100]]",
-        "set_timing_derate -late [expr 1+[expr $::env(TIME_DERATING_CONSTRAINT) / 100]]",
+        # A real division: LibreLane 3.0.0.dev44 passes the PDK's 5 as an integer, and
+        # Tcl's 5 / 100 is 0.
+        "set_timing_derate -early [expr 1-[expr $::env(TIME_DERATING_CONSTRAINT) / 100.0]]",
+        "set_timing_derate -late [expr 1+[expr $::env(TIME_DERATING_CONSTRAINT) / 100.0]]",
         # Ideal clocks before the clock tree exists, propagated after, as in the base SDC.
         "if { [info exists ::env(OPENLANE_SDC_IDEAL_CLOCKS)] && $::env(OPENLANE_SDC_IDEAL_CLOCKS) } {",
         "    unset_propagated_clock [all_clocks]",
@@ -355,7 +365,13 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
         check_merged(work / "runs" / RUN_TAG, work, project.top)
     seal_routed(work, bool(project.macros))
     clk = project.fastest_clock
-    r = parse(metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds)
+    try:
+        held = macros.pdk_cells(project)
+    except macros.MacroStepError as exc:
+        raise PnrError(f"macros: {exc}") from exc
+    r = parse_run(
+        metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds, work / "runs" / RUN_TAG, held
+    )
     if not project.macros:
         return r
     area = macros.area_um2(project) or 0.0
@@ -413,6 +429,7 @@ def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
         "drc_errors": r.drc_errors,
         "lvs_errors": r.lvs_errors,
         "antenna_nets": r.antenna_nets,
+        **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
         "max_slew_violations": count("design__max_slew_violation__count"),
         "max_cap_violations": count("design__max_cap_violation__count"),
         "power_mw": round(r.power_mw, 4),
@@ -444,6 +461,8 @@ def pnr(project: Project) -> StepResult:
         checks = "DRC, LVS and antenna clean"
     else:
         checks = f"{r.drc_errors} DRC, {r.lvs_errors} LVS and {r.antenna_nets} antenna violations"
+    if r.pin_markers:
+        checks += f"; {describe_markers(r.pin_markers)}"
     clk = project.fastest_clock
     clock = f"{r.clock_mhz:g} MHz on {clk.port}" if clk else f"a {r.clock_mhz:g} MHz virtual clock"
     srams = ""

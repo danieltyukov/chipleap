@@ -33,8 +33,11 @@ from chipleap.macro.sram import SramViews, librelane_macros
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.verify.pnr import PnrError, run_librelane, signoff
+from chipleap.verify.tools import librelane_loads_pad_views
 
 TAG = "chipleap"
+# The PDK's pad library views LibreLane 3 would load beside the chip's own.
+PAD_VIEWS = ("PAD_LEFS", "PAD_GDS", "PAD_CDLS", "PAD_VERILOG_MODELS", "PAD_SPICE_MODELS")
 IO_VOLTAGES = {"vdd": 1.2, "vss": 0.0, "iovdd": 3.3, "iovss": 0.0}
 OBSTRUCTED = ("Metal1", "Metal2", "Metal3", "Metal4", "Metal5")
 
@@ -135,6 +138,12 @@ def config(
         cfg["CLOCK_NET"] = binding.core_nets[first_clock]
     if macros:
         cfg["MACROS"] = macros
+    if librelane_loads_pad_views():
+        # LibreLane 3 loads the PDK's pad library itself (IHP-Open-PDK's configuration sets
+        # PAD_LEFS and the rest); the chip brings its own IO views, the analog pad's
+        # bond-side port removed, and two definitions of a cell stop the router.
+        for k in PAD_VIEWS:
+            cfg[k] = []
     for k, v in signoff().items():
         if k != "KLAYOUT_DRC_THREADS":
             cfg.setdefault(k, v)
