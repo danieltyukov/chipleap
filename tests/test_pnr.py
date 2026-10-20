@@ -81,6 +81,18 @@ def test_the_layout_says_why_it_keeps_flop_buffers(tmp_path):
     assert pnr.sram_reason(SMOLLM2, stand_in_pdk(tmp_path)) is None
 
 
+def test_a_floorplan_too_flat_to_route_keeps_flop_buffers(tmp_path):
+    """The GEMV 1 x 16's eight 784 um macros make rows of four and a core 7.4 times as wide
+    as tall, which did not route; the 2 x 8's rows of three (3.7 to 1) did."""
+    pdk = stand_in_pdk(tmp_path)
+    reason = pnr.sram_reason(Accel("gemv", 1, 16, 8, ports=1, abuf_kib=2, wbuf_kib=2), pdk)
+    assert reason is not None and "8 macros" in reason and "(7.4 to 1), too flat" in reason
+    assert pnr.sram_reason(Accel("gemv", 2, 8, 8, ports=1, abuf_kib=2, wbuf_kib=4), pdk) is None
+    # A single buffer halves the 1 x 16's macros, two to a row.
+    one = Accel("gemv", 1, 16, 8, ports=1, abuf_kib=1, wbuf_kib=1, double_buffer=False)
+    assert pnr.sram_reason(one, pdk) is None
+
+
 def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

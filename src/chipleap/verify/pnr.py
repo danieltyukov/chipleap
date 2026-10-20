@@ -6,12 +6,13 @@ for layout versus schematic, and OpenSTA for timing at the design's clock. The r
 passes the checks a foundry shuttle asks for.
 
 The activation and weight buffers are SRAM macros in silicon. When the build can have
-them without a change to its schedule (``chipleap.gen.banks``) and the IHP PDK ChipLeap
-uses is installed, the layout has them: IHP's own macros at the design's buffer sizes, in
-rows above and below the logic (``chipleap.macro.place``), each with its halo and the
-macro power grid (``chipleap.macro.grid``), timed at every corner from their liberty and
-checked by LVS as boxes with their pins. Otherwise the layout holds the accelerator's
-logic with 16-word flop buffers, and the result says why.
+them without a change to its schedule (``chipleap.gen.banks``), the IHP PDK ChipLeap
+uses is installed and the macros' rows leave a core that routes, the layout has them:
+IHP's own macros at the design's buffer sizes, in rows above and below the logic
+(``chipleap.macro.place``), each with its halo and the macro power grid
+(``chipleap.macro.grid``), timed at every corner from their liberty and checked by LVS as
+boxes with their pins. Otherwise the layout holds the accelerator's logic with 16-word
+flop buffers, and the result says why.
 """
 
 from __future__ import annotations
@@ -540,9 +541,39 @@ def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
     reason = banks.unsupported(accel)
     if reason is None and pdk is None:
         reason = f"no IHP PDK with its SRAM macros ({io.PDK_ENV})"
-    if reason is None and pdk is not None and not sram.catalog(pdk):
-        reason = f"the PDK at {pdk} has no single-port SRAM macros"
+    if reason is None and pdk is not None:
+        catalog = sram.catalog(pdk)
+        if not catalog:
+            reason = f"the PDK at {pdk} has no single-port SRAM macros"
+        else:
+            reason = _too_flat(accel, catalog)
     return reason
+
+
+# The flattest macro floorplan that routed: the GEMV 2 x 8 build's two rows of three 784 um
+# macros, a core of 2444 x 658 um (3.7 to 1). The GEMV 1 x 16's two rows of four (two
+# 64 x 64 macros for each 16-byte bank word) made a core of 3249 x 438 um (7.4 to 1): at
+# 45 % utilisation its global routing overflowed, and at 35 % repair after placement
+# buffered 10,000 long wires and detailed placement failed.
+MACRO_ASPECT_MAX = 4.0
+
+
+def _too_flat(accel: Accel, catalog: list[sram.Sram]) -> str | None:
+    """Why the floorplan of ``accel``'s macros cannot route, or None when it can."""
+    plan = banks.plan(accel, catalog)
+    dims = {s.cell: (s.width_um, s.height_um) for s in catalog}
+    fp = place.rows(
+        [place.Macro(inst, *dims[cell]) for inst, cell in plan.instances()],
+        model_cell_um2(accel, banked=True),
+    )
+    x0, y0, x1, y1 = fp.core
+    w, h = x1 - x0, y1 - y0
+    if w / h <= MACRO_ASPECT_MAX:
+        return None
+    return (
+        f"its {len(plan.instances())} macros, in two rows, leave a core of {w:.0f} x {h:.0f} um "
+        f"({w / h:.1f} to 1), too flat to route (at most {MACRO_ASPECT_MAX:g} to 1)"
+    )
 
 
 def place_and_route(
