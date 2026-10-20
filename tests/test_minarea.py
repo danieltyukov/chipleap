@@ -589,7 +589,6 @@ def test_an_ecos_second_part_is_read_only_from_its_own_final(tmp_path, monkeypat
         return 0
 
     monkeypatch.setattr(eco, "librelane", lambda: SimpleNamespace(found=True, path="ll"))
-    monkeypatch.setattr(eco, "librelane_pdk_args", lambda: [])
     monkeypatch.setattr(eco, "librelane_env", lambda: {})
     monkeypatch.setattr(eco, "_launch", fake)
     state = tmp_path / "state_in.json"
