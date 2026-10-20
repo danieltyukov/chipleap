@@ -603,7 +603,7 @@ def _run_librelane(
     try:
         marker = begin_second_part(run)
         code = _launch(args, work, log, max(limit - (time.monotonic() - start), 1.0), env)
-        result = second_part_result(run, code, marker)
+        result = second_part_result(run, code, marker, cfg.get("CLOCK_PORT"))
     except PnrError as exc:
         raise EcoError(str(exc)) from None
     if result is None:

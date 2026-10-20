@@ -256,11 +256,25 @@ MAX_SLACK_NS = 1e6
 _SLACK_RE = re.compile(r"timing__(setup|hold)\w*__w(n)?s(__.*)?")
 
 
-def check_metrics(metrics: Mapping[str, Any]) -> None:
-    """Refuse metrics whose worst slacks are not a timing analysis's: not finite, or
-    beyond ``MAX_SLACK_NS``."""
+def check_metrics(metrics: Mapping[str, Any], clock: Any = None) -> None:
+    """Refuse metrics whose worst slacks are not a timing analysis's: not a number, minus
+    infinity, or a finite slack beyond ``MAX_SLACK_NS``. Plus infinity is a group with no
+    constrained path, such as register to register in a design whose flip-flops all
+    face its ports or a macro; but a design whose worst setup slack is plus infinity had
+    nothing timed at all, against ``clock`` (LibreLane's ``CLOCK_PORT``): a clock that
+    names no port, or constraints that were not read."""
+    setup = metrics.get("timing__setup__ws")
+    if isinstance(setup, float) and setup == math.inf:
+        ports = clock if isinstance(clock, list) else [clock] if clock else []
+        named = " against clock " + ", ".join(str(p) for p in ports) if ports else ""
+        raise PnrError(
+            f"no path was timed{named}: LibreLane's worst setup slack is plus infinity, so "
+            "the clock names no port of the design or its constraints were not read"
+        )
     for k, v in metrics.items():
         if not _SLACK_RE.fullmatch(k) or isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v == math.inf:
             continue
         if not math.isfinite(v) or abs(v) > MAX_SLACK_NS:
             raise PnrError(
@@ -287,11 +301,12 @@ def begin_second_part(run: Path) -> Path:
 
 
 def second_part_result(
-    run: Path, code: int, marker: Path
+    run: Path, code: int, marker: Path, clock: Any = None
 ) -> tuple[dict[str, Any], Path | None] | None:
     """The metrics and GDS of the second part (``begin_second_part``), or None when it did
     not finish: LibreLane exited with an error or wrote no final/. A final/ older than the
-    marker, or metrics no timing analysis gives, raise ``PnrError``."""
+    marker, or metrics no timing analysis gives (``check_metrics``, against ``clock``),
+    raise ``PnrError``."""
     final = run / "final"
     metrics_file = final / "metrics.json"
     if code != 0 or final.is_symlink() or not metrics_file.is_file():
@@ -304,7 +319,7 @@ def second_part_result(
         raise PnrError(f"LibreLane's {metrics_file.name}: {exc}") from None
     if not isinstance(metrics, dict):
         raise PnrError(f"LibreLane's {metrics_file.name} is not a mapping")
-    check_metrics(metrics)
+    check_metrics(metrics, clock)
     return metrics, next(iter(sorted((final / "gds").glob("*.gds"))), None)
 
 
@@ -360,7 +375,7 @@ def run_librelane(
     marker = begin_second_part(run)
     left = limit - (time.monotonic() - start)
     code = _librelane(args, workdir, log, max(left, 1.0), limit, env)
-    result = second_part_result(run, code, marker)
+    result = second_part_result(run, code, marker, cfg.get("CLOCK_PORT"))
     if result is None:
         raise PnrError(f"LibreLane did not finish (exit {code}):\n{_tail(log)}")
     return result
