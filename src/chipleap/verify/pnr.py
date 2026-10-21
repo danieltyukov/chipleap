@@ -36,7 +36,12 @@ from chipleap.rtl import builddir
 from chipleap.verify import launch, librelane_pdk, minarea
 from chipleap.verify.drc import DrcReportError, DrcResult, pdk_cells, read_lyrdb
 from chipleap.verify.synth import _sv2v
-from chipleap.verify.tools import librelane, librelane_env, librelane_ran
+from chipleap.verify.tools import (
+    librelane,
+    librelane_env,
+    librelane_ran,
+    librelane_version_key,
+)
 
 PNR_WORDS = 16
 
@@ -335,6 +340,21 @@ def second_part_result(
     return metrics, next(iter(sorted((final / "gds").glob("*.gds"))), None)
 
 
+# LibreLane 3.0.14 hands KLAYOUT_DRC_THREADS to IHP's rule deck as ``thr``, which the deck
+# at 22f2a25 does not read: it reads ``threads`` and otherwise runs on every CPU the process
+# may use. KLAYOUT_DRC_DEFINES, which 3.0.0.dev44 does not know, passes ``threads`` too.
+DRC_DEFINES_FROM = (3, 0, 14, 2, 0)
+
+
+def with_drc_threads(cfg: dict[str, Any], version: str) -> dict[str, Any]:
+    """``cfg`` with KLayout's DRC thread count also passed as ``threads``, the name IHP's
+    rule deck reads, on a LibreLane that knows ``KLAYOUT_DRC_DEFINES``."""
+    threads = cfg.get("KLAYOUT_DRC_THREADS")
+    if threads is None or librelane_version_key(version) < DRC_DEFINES_FROM:
+        return cfg
+    return {**cfg, "KLAYOUT_DRC_DEFINES": {"threads": threads}}
+
+
 def run_librelane(
     workdir: Path, cfg: dict[str, Any], tag: str = "chipleap"
 ) -> tuple[dict[str, Any], Path | None]:
@@ -354,6 +374,7 @@ def run_librelane(
         env = librelane_env()
     except ValueError as exc:
         raise PnrError(str(exc)) from None
+    cfg = with_drc_threads(cfg, tool.version)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
     base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", tag]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))

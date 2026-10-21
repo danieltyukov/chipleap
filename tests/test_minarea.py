@@ -2,6 +2,7 @@
 (chipleap.verify.minarea)."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -491,6 +492,24 @@ def test_slacks_no_timing_analysis_gives_are_refused(tmp_path, monkeypatch):
             pnr.check_metrics({"timing__hold__ws__corner:nom_fast_1p32V_m40C": bad})
 
 
+@pytest.mark.parametrize(
+    ("version", "defines"), [("3.0.14", {"threads": 4}), ("3.0.0.dev44", None)]
+)
+def test_klayouts_drc_threads_reach_ihps_deck(tmp_path, monkeypatch, version, defines):
+    """LibreLane 3.0.14 passes KLAYOUT_DRC_THREADS to IHP's deck as thr, which the deck at
+    22f2a25 does not read, so KLayout ran on every CPU; the count goes as threads too.
+    3.0.0.dev44 refuses KLAYOUT_DRC_DEFINES, and its deck reads the count it is given."""
+    _fake_librelane(tmp_path, monkeypatch, _finishes({"timing__setup__ws": 0.5}), [])
+    monkeypatch.setattr(
+        pnr, "librelane", lambda: SimpleNamespace(found=True, path="ll", version=version)
+    )
+    pnr.run_librelane(tmp_path / "pnr", {"KLAYOUT_DRC_THREADS": 4})
+    for name in ("config.json", pnr.MIN_AREA_CONFIG):
+        cfg = json.loads((tmp_path / "pnr" / name).read_text())
+        assert cfg.get("KLAYOUT_DRC_DEFINES") == defines, name
+    assert pnr.with_drc_threads({}, "3.0.14") == {}
+
+
 def test_a_group_without_paths_is_read(tmp_path, monkeypatch):
     """LibreLane writes a group with no path as Infinity, as for the memory chip's
     register-to-register paths."""
@@ -561,7 +580,6 @@ def test_def_to_odb_follows_routing_in_a_step_list_or_as_a_substitution():
 
 @pytest.mark.parametrize("finishes", [True, False])
 def test_an_ecos_second_part_is_read_only_from_its_own_final(tmp_path, monkeypatch, finishes):
-    from types import SimpleNamespace
 
     from chipleap.rtl import eco
 
@@ -588,7 +606,9 @@ def test_an_ecos_second_part_is_read_only_from_its_own_final(tmp_path, monkeypat
         (run / "final" / "metrics.json").write_text(json.dumps(PART1_METRICS))
         return 0
 
-    monkeypatch.setattr(eco, "librelane", lambda: SimpleNamespace(found=True, path="ll"))
+    monkeypatch.setattr(
+        eco, "librelane", lambda: SimpleNamespace(found=True, path="ll", version="3.0.14")
+    )
     monkeypatch.setattr(eco, "librelane_env", lambda: {})
     monkeypatch.setattr(eco, "_launch", fake)
     state = tmp_path / "state_in.json"

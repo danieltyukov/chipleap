@@ -69,6 +69,7 @@ from chipleap.verify.pnr import (
     patch_min_area,
     second_part_result,
     step_state,
+    with_drc_threads,
 )
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import (
@@ -114,6 +115,7 @@ TEMPLATE_KEYS = {
     "GRT_RESIZER_SETUP_SLACK_MARGIN": "number",
     "GRT_RESIZER_HOLD_SLACK_MARGIN": "number",
     "KLAYOUT_DRC_THREADS": "number",
+    "KLAYOUT_DRC_DEFINES": "drc_defines",
     # A project with hard macros (chipleap.rtl.pnr.macro_config).
     "CORE_AREA": "number",
     "FP_MACRO_HORIZONTAL_HALO": "number",
@@ -415,6 +417,13 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
         if kind == "macros":
             _macros(value, sealed)
             continue
+        if kind == "drc_defines":
+            # ChipLeap's own (``chipleap.verify.pnr.with_drc_threads``), which the ECO's
+            # run writes again.
+            if value != {"threads": cfg.get("KLAYOUT_DRC_THREADS")}:
+                raise EcoError(f"the routed run's configuration sets {key} to {value!r}")
+            del out[key]
+            continue
         if kind == "pdn":
             # ChipLeap's power grid script: the ECO resumes after the grid is built, so it
             # is not passed on, and a script is never run from a configuration.
@@ -572,6 +581,7 @@ def _run_librelane(
         env = librelane_env()
     except ValueError as exc:
         raise EcoError(str(exc)) from None
+    cfg = with_drc_threads(cfg, tool.version)
     builddir.write_text(work, "config.eco.json", json.dumps(cfg, indent=2))
     base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", ECO_TAG]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
