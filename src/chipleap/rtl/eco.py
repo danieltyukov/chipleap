@@ -105,6 +105,8 @@ TEMPLATE_KEYS = {
     "DIE_AREA": "number",
     "RUN_MAGIC_DRC": "bool",
     "ERROR_ON_KLAYOUT_DRC": "bool",
+    "SETUP_VIOLATION_CORNERS": "text",
+    "HOLD_VIOLATION_CORNERS": "text",
     "DRT_ANTENNA_REPAIR_ITERS": "number",
     "DEFAULT_CORNER": "text",
     "RUN_POST_GRT_RESIZER_TIMING": "bool",

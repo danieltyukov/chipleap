@@ -101,6 +101,13 @@ def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[
         # markers as errors, and its verdict would end the run on exit 2, which ChipLeap
         # reads no result from.
         "ERROR_ON_KLAYOUT_DRC": False,
+        # ChipLeap judges setup and hold at every corner from the run's metrics, and reports
+        # a run that misses them with its slack. LibreLane's checks would end such a run on
+        # exit 2: IHP's configuration checks setup at every corner from 22f2a25 on (it was
+        # the typical corner only), and LibreLane checks hold at every corner. [""] matches
+        # no corner.
+        "SETUP_VIOLATION_CORNERS": [""],
+        "HOLD_VIOLATION_CORNERS": [""],
         # Let the detailed router fix antenna violations with diodes, as a shuttle requires.
         "DRT_ANTENNA_REPAIR_ITERS": 5,
         # Optimise where the design is signed off: gate sizing, buffering, the clock tree and
