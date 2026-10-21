@@ -15,7 +15,7 @@ import json
 import os
 import shutil
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -170,6 +170,7 @@ class Prepared:
     plan: Floorplan
     cfg: dict[str, Any]
     pdk_spec: str
+    core_budget: netlist.CoreBudget
 
 
 def import_macros(project: Project, pdk: Path, spec: str, flow_dir: Path) -> layer.Imported:
@@ -237,7 +238,9 @@ def prepare(project: Project, pdk: Path) -> Prepared:
         f"src/{chip.name}.v",
         netlist.chip_top(chip, binding, plan, project.top, project.parameters),
     )
-    builddir.write_text(flow_dir, "chip.sdc", netlist.sdc(binding, clocks))
+    numbers = iotiming.budget(chip.io, iotiming.reference_period(binding, clocks))
+    pads = iotiming.core_budget(pdk / "libs.ref" / io.IO / "lib", numbers)
+    builddir.write_text(flow_dir, "chip.sdc", netlist.sdc(binding, clocks, pads))
     builddir.write_text(
         flow_dir, "pins.def", netlist.pins_def(chip, binding, plan, (pad.width, pad.height))
     )
@@ -255,7 +258,7 @@ def prepare(project: Project, pdk: Path) -> Prepared:
         flow_dir,
         srams,
     )
-    return Prepared(work, flow_dir, pdk, cells, every, binding, plan, cfg, spec)
+    return Prepared(work, flow_dir, pdk, cells, every, binding, plan, cfg, spec, pads)
 
 
 def core_macros(
@@ -598,6 +601,8 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
         "hold_slack_ns": round(r.hold_slack_ns, 3),
         # ChipLeap's, at the chip's ports through the pads
         "io_timing": io_timing.to_dict(),
+        # What LibreLane timed the core against at its side of the pads (chip.sdc).
+        "core_budget": asdict(p.core_budget),
         "cells": r.cells,
         "lvs": lvs_data,
         "drc": {
