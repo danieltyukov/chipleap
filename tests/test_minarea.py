@@ -493,7 +493,7 @@ def test_slacks_no_timing_analysis_gives_are_refused(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("version", "defines"), [("3.0.14", {"threads": 4}), ("3.0.0.dev44", None)]
+    ("version", "defines"), [("3.0.14", {"threads": "4"}), ("3.0.0.dev44", None)]
 )
 def test_klayouts_drc_threads_reach_ihps_deck(tmp_path, monkeypatch, version, defines):
     """LibreLane 3.0.14 passes KLAYOUT_DRC_THREADS to IHP's deck as thr, which the deck at

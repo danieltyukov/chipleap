@@ -420,7 +420,7 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
         if kind == "drc_defines":
             # ChipLeap's own (``chipleap.verify.pnr.with_drc_threads``), which the ECO's
             # run writes again.
-            if value != {"threads": cfg.get("KLAYOUT_DRC_THREADS")}:
+            if value != {"threads": str(cfg.get("KLAYOUT_DRC_THREADS"))}:
                 raise EcoError(f"the routed run's configuration sets {key} to {value!r}")
             del out[key]
             continue

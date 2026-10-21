@@ -352,7 +352,7 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     # Every setting place and route shares passes on.
     assert E._settings(p, signoff(), sealed) == signoff()
     # KLayout's DRC threads as IHP's deck reads them: ChipLeap's, which the ECO writes again.
-    threads = {"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": 4}}
+    threads = {"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": "4"}}
     assert E._settings(p, threads, sealed) == {"KLAYOUT_DRC_THREADS": 4}
     for bad, why in [
         ({"PLACEMENT_SCRIPT": "x.tcl"}, "does not pass on"),
@@ -364,8 +364,8 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
         ({"VERILOG_FILES": ["/abs/counter.v"]}, "not a file ChipLeap wrote"),
         ({"VERILOG_FILES": ["dir::src/other.v"]}, "not a file ChipLeap recorded"),
         ({"CLOCK_PERIOD": "10"}, "not a number"),
-        ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": 4, "x": 1}}, "DEFINES"),
-        ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": 64}}, "DEFINES"),
+        ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": "4", "x": "1"}}, "DEFINES"),
+        ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": 4}}, "DEFINES"),
     ]:
         with pytest.raises(E.EcoError, match=why):
             E._settings(p, bad, sealed)

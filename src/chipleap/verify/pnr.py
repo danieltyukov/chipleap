@@ -352,7 +352,8 @@ def with_drc_threads(cfg: dict[str, Any], version: str) -> dict[str, Any]:
     threads = cfg.get("KLAYOUT_DRC_THREADS")
     if threads is None or librelane_version_key(version) < DRC_DEFINES_FROM:
         return cfg
-    return {**cfg, "KLAYOUT_DRC_DEFINES": {"threads": threads}}
+    # LibreLane takes the defines as text.
+    return {**cfg, "KLAYOUT_DRC_DEFINES": {"threads": str(threads)}}
 
 
 def run_librelane(
