@@ -631,10 +631,47 @@ def _macro_pins(conns: Mapping[str, str]) -> str:
     return ", ".join(out)
 
 
-def sdc(b: Binding, clocks: Mapping[str, float]) -> str:
-    """Timing constraints: each clock on its input pad's core-side pin, input delays on
-    the other input pads' and output delays on the output pads' core-side pins, as a
-    fraction of the first clock's period (LibreLane's IO_DELAY_CONSTRAINT)."""
+@dataclass(frozen=True)
+class PadDelay:
+    """The pads' delays at one signoff corner, in ns, before the derate: an input pad's
+    ``pad`` to ``p2c`` arc (a data input's slower and faster edge, a clock's rising edge)
+    and an output pad's ``c2p`` to ``pad`` arc (slower and faster edge). None where the
+    IO liberty has no such arc."""
+
+    corner: str
+    input_max: float | None
+    input_min: float | None
+    clock: float | None
+    output_max: float | None
+    output_min: float | None
+
+
+@dataclass(frozen=True)
+class CoreBudget:
+    """What the core has at its side of the pads: the world outside (``chip.io``'s
+    input and output delays at the chip's ports) and the pads' own delays at each
+    signoff corner (``chipleap.chip.iotiming.core_budget``)."""
+
+    input_ns: float
+    output_ns: float
+    pads: tuple[PadDelay, ...] = ()
+
+
+def _bound(kind: str, terms: list[str], base: float) -> str:
+    return f"[expr {{{kind}({', '.join(terms)})}}]" if terms else q.number(float(base))
+
+
+def sdc(b: Binding, clocks: Mapping[str, float], budget: CoreBudget) -> str:
+    """Timing constraints: each clock on its input pad's core-side pin; input delays on
+    the other input pads' and output delays on the output pads' core-side pins, the
+    budget the pads leave the core (``CoreBudget``). With ``d`` the derate
+    (``TIME_DERATING_CONSTRAINT``), at each corner an input pad's core pin sees its data
+    ``input + pad * (1 + d) - clock_pad * (1 - d)`` after the clock edge at the clock
+    pad's core pin at the latest, ``input + pad * (1 - d) - clock_pad * (1 + d)`` at the
+    earliest; an output pad's core pin must have its data ``output + (pad + clock_pad) *
+    (1 + d)`` before the next edge, and holds it ``output + (pad + clock_pad) * (1 - d)``
+    after. The latest of each over the corners is the ``-max`` delay, the earliest the
+    ``-min``. Without a clock pad, ``clock_pad`` is 0."""
     lines = ["# Written by ChipLeap from the chip section of project.yaml."]
     if b.clocks:
         for port, inst in b.clocks.items():
@@ -642,20 +679,38 @@ def sdc(b: Binding, clocks: Mapping[str, float]) -> str:
                 f"create_clock -name {q.plain(flat(port))} -period {clocks[port]:g} "
                 f"[get_pins {q.plain(inst)}/p2c]"
             )
-        ref, period = flat(next(iter(b.clocks))), clocks[next(iter(b.clocks))]
+        ref = flat(next(iter(b.clocks)))
     else:
-        ref, period = "__VIRTUAL_CLK__", DEFAULT_PERIOD_NS
-        lines.append(f"create_clock -name {ref} -period {period:g}")
+        ref = "__VIRTUAL_CLK__"
+        lines.append(f"create_clock -name {ref} -period {DEFAULT_PERIOD_NS:g}")
     clock_pads = set(b.clocks.values())
     ins = sorted(i for i, c in b.io.items() if "p2c" in c and i not in clock_pads)
     outs = sorted(i for i, c in b.io.items() if "c2p" in c)
-    lines.append(f"set io_delay [expr {period:g} * $::env(IO_DELAY_CONSTRAINT) / 100]")
+    i, o = q.number(float(budget.input_ns)), q.number(float(budget.output_ns))
+    lines.append("set derate [expr {$::env(TIME_DERATING_CONSTRAINT) / 100.0}]")
+    in_max, in_min, out_max, out_min = [], [], [], []
+    for p in budget.pads:
+        c = q.number(float(p.clock or 0.0)) if b.clocks else "0"
+        if p.input_max is not None and p.input_min is not None:
+            in_max.append(f"{i} + {q.number(p.input_max)} * (1 + $derate) - {c} * (1 - $derate)")
+            in_min.append(f"{i} + {q.number(p.input_min)} * (1 - $derate) - {c} * (1 + $derate)")
+        if p.output_max is not None and p.output_min is not None:
+            out_max.append(f"{o} + ({q.number(p.output_max)} + {c}) * (1 + $derate)")
+            out_min.append(f"{o} + ({q.number(p.output_min)} + {c}) * (1 - $derate)")
     if ins:
-        pins = " ".join(f"{q.plain(i)}/p2c" for i in ins)
-        lines.append(f"set_input_delay $io_delay -clock [get_clocks {ref}] [get_pins {{{pins}}}]")
+        pins = " ".join(f"{q.plain(x)}/p2c" for x in ins)
+        for kind, terms, extreme in (("-max", in_max, "max"), ("-min", in_min, "min")):
+            lines.append(
+                f"set_input_delay {kind} {_bound(extreme, terms, budget.input_ns)} "
+                f"-clock [get_clocks {ref}] [get_pins {{{pins}}}]"
+            )
     if outs:
-        pins = " ".join(f"{q.plain(i)}/c2p" for i in outs)
-        lines.append(f"set_output_delay $io_delay -clock [get_clocks {ref}] [get_pins {{{pins}}}]")
+        pins = " ".join(f"{q.plain(x)}/c2p" for x in outs)
+        for kind, terms, extreme in (("-max", out_max, "max"), ("-min", out_min, "min")):
+            lines.append(
+                f"set_output_delay {kind} {_bound(extreme, terms, budget.output_ns)} "
+                f"-clock [get_clocks {ref}] [get_pins {{{pins}}}]"
+            )
     lines += [
         "set_clock_uncertainty $::env(CLOCK_UNCERTAINTY_CONSTRAINT) [all_clocks]",
         "set_clock_transition $::env(CLOCK_TRANSITION_CONSTRAINT) [all_clocks]",
