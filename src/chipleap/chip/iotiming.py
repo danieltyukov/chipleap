@@ -1,8 +1,9 @@
 """The chip's timing at its ports: the pads' own delays in the signoff.
 
 LibreLane times the core against its side of the pads (the IO cells' ``p2c`` and ``c2p``
-pins), with an IO liberty that has no arcs, so the pads' delays are not in its numbers.
-After routing, ChipLeap times the chip again with OpenSTA (in OpenROAD) at every corner
+pins), with an IO liberty that has no arcs, against the budget the pads leave it there:
+the world outside less the pads' own delays at each signoff corner (``core_budget``,
+written into the chip's constraints by ``chipleap.chip.netlist.sdc``). After routing, ChipLeap times the chip again with OpenSTA (in OpenROAD) at every corner
 the core was signed off at: the routed netlist and its parasitics, the standard cells'
 liberty of that corner, IHP's ``sg13g2_io`` liberty of the same process, core voltage and
 temperature, which has the pads' arcs (``pad`` to ``p2c`` of an input pad, ``c2p`` to
@@ -30,7 +31,7 @@ from typing import Any
 
 from chipleap.chip.config import DEFAULT_IO_DELAY_PCT, IoBudget
 from chipleap.chip.io import IO, PAD_CELLS
-from chipleap.chip.netlist import Binding, flat
+from chipleap.chip.netlist import Binding, CoreBudget, PadDelay, flat
 from chipleap.rtl import builddir
 from chipleap.rtl import quote as q
 from chipleap.rtl.eco import TimingPath, parse_paths
@@ -45,6 +46,14 @@ DELAY_TABLES = ("cell_rise", "cell_fall")
 PATHS_SHOWN = 5
 LIBERTY_MAX = 64 << 20
 UNCERTAINTY_MAX_NS = 100.0
+# IHP's signoff corners in LibreLane (its STA_CORNERS): process, core supply, temperature.
+SIGNOFF_CORNERS = (("typ", 1.2, 25.0), ("slow", 1.08, 125.0), ("fast", 1.32, -40.0))
+# What the core-side budget takes the pads' arcs at, besides chip.io: the edge a core
+# driver gives an output pad's c2p (the 0.14 to 0.38 ns LibreLane 3.0.0.dev44's
+# resizer gave the UART chip's), and the load an input pad's p2c drives in the core
+# (0.03 to 0.09 pF on that chip). Both are points of IHP's tables.
+CORE_EDGE_NS = 0.33
+CORE_LOAD_PF = 0.048
 DERATE_MAX_PCT = 50.0
 # LibreLane's signoff corners: parasitics (nom, min, max), process, core supply, temperature.
 STA_CORNER_RE = re.compile(r"(nom|min|max)_(typ|slow|fast)_(\d+p\d+)V_(m?\d+)C")
@@ -247,6 +256,85 @@ def _index(timing: str, table: str, n: int) -> list[float]:
         return [float(v) for v in m.group(1).split(",")] if m else []
     except ValueError:
         return []
+
+
+def _table(timing: str, table: str) -> tuple[list[float], list[float], list[list[float]]]:
+    """A two-dimensional delay table of a timing group: its axes and rows."""
+    body = next((b for _, b in _groups(timing, table)), "")
+    x1, x2 = _index(timing, table, 1), _index(timing, table, 2)
+    m = re.search(r"\bvalues\s*\((.*?)\)\s*;", body, re.S)
+    rows: list[list[float]] = []
+    if m is not None:
+        try:
+            rows = [
+                [float(v) for v in r.split(",")] for r in re.findall(r"\"([^\"]*)\"", m.group(1))
+            ]
+        except ValueError:
+            rows = []
+    if len(x1) < 2 or len(x2) < 2 or len(rows) != len(x1) or any(len(r) != len(x2) for r in rows):
+        raise IoTimingError(f"a {table} table of IHP's IO liberty is not a table ChipLeap reads")
+    return x1, x2, rows
+
+
+def _between(axis: list[float], x: float) -> tuple[int, float]:
+    """The pair of axis points around ``x`` (the first or last pair beyond the axis) and
+    where ``x`` lies along it, as OpenSTA interpolates and extrapolates."""
+    i = max(
+        0, min(len(axis) - 2, next((n - 1 for n, v in enumerate(axis) if v > x), len(axis) - 2))
+    )
+    return i, (x - axis[i]) / (axis[i + 1] - axis[i])
+
+
+def lookup(timing: str, table: str, x1: float, x2: float) -> float:
+    """A delay table's value at ``x1`` (the input edge, ns) and ``x2`` (the load, pF)."""
+    a1, a2, rows = _table(timing, table)
+    i, t = _between(a1, x1)
+    j, u = _between(a2, x2)
+    return (
+        (1 - t) * (1 - u) * rows[i][j]
+        + t * (1 - u) * rows[i + 1][j]
+        + (1 - t) * u * rows[i][j + 1]
+        + t * u * rows[i + 1][j + 1]
+    )
+
+
+def pad_delay(
+    liberty: str, cell: str, edge_ns: float, load_pf: float
+) -> tuple[float, float, float] | None:
+    """A pad cell's arc at an input edge and a load: its rising, slower and faster edge's
+    delay in ns. None when the liberty has no arc."""
+    timing, _ = _arc(liberty, cell)
+    if timing is None:
+        return None
+    rise = lookup(timing, "cell_rise", edge_ns, load_pf)
+    fall = lookup(timing, "cell_fall", edge_ns, load_pf)
+    return rise, max(rise, fall), min(rise, fall)
+
+
+def core_budget(io_dir: Path, numbers: Mapping[str, float]) -> CoreBudget:
+    """The budget the pads leave the core at their core-side pins, for LibreLane
+    (``chipleap.chip.netlist.sdc``): ``chip.io``'s delays and, at each of IHP's signoff
+    corners (``SIGNOFF_CORNERS``), an input pad's arc at ``chip.io``'s input edge rate
+    and the load ``CORE_LOAD_PF`` (a clock pad's too), and an output pad's at the edge
+    ``CORE_EDGE_NS`` and ``chip.io``'s output load. A corner whose IO liberty lacks an arc
+    gives that pad no delay; the timing at the ports finds the pad untimed, as before."""
+    pads = []
+    for process, volts, temp in SIGNOFF_CORNERS:
+        lib = io_library(io_dir, process, volts, temp)
+        text = _plain_liberty(lib.read_text(errors="replace"))
+        d_in = pad_delay(text, PAD_CELLS["in"], numbers["input_transition_ns"], CORE_LOAD_PF)
+        d_out = pad_delay(text, PAD_CELLS["out"], CORE_EDGE_NS, numbers["output_load_pf"])
+        pads.append(
+            PadDelay(
+                process,
+                d_in[1] if d_in else None,
+                d_in[2] if d_in else None,
+                d_in[0] if d_in else None,
+                d_out[1] if d_out else None,
+                d_out[2] if d_out else None,
+            )
+        )
+    return CoreBudget(numbers["input_delay_ns"], numbers["output_delay_ns"], tuple(pads))
 
 
 def characterised(liberty: str, numbers: Mapping[str, float], cells: Iterable[str]) -> list[str]:
@@ -481,14 +569,12 @@ def run(
     spef = _inside(
         run_dir / "final" / "spef" / "nom" / f"{name}.nom.spef", run_dir, f"{name}.nom.spef"
     )
+    # The nominal corner's tech LEF: LibreLane 3.0.0.dev44 names one per corner
+    # ("nom_*"), LibreLane 3.0 one for all of them ("*").
     tech = resolved.get("TECH_LEFS")
-    tech_lef = next(
-        (
-            v
-            for k, v in (tech.items() if isinstance(tech, dict) else [])
-            if str(k).startswith("nom")
-        ),
-        None,
+    techs = list(tech.items()) if isinstance(tech, dict) else []
+    tech_lef = next((v for k, v in techs if str(k).startswith("nom")), None) or next(
+        (v for k, v in techs if k == "*"), None
     )
     cell_lefs = resolved.get("CELL_LEFS")
     if tech_lef is None or not isinstance(cell_lefs, list) or not cell_lefs:
