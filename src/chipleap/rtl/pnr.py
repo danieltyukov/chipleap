@@ -449,6 +449,7 @@ def pnr(project: Project) -> StepResult:
         return StepResult("pnr", status, msg, {"error": str(exc)})
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     clean = r.clean and r.antenna_nets == 0
+    hold = f"; hold missed by {-r.hold_slack_ns:.3f} ns" if r.hold_slack_ns < 0 else ""
     if clean:
         checks = "DRC, LVS and antenna clean"
     else:
@@ -463,7 +464,8 @@ def pnr(project: Project) -> StepResult:
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.4f} mm2 core at "
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells{srams}; {clock} "
-        f"{'met' if met else 'missed'} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
-        f"and about {r.fmax_mhz:.0f} MHz at the typical one); {checks}"
+        f"{'met' if r.setup_slack_ns >= 0 else 'missed'} at the slow corner (about "
+        f"{r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the typical one){hold}; "
+        f"{checks}"
     )
     return StepResult("pnr", "pass" if met and clean else "fail", msg, pnr_data(project, r))

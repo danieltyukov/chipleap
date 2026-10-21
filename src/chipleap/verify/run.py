@@ -233,6 +233,7 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     # corner (1.08 V, 125 C), hold at every corner. The typical corner is reported beside it.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     checks = "DRC and LVS clean" if r.clean else f"{r.drc_errors} DRC and {r.lvs_errors} LVS errors"
+    hold = f"; hold missed by {-r.hold_slack_ns:.3f} ns" if r.hold_slack_ns < 0 else ""
     if r.antenna_nets:
         checks += f", {r.antenna_nets} antenna violations"
     if r.pin_markers:
@@ -240,8 +241,9 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
-        f"{'met' if met else 'missed'} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
-        f"and about {r.fmax_mhz:.0f} MHz at the typical one); {checks}"
+        f"{'met' if r.setup_slack_ns >= 0 else 'missed'} at the slow corner (about "
+        f"{r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the typical one){hold}; "
+        f"{checks}"
     )
     if r.macros:
         msg += (
