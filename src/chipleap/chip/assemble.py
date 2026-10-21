@@ -227,6 +227,7 @@ def prepare(project: Project, pdk: Path) -> Prepared:
     except macros.MacroStepError as exc:
         raise NetlistError(str(exc)) from None
     merge.check_modules(core, every.views, chip.name, sorted({c.cell for c in plan.ring}))
+    merge.check_macros(every.views.values())
     flow.write_io(flow_dir, pdk, cells, sorted({c.cell for c in plan.ring}))
     pad = cells[io.PAD_CELLS["in"]]
     if f"dir::src/{chip.name}.v" in verilog.get("VERILOG_FILES", []):

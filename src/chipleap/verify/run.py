@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
@@ -30,6 +30,9 @@ from chipleap.verify.drc import describe_markers
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import clean_env, verilator
+
+if TYPE_CHECKING:
+    from chipleap.verify.soc import SocResult
 
 
 def consistency(design: Design, bundle: Path) -> StepResult:
@@ -334,6 +337,11 @@ def place_route_soc(
         msg = str(exc).splitlines()[0]
         status = "skipped" if "not installed" in msg else "fail"
         return StepResult("soc", status, msg, {"error": str(exc)})
+    return soc_step_result(design, s, time.monotonic() - start)
+
+
+def soc_step_result(design: Design, s: SocResult, runtime_s: float) -> StepResult:
+    """The soc step's result from what the routed SoC measures."""
     r = s.pnr
     clock = r.clock_mhz
     counts: dict[str, int] = {}
@@ -347,7 +355,7 @@ def place_route_soc(
         "clock_mhz": clock,
         "design_clock_mhz": design.freq_mhz,
         "model_soc_limit_mhz": round(limit, 1) if limit else None,
-        "runtime_s": round(time.monotonic() - start),
+        "runtime_s": round(runtime_s),
         "die_um2": round(r.die_um2),
         "core_um2": round(r.core_um2),
         "cell_um2": round(r.cell_um2),

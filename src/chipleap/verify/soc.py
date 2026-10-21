@@ -32,6 +32,7 @@ from typing import Any
 
 import yaml
 
+from chipleap.chip import merge
 from chipleap.gen import banks, soc
 from chipleap.gen.rtl import accel_sv
 from chipleap.hw.design import Design
@@ -550,6 +551,12 @@ def prepare(
         (f"{soc.ACCEL_INST}.{inst}", cell) for inst, cell in accel_banks.instances()
     ]
     views = {cell: sram.views(pdk, cell, work) for cell in sorted({c for _, c in instances})}
+    # The macros' cells go into one layout and one netlist with the rest; a clash among
+    # them would stop the run only after its layout, hours from now.
+    try:
+        merge.check_macros(v.view for v in views.values())
+    except merge.MergeError as exc:
+        raise SocError(f"merged names: {exc}") from None
     return config(sources, clock), Prepared(sources, instances, views)
 
 
@@ -586,8 +593,7 @@ def place_and_route(
     layout, in the same LibreLane run."""
     clock = clock_mhz or design.freq_mhz
     cfg, prep = prepare(design, config_text, checkout, work, pdk, clock)
-    model_cells, model_macros = model_areas_um2(design)
-    first, _ = with_floorplan(cfg, prep, model_cells, work)
+    first, _ = with_floorplan(cfg, prep, model_areas_um2(design)[0], work)
     pnr.run_librelane(work, first, to="Yosys.Synthesis", timeout_s=TIMEOUT_S)
     run = work / "runs" / "chipleap"
     if problems := netlist_problems(run):
@@ -597,18 +603,39 @@ def place_and_route(
         raise SocError("LibreLane's synthesis reported no standard-cell area")
     full, _ = with_floorplan(cfg, prep, synth, work)
     metrics, gds = pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S)
+    return routed(design, work, pdk, clock, prep.instances, synth, metrics, gds)
+
+
+def routed(
+    design: Design,
+    work: Path,
+    pdk: Path,
+    clock: float,
+    instances: Iterable[tuple[str, str]],
+    synth_um2: float,
+    metrics: dict[str, Any],
+    gds: Path | None,
+) -> SocResult:
+    """What the SoC LibreLane laid out in ``work`` measures, from its final metrics and
+    GDS: its names merged once (``chipleap.rtl.pnr.check_merged``), the PDK
+    macros' own pin markers set apart, and the measures against the model's."""
     from chipleap.rtl.pnr import check_merged
 
+    run = work / "runs" / "chipleap"
     check_merged(run, work, soc.TOP)
+    placed = tuple(instances)
     area = {s.cell: s.area_um2 for s in sram.catalog(pdk)}
     held = pdk_cells(
-        ((cell, layer.pdk_macro_cells(pdk, cell, sram.LIBRARY)) for cell in prep.views),
+        (
+            (cell, layer.pdk_macro_cells(pdk, cell, sram.LIBRARY))
+            for cell in sorted({c for _, c in placed})
+        ),
         (soc.TOP,),
     )
     result = replace(
         pnr.parse_run(metrics, clock, gds, run, held),
-        synth_cell_um2=synth,
-        macros=tuple(prep.instances),
-        macro_um2=sum(area[cell] for _, cell in prep.instances),
+        synth_cell_um2=synth_um2,
+        macros=placed,
+        macro_um2=sum(area[cell] for _, cell in placed),
     )
-    return SocResult(result, tuple(prep.instances), model_cells, model_macros)
+    return SocResult(result, placed, *model_areas_um2(design))
