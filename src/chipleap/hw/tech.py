@@ -111,13 +111,15 @@ ACCEL_PORT_NS = (8.966, 0.1413)
 #   to 9.4 ns at 2048 and more) bounds its period, with what follows the read: the word's
 #   select and weight unpacking into the operand registers, and the wires from the macro
 #   rows. ACCEL_BANK_PATH_NS is the most that took after the liberty's read time: 2.36 ns
-#   in the GEMV 1 x 4 build with 256 x 32 macros, 2.61 ns in the 1 x 8 with 256 x 64, and
+#   in the GEMV 1 x 4 build with 256 x 32 macros, 2.61 ns in the 1 x 8 with 256 x 64,
 #   2.53 ns in the 1 x 8 with 1024 x 64, whose read path (9.81 ns) came within 0.2 ns of
-#   its clock.
+#   its clock, and 2.64 ns in the 1 x 8 with 2048 x 64, whose read path (8.97 + 2.64 ns)
+#   set its clock at 86.5 MHz.
 # - Its logic is spread along the rows of macros, across a die several times the flop
-#   build's, and routes slower than the flop build: the 1 x 4 at 9.31 ns, the 1 x 8 at
-#   9.88 ns and, with 1024-word macros, 10.06 ns, where the model has 9.33 ns for each flop
-#   build. ACCEL_BANK_NS is added to the flop build's period.
+#   build's, and can route slower than the flop build: the 1 x 4 at 9.31 ns, the 1 x 8 at
+#   9.47 ns and, with 1024-word macros, 9.76 ns in one run and 10.06 ns in another, where
+#   the model has 9.33 ns for each flop build, and the 2 x 8 at 10.07 ns, where it has
+#   9.79 ns. ACCEL_BANK_NS is added to the flop build's period.
 ACCEL_BANK_PATH_NS = 2.65
 ACCEL_BANK_NS = 0.75
 
