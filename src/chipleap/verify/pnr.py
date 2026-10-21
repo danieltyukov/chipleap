@@ -96,6 +96,11 @@ def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[
         # Design rules are checked with IHP's own KLayout deck. Magic's IHP rules are a
         # second, single-threaded opinion that takes longer than the rest of the flow.
         "RUN_MAGIC_DRC": False,
+        # ChipLeap judges KLayout's DRC from the run's report, with off-grid pin markers
+        # inside the PDK's own macros set apart (``klayout_drc``). LibreLane counts those
+        # markers as errors, and its verdict would end the run on exit 2, which ChipLeap
+        # reads no result from.
+        "ERROR_ON_KLAYOUT_DRC": False,
         # Let the detailed router fix antenna violations with diodes, as a shuttle requires.
         "DRT_ANTENNA_REPAIR_ITERS": 5,
         # Optimise where the design is signed off: gate sizing, buffering, the clock tree and

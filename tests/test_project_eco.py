@@ -11,6 +11,7 @@ import pytest
 from chipleap.rtl import eco as E
 from chipleap.rtl.pnr import SDC_NAME, seal_routed
 from chipleap.rtl.project import EcoChange, load_project
+from chipleap.verify.pnr import signoff
 from chipleap.verify.tools import librelane, openroad
 
 FIXTURE = Path(__file__).parent / "fixtures" / "eco_timing"
@@ -348,6 +349,8 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     _, sealed, _, _ = E.base(p)
     good = {"DESIGN_NAME": "counter", "VERILOG_FILES": ["dir::src/counter.v"]}
     assert E._settings(p, good, sealed) == good
+    # Every setting place and route shares passes on.
+    assert E._settings(p, signoff(), sealed) == signoff()
     for bad, why in [
         ({"PLACEMENT_SCRIPT": "x.tcl"}, "does not pass on"),
         ({"PRE_GLOBAL_PLACEMENT_HOOK": 1}, "does not pass on"),

@@ -410,6 +410,8 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
     items: list[tuple[str, str]] = []
 
     def run(workdir, cfg, tag="chipleap"):
+        # LibreLane leaves the verdict to ChipLeap: its own would end the run on exit 2.
+        assert cfg["ERROR_ON_KLAYOUT_DRC"] is False
         (workdir / "config.json").write_text("{}")
         reports = workdir / "runs" / tag / "66-klayout-drc" / "reports"
         reports.mkdir(parents=True, exist_ok=True)

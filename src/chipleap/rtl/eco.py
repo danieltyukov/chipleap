@@ -104,6 +104,7 @@ TEMPLATE_KEYS = {
     "FP_SIZING": "text",
     "DIE_AREA": "number",
     "RUN_MAGIC_DRC": "bool",
+    "ERROR_ON_KLAYOUT_DRC": "bool",
     "DRT_ANTENNA_REPAIR_ITERS": "number",
     "DEFAULT_CORNER": "text",
     "RUN_POST_GRT_RESIZER_TIMING": "bool",
