@@ -326,7 +326,8 @@ def second_part_result(
 def run_librelane(
     workdir: Path, cfg: dict[str, Any], tag: str = "chipleap"
 ) -> tuple[dict[str, Any], Path | None]:
-    """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
+    """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``,
+    with antennas repaired again after the timing repair (``with_late_antenna_repair``).
     Returns the final metrics and the GDS.
 
     LibreLane runs in two parts, in one run directory: up to detailed routing, then the
@@ -342,6 +343,7 @@ def run_librelane(
         env = librelane_env()
     except ValueError as exc:
         raise PnrError(str(exc)) from None
+    cfg = with_late_antenna_repair(cfg)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
     base = [tool.path, *pdk_args, "--run-tag", tag]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
@@ -453,6 +455,45 @@ def with_def_to_odb(cfg: dict[str, Any]) -> dict[str, Any]:
             **(meta.get("substituting_steps") or {}),
             f"+{DETAILED_ROUTING}": DEF_TO_ODB,
         }
+    return {**cfg, "meta": meta}
+
+
+# LibreLane repairs antennas after global routing (jumpers, and diodes at the gates of
+# nets over the PDK's ratios) and then repairs timing, whose buffers are new gates on nets
+# routed again; nothing checks those nets until the detailed router's own repair. In the
+# SmolLM2 accelerator's layout a hold buffer's input (a dlygate4sd3_1) was left on a Metal2
+# island at a cumulative ratio of 312.72 against 200, out of reach of the router's diodes,
+# which joined only through Metal3. So every layout ChipLeap routes with LibreLane repairs
+# antennas once more after the timing repair: in that layout the second repair found 35
+# nets over the ratios and fixed them with 40 jumpers and 17 diodes, the routed design was
+# clean under OpenROAD's antenna check and IHP's rule deck, and its slack at the slow
+# corner moved by +0.004 ns.
+TIMING_REPAIR = "OpenROAD.ResizerTimingPostGRT"
+ANTENNA_REPAIR = "OpenROAD.RepairAntennas"
+
+
+def with_late_antenna_repair(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``cfg`` with LibreLane's antenna repair once more after the timing repair after
+    global routing: after that step in a flow given as a step list, else as a substitution.
+    Unchanged when the configuration turns antenna repair off, or the timing repair (a
+    Classic flow's) or a step list has none."""
+    if cfg.get("RUN_ANTENNA_REPAIR") is False:
+        return cfg
+    meta = dict(cfg.get("meta") or {"version": 2, "flow": "Classic"})
+    flow = meta.get("flow")
+    if isinstance(flow, list):
+        if TIMING_REPAIR not in flow:
+            return cfg
+        i = flow.index(TIMING_REPAIR)
+        if flow[i + 1 : i + 2] != [ANTENNA_REPAIR]:
+            meta["flow"] = [*flow[: i + 1], ANTENNA_REPAIR, *flow[i + 1 :]]
+    elif cfg.get("RUN_POST_GRT_RESIZER_TIMING"):
+        meta["substituting_steps"] = {
+            **(meta.get("substituting_steps") or {}),
+            f"+{TIMING_REPAIR}": ANTENNA_REPAIR,
+        }
+    else:
+        return cfg
     return {**cfg, "meta": meta}
 
 

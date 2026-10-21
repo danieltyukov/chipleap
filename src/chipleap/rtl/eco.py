@@ -69,6 +69,7 @@ from chipleap.verify.pnr import (
     patch_min_area,
     second_part_result,
     step_state,
+    with_late_antenna_repair,
 )
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import (
@@ -84,6 +85,10 @@ RESUME_AT = "OpenROAD.DetailedRouting"
 # global routing for the nets that changed.
 PREFIX = ("OpenROAD.DEFtoODB", "OpenROAD.DetailedPlacement", "OpenROAD.GlobalRouting")
 REPAIR = "OpenROAD.ResizerTimingPostGRT"
+# The flow a routed run's configuration names: LibreLane's Classic flow with antennas
+# repaired again after the timing repair (chipleap.verify.pnr.run_librelane). An ECO writes
+# its own step list instead.
+ROUTED_META = with_late_antenna_repair({"RUN_POST_GRT_RESIZER_TIMING": True})["meta"]
 STEP_ID_RE = re.compile(r"[A-Z][A-Za-z]*\.[A-Z][A-Za-z0-9]*")
 # The LibreLane variables ChipLeap's place and route writes (chipleap.rtl.pnr.config and
 # chipleap.verify.pnr.signoff), by the kind of value each takes. An ECO resumes LibreLane
@@ -406,9 +411,18 @@ def _plain_text(key: str, value: Any) -> str:
 def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str, Any]:
     """The routed run's configuration as an ECO passes it on: only ``TEMPLATE_KEYS`` and
     the project's own numeric or boolean ``pnr.librelane`` settings, each with a plain
-    value, and every file it names one the run recorded beside it, unchanged."""
+    value, and every file it names one the run recorded beside it, unchanged. Its flow
+    (``ROUTED_META``, the only one accepted) is left out for the ECO's own."""
     out = dict(cfg)
     for key, value in cfg.items():
+        if key == "meta":
+            if value != ROUTED_META:
+                raise EcoError(
+                    f"the routed run's configuration sets meta to {value!r}, not the flow "
+                    "ChipLeap's place and route writes; run the pnr step again"
+                )
+            del out[key]
+            continue
         kind = TEMPLATE_KEYS.get(key)
         if kind == "macros":
             _macros(value, sealed)
@@ -529,7 +543,8 @@ def eco_config(
     project: Project, changes: list[EcoChange], steps: list[str], sealed: Sealed
 ) -> dict[str, Any]:
     """The configuration the ECO resumes LibreLane with: the routed run's recorded one,
-    through ``_settings``, with the step list and, for a repair, the margins it asks for."""
+    through ``_settings``, with the step list and, for a repair, the margins it asks for
+    and antennas repaired after it, as in place and route."""
     cfg = _settings(project, _read(sealed, sealed.root / "config.json"), sealed)
     flow = list(PREFIX)
     repairs = [c for c in changes if c.kind == "repair"]
@@ -553,7 +568,7 @@ def eco_config(
             raise EcoError(f"the routed run names a step ChipLeap does not know: {step!r}")
     flow += steps
     cfg["meta"] = {"version": 2, "flow": flow}
-    return cfg
+    return with_late_antenna_repair(cfg)
 
 
 def _run_librelane(

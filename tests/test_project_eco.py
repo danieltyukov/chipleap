@@ -62,9 +62,10 @@ CHIPLEAP-PATHS end
 """
 
 
-def routed(project_dir, state=None, pdk=None):
+def routed(project_dir, state=None, pdk=None, meta=None):
     """A routed run that ChipLeap recorded: its step directories, the state before
-    detailed routing, the configuration beside it and, with ``pdk``, its PDK views."""
+    detailed routing, the configuration beside it (with ``meta``, the flow it names) and,
+    with ``pdk``, its PDK views."""
     pnr = project_dir / "build/pnr"
     run = pnr / "runs/chipleap"
     for n, step in enumerate(STEPS, 1):
@@ -102,6 +103,7 @@ def routed(project_dir, state=None, pdk=None):
                 "VERILOG_FILES": ["dir::src/counter.v"],
                 "PNR_SDC_FILE": f"dir::{SDC_NAME}",
                 "CLOCK_PERIOD": 10,
+                **({"meta": meta} if meta is not None else {}),
             }
         )
     )
@@ -139,7 +141,8 @@ def test_edits_and_the_resumed_flow(counter_project):
         "resize\t_150_\tsg13g2_nand4_2\nbuffer\t\\u_rx.q[3]\tD\tsg13g2_buf_2\n"
     )
     cfg = E.eco_config(p, changes, steps, sealed)
-    assert cfg["meta"]["flow"] == [*E.PREFIX, E.REPAIR, *STEPS[2:]]
+    # Antennas are repaired again after the timing repair, as in place and route.
+    assert cfg["meta"]["flow"] == [*E.PREFIX, E.REPAIR, "OpenROAD.RepairAntennas", *STEPS[2:]]
     assert cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"] == 0.5
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.1
     flow = E.eco_config(p, changes[:1], steps, sealed)["meta"]["flow"]
@@ -147,6 +150,21 @@ def test_edits_and_the_resumed_flow(counter_project):
     # Names reach OpenROAD as data, never as script text.
     script = E.edit_script({"tech_lef": "t.lef", "cell_lefs": ["c.lef"]}, "in.def", "changes.txt")
     assert "_150_" not in script and "set changes_file {changes.txt}" in script
+
+
+def test_the_flow_a_routed_run_names_is_its_own_or_refused(counter_project):
+    """Place and route names the Classic flow with the late antenna repair; an ECO writes
+    its own step list in its place, and refuses any other flow."""
+    routed(counter_project, meta=E.ROUTED_META)
+    p = load_project(counter_project)
+    _, sealed, _, steps = E.base(p)
+    flow = E.eco_config(p, [], steps, sealed)["meta"]["flow"]
+    assert flow == [*E.PREFIX, *STEPS[2:]]
+    shutil.rmtree(counter_project / "build")
+    routed(counter_project, meta={**E.ROUTED_META, "substituting_steps": {"+A.B": "Misc.C"}})
+    _, sealed, _, steps = E.base(p)
+    with pytest.raises(E.EcoError, match=r"sets meta to .*not the flow ChipLeap's place and"):
+        E.eco_config(p, [], steps, sealed)
 
 
 def test_edit_results(counter_project):

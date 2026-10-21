@@ -559,6 +559,52 @@ def test_def_to_odb_follows_routing_in_a_step_list_or_as_a_substitution():
         pnr.with_def_to_odb({"meta": {"flow": ["KLayout.DRC"]}})
 
 
+LATE = {"+OpenROAD.ResizerTimingPostGRT": "OpenROAD.RepairAntennas"}
+
+
+def test_antennas_are_repaired_again_after_the_timing_repair():
+    chip = {
+        "RUN_POST_GRT_RESIZER_TIMING": True,
+        "meta": {"version": 2, "flow": "Classic", "substituting_steps": {"A.B": None}},
+    }
+    got = pnr.with_late_antenna_repair(chip)
+    assert got["meta"]["substituting_steps"] == {"A.B": None, **LATE}
+    assert chip["meta"]["substituting_steps"] == {"A.B": None}  # the original is unchanged
+    assert pnr.with_late_antenna_repair({"RUN_POST_GRT_RESIZER_TIMING": True})["meta"] == {
+        "version": 2,
+        "flow": "Classic",
+        "substituting_steps": LATE,
+    }
+    # No timing repair to follow, or antenna repair turned off: nothing to add.
+    for cfg in (
+        {},
+        {"RUN_POST_GRT_RESIZER_TIMING": False},
+        {"RUN_POST_GRT_RESIZER_TIMING": True, "RUN_ANTENNA_REPAIR": False},
+    ):
+        assert pnr.with_late_antenna_repair(cfg) == cfg
+    # A step list (an ECO's): right after the timing repair, once, and only with one.
+    steps = ["OpenROAD.GlobalRouting", "OpenROAD.ResizerTimingPostGRT", "OpenROAD.DetailedRouting"]
+    listed = pnr.with_late_antenna_repair({"meta": {"version": 2, "flow": steps}})
+    assert listed["meta"]["flow"] == [*steps[:2], "OpenROAD.RepairAntennas", steps[2]]
+    assert pnr.with_late_antenna_repair(listed) == listed
+    unrepaired = {"meta": {"version": 2, "flow": [steps[0], steps[2]]}}
+    assert pnr.with_late_antenna_repair(unrepaired) == unrepaired
+
+
+def test_run_librelane_repairs_antennas_after_the_timing_repair(tmp_path, monkeypatch):
+    calls = []
+    _fake_librelane(tmp_path, monkeypatch, _finishes({"timing__setup__ws": 0.5}), calls)
+    pnr.run_librelane(tmp_path / "pnr", {"RUN_POST_GRT_RESIZER_TIMING": True})
+    cfg = json.loads((tmp_path / "pnr" / "config.json").read_text())
+    assert cfg["meta"]["substituting_steps"] == LATE
+    # The rest of the flow, from the patched layout, keeps it beside its own step.
+    resumed = json.loads((tmp_path / "pnr" / pnr.MIN_AREA_CONFIG).read_text())
+    assert resumed["meta"]["substituting_steps"] == {
+        **LATE,
+        "+OpenROAD.DetailedRouting": "OpenROAD.DEFtoODB",
+    }
+
+
 @pytest.mark.parametrize("finishes", [True, False])
 def test_an_ecos_second_part_is_read_only_from_its_own_final(tmp_path, monkeypatch, finishes):
     from types import SimpleNamespace
