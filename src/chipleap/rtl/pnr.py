@@ -29,6 +29,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from chipleap.chip import io
 from chipleap.macro import grid, place, sram
 from chipleap.rtl import builddir, macros
 from chipleap.rtl import quote as q
@@ -36,7 +37,6 @@ from chipleap.rtl.openroad import ECO_MANIFEST, PNR_MANIFEST, RUN_TAG
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
-from chipleap.verify.drc import describe_markers
 from chipleap.verify.pnr import (
     MACRO_PNR_SLEW_NS,
     MACRO_REPAIR,
@@ -45,6 +45,7 @@ from chipleap.verify.pnr import (
     parse_run,
     run_librelane,
     signoff,
+    with_ihp_antenna,
 )
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane
@@ -385,6 +386,7 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     r = parse_run(
         metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds, work / "runs" / RUN_TAG, held
     )
+    r = with_ihp_antenna(r, io.pdk_dir(), project.top, work)
     if not project.macros:
         return r
     area = macros.area_um2(project) or 0.0
@@ -442,6 +444,7 @@ def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
         "drc_errors": r.drc_errors,
         "lvs_errors": r.lvs_errors,
         "antenna_nets": r.antenna_nets,
+        **r.ihp_antenna_data(),
         **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
         "max_slew_violations": count("design__max_slew_violation__count"),
         "max_cap_violations": count("design__max_cap_violation__count"),
@@ -469,13 +472,8 @@ def pnr(project: Project) -> StepResult:
         status = "skipped" if "not installed" in msg or "runs on IHP" in msg else "fail"
         return StepResult("pnr", status, msg, {"error": str(exc)})
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
-    clean = r.clean and r.antenna_nets == 0
-    if clean:
-        checks = "DRC, LVS and antenna clean"
-    else:
-        checks = f"{r.drc_errors} DRC, {r.lvs_errors} LVS and {r.antenna_nets} antenna violations"
-    if r.pin_markers:
-        checks += f"; {describe_markers(r.pin_markers)}"
+    clean = r.checks_clean
+    checks = r.checks()
     clk = project.fastest_clock
     clock = f"{r.clock_mhz:g} MHz on {clk.port}" if clk else f"a {r.clock_mhz:g} MHz virtual clock"
     srams = ""

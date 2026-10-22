@@ -25,7 +25,6 @@ from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.model.evaluate import buffer_mm2
 from chipleap.rtl import builddir
 from chipleap.verify import backends, pnr, sim, synth, xheep
-from chipleap.verify.drc import describe_markers
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import clean_env, verilator
@@ -200,6 +199,7 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         "drc_errors": r.drc_errors,
         "lvs_errors": r.lvs_errors,
         "antenna_nets": r.antenna_nets,
+        **r.ihp_antenna_data(),
         **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
         "power_mw": round(r.power_mw, 3),
         "model_cell_um2": round(model_cell),
@@ -233,14 +233,8 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     # corner (1.08 V, 125 C), hold at every corner. The typical corner is reported beside it.
     # Antenna violations fail the step, as they do a project's and a chip's.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
-    clean = r.clean and r.antenna_nets == 0
-    checks = (
-        "DRC, LVS and antenna clean"
-        if clean
-        else f"{r.drc_errors} DRC, {r.lvs_errors} LVS and {r.antenna_nets} antenna violations"
-    )
-    if r.pin_markers:
-        checks += f"; {describe_markers(r.pin_markers)}"
+    clean = r.checks_clean
+    checks = r.checks()
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "

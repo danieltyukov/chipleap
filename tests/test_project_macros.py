@@ -434,6 +434,7 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
         return metrics, None
 
     monkeypatch.setattr(pnr, "run_librelane", run)
+    monkeypatch.setattr(pnr, "with_ihp_antenna", lambda r, *a: r)  # tests/test_antenna.py
     p = load_project(sram_project)
     markers = [("metal1_pin_Offgrid", f"{bldrv}:r0")] * 3 + [("metal1_pin_Offgrid", f"{bldrv}:m90")]
     items[:] = markers

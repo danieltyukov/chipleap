@@ -19,12 +19,13 @@ import shutil
 import signal
 import subprocess
 import tempfile
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 
 from chipleap.rtl import builddir, confine
+from chipleap.verify.drc import DB_MAX
 from chipleap.verify.tools import Tool, find, probe, which
 
 LOG_MAX = 8 << 20  # bytes of a tool's output kept
@@ -131,3 +132,59 @@ def run(
     data = (out or b"")[-LOG_MAX:]
     builddir.write_bytes(log_dir, log_name, data)
     return proc.returncode, data[-4000:].decode(errors="replace")
+
+
+def ihp_runner(
+    pdk: Path,
+    which: str,
+    out_dir: Path,
+    inputs: dict[str, Path],
+    args: Callable[[Path], list[str]],
+    keep: tuple[str, ...],
+    timeout: float,
+) -> tuple[int, str]:
+    """Run IHP's run_drc.py or run_lvs.py in a private directory on copies of
+    ``inputs``; copy back the files named in ``keep``, every report (.lyrdb) and every
+    log; ``timeout`` bounds the run in seconds. Returns the exit code and the runner's output with the logs named in ``keep``.
+    A report too large to read is an error: it would be the one with the most in it."""
+    found = python_with_klayout()
+    if found is None:
+        raise ToolError(
+            "IHP's DRC and LVS runners need a Python with KLayout's module (pip install "
+            "klayout); set CHIPLEAP_KLAYOUT_PYTHON to one"
+        )
+    python, module_dir = found
+    runner = pdk / "libs.tech" / "klayout" / "tech" / which / f"run_{which}.py"
+    plain(runner, "IHP's KLayout decks")
+    with private_dir(f"chipleap-{which}-") as tmp:
+        for dest, src in inputs.items():
+            shutil.copyfile(src, tmp / dest)
+        run_dir = tmp / "run"
+        # The runners import klayout.db; with HOME private, Python would not look in
+        # the user's site directory, where pip puts it.
+        # run_drc.py runs its tables in parallel with Python's multiprocessing, whose
+        # semaphores are files in /dev/shm.
+        shm = [Path("/dev/shm")] if which == "drc" and Path("/dev/shm").is_dir() else []
+        code, tail = run(
+            [python, str(runner), *args(run_dir)],
+            tmp,
+            [pdk, Path(module_dir), *shm],
+            out_dir,
+            f"{which}.log",
+            timeout,
+            {"PYTHONPATH": module_dir},
+        )
+        log = tail
+        if run_dir.is_dir():
+            for f in sorted(run_dir.iterdir()):
+                wanted = f.name in keep or f.suffix in (".lyrdb", ".log")
+                if not f.is_file() or not wanted:
+                    continue
+                if f.stat().st_size > DB_MAX:
+                    raise ToolError(
+                        f"IHP's {which.upper()} wrote {f.name}, larger than ChipLeap reads"
+                    )
+                builddir.write_bytes(out_dir, f.name, f.read_bytes())
+                if f.name in keep and f.suffix == ".log":
+                    log += "\n" + f.read_text(errors="replace")
+    return code, log
