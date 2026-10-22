@@ -22,7 +22,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -598,16 +598,35 @@ def macro_sdc(pnr: bool) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LibreLane 3.0.14 puts a port's buffer at its pin, where 3.0.0.dev44 put most of them by
+# the cells they drive, and its legaliser moves a cell at most PL_MAX_DISPLACEMENT_Y (100 um
+# by default) to a free row. Over a row of macros the free rows are farther than that: in
+# the SmolLM2 accelerator's layout, with 256x64 SRAMs along the core's top and bottom, the
+# band starts 161 um from the pins above and below them, 44 port buffers found no row and
+# the run stopped (DPL-0036). So a layout with macros lets the legaliser reach the band,
+# and MACRO_REACH_SLACK_UM of rows into it, for when the first rows are full.
+MACRO_REACH_SLACK_UM = 50.0
+
+
+def macro_reach(plan: place.Floorplan, macros: Sequence[place.Macro]) -> dict[str, Any]:
+    """LibreLane's displacement limit for a layout with ``macros`` (``MACRO_REACH_SLACK_UM``),
+    never below its default."""
+    reach = place.edge_reach_um(plan, macros)
+    return {"PL_MAX_DISPLACEMENT_Y": max(100, math.ceil(reach + MACRO_REACH_SLACK_UM))}
+
+
 def sram_config(
     accel: Accel,
     clock_mhz: float,
     plan: place.Floorplan,
     macros: dict[str, Any],
+    sizes: Sequence[place.Macro],
 ) -> dict[str, Any]:
     """The LibreLane configuration for ``accel`` with its buffers in SRAM macros: the
     generated top, the floorplan ChipLeap sized, the macros and their power grid."""
     return {
         **MACRO_REPAIR,
+        **macro_reach(plan, sizes),
         "DESIGN_NAME": banks.TOP,
         "VERILOG_FILES": ["dir::src/chipleap_accel.v", f"dir::src/{banks.TOP}.v"],
         "CLOCK_PORT": "clk_i",
@@ -692,13 +711,11 @@ def sram_flow(
     plan = banks.plan(accel, sram.catalog(pdk))
     views = {s.cell: sram.views(pdk, s.cell, workdir) for s in plan.cells()}
     cells = dict(plan.instances())
-    fp = place.rows(
-        [
-            place.Macro(inst, views[cell].view.width, views[cell].view.height)
-            for inst, cell in plan.instances()
-        ],
-        model_cell_um2(accel, banked=True),
-    )
+    sizes = [
+        place.Macro(inst, views[cell].view.width, views[cell].view.height)
+        for inst, cell in plan.instances()
+    ]
+    fp = place.rows(sizes, model_cell_um2(accel, banked=True))
     (workdir / "src" / f"{banks.TOP}.v").write_text(banks.top_sv(plan))
     placements = [
         grid.Placement(p.instance, views[cells[p.instance]].view, p.x, p.y, p.orient)
@@ -710,7 +727,7 @@ def sram_flow(
     macros, _ = sram.librelane_macros(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )
-    return sram_config(accel, clock_mhz, fp, macros), plan
+    return sram_config(accel, clock_mhz, fp, macros, sizes), plan
 
 
 def synth_area(run: Path) -> float:

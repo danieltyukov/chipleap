@@ -201,6 +201,7 @@ def test_place_and_route_sizes_the_die_around_the_macro(
     assert set(entry["lib"]) == {"*_typ_*", "*_slow_*", "*_fast_*"}
     assert cfg["PDN_CFG"] == "dir::pdn.tcl"
     assert cfg["RUN_POST_GRT_DESIGN_REPAIR"] is True
+    assert cfg["PL_MAX_DISPLACEMENT_Y"] >= 100
     script = (work / "pdn.tcl").read_text()
     assert "-inst_pattern {^u_mem$} -pin_pattern {^VDDARRAY!$} -power" in script
     x = entry["instances"]["u_mem"]["location"][0]
@@ -233,6 +234,8 @@ def test_a_die_of_the_projects_own_places_each_macro_where_it_says(
     loc = cfg["MACROS"][CELL]["instances"]["u_mem"]
     assert loc["orientation"] == "FS"
     assert loc["location"] == [cfg["CORE_AREA"][0] + 60, cfg["CORE_AREA"][1] + 20]
+    # Rows between the macro's halo and the core's edge: the legaliser keeps its default.
+    assert cfg["PL_MAX_DISPLACEMENT_Y"] == 100
     # Under no TopMetal2 supply pair: refused, with where it could go.
     edit(
         sram_project,

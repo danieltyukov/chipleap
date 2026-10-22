@@ -42,6 +42,7 @@ from chipleap.verify.pnr import (
     MACRO_REPAIR,
     PnrError,
     PnrResult,
+    macro_reach,
     parse_run,
     run_librelane,
     signoff,
@@ -311,6 +312,7 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
     )
     return {
         **MACRO_REPAIR,
+        **macro_reach(fp, list(sizes.values())),
         "FP_SIZING": "absolute",
         "DIE_AREA": [0, 0, *fp.die],
         "CORE_AREA": list(fp.core),

@@ -126,6 +126,7 @@ TEMPLATE_KEYS = {
     "CORE_AREA": "number",
     "FP_MACRO_HORIZONTAL_HALO": "number",
     "FP_MACRO_VERTICAL_HALO": "number",
+    "PL_MAX_DISPLACEMENT_Y": "number",
     "MACROS": "macros",
     "PDN_CFG": "pdn",
     "RUN_POST_GRT_DESIGN_REPAIR": "bool",
