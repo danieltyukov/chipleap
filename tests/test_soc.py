@@ -396,7 +396,11 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     # A buffer beside each of the accelerator's four macros drives its clock pin.
     accel = {i for i, _ in prep.instances if i.startswith(f"{soc.ACCEL_INST}.")}
     assert len(accel) == 4
-    assert {e["target"] for e in full["INSERT_ECO_BUFFERS"]} == {f"{i}/A_CLK" for i in accel}
+    clock = {e["target"] for e in full["INSERT_ECO_BUFFERS"] if e["target"].endswith("/A_CLK")}
+    assert clock == {f"{i}/A_CLK" for i in accel}
+    # And one after each of the 32 output bits of the eight bank macros.
+    outs = [e for e in full["INSERT_ECO_BUFFERS"] if "/A_DOUT[" in e["target"]]
+    assert len(outs) == 256 and {e["buffer"] for e in outs} == {"sg13g2_buf_2"}
     # More standard cells, a larger core.
     _, small = soc_step.with_floorplan(cfg, prep, 1.0e6, work)
     assert small.core_um2 < fp.core_um2
@@ -404,9 +408,11 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     assert cfg["DESIGN_REPAIR_BUFFER_OUTPUT_PORTS"] is False
     # Antenna repair may reroute with a little overflow; the detailed router resolves it.
     assert cfg["GRT_ALLOW_CONGESTION"] is True and cfg["DRT_ANTENNA_REPAIR_ITERS"] > 0
-    # The repair after global routing keeps a margin for what routing adds to long wires.
+    # The repair after global routing keeps a margin for what routing adds to long wires,
+    # and the repairs keep setup slack for what routing takes from the long paths.
     assert cfg["GRT_DESIGN_REPAIR_MAX_CAP_PCT"] == 25
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == pytest.approx(0.2)
+    assert (cfg["PL_RESIZER_SETUP_SLACK_MARGIN"], cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"]) == (6, 5)
     assert cfg["CTS_CLK_BUFFERS"][0] == cfg["CTS_ROOT_BUFFER"] == "sg13g2_buf_16"
     # A clock other than the design's, for a signoff the SoC can meet.
     slow, _ = soc_step.prepare(design, xheep_config(design), co, work, pdk, clock_mhz=55.0)
@@ -568,3 +574,177 @@ def test_the_soc_fails_on_ihps_antenna_deck():
     failed = soc_step_result(design, replace(s, pnr=replace(routed, ihp_antenna=bad)), 1.0)
     assert failed.status == "fail" and "Ant.e_Metal5" in failed.summary
     assert failed.data["ihp_antenna"]["violations"] == 1
+
+
+def _report_path(start: str, end: str, slack: float, group: str = "clk", edge: str = "rise") -> str:
+    capture = 27.778 if edge == "rise" else 13.889
+    return (
+        f"Startpoint: {start} (rising edge-triggered flip-flop clocked by {group})\n"
+        f"Endpoint: {end} (rising edge-triggered flip-flop clocked by {group})\n"
+        f"Path Group: {group}\nPath Type: max\n\n"
+        f"                                  0.000000    0.000000   clock {group} (rise edge)\n"
+        f"                                 {capture:.6f}   {capture:.6f}   clock {group} ({edge} edge)\n"
+        f"                                            {slack:.6f}   slack (MET)\n\n"
+    )
+
+
+def test_the_socs_clock_terms_are_measured_from_its_routed_paths(monkeypatch):
+    """scripts/fit_soc_clock.py: the slowest path from a bank, less that macro's read time,
+    and the slowest other path of clk, leaving out the accelerator's own paths, the other
+    clocks and the half-cycle paths."""
+    import importlib.util
+    import sys
+
+    from chipleap.macro.sram import IHP_1P_READ_NS
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "fit_soc_clock.py"
+    spec = importlib.util.spec_from_file_location("fit_soc_clock", path)
+    assert spec is not None and spec.loader is not None
+    fit = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "fit_soc_clock", fit)  # dataclasses look it up there
+    spec.loader.exec_module(fit)
+    bank = f"{soc.MCU_INST}.memory_subsystem_i.ram0_i.g_8192x32.bank_m1"
+    report = "header\n" + "".join(
+        [
+            _report_path("_cpu_", "_dma_", -0.219),
+            _report_path(f"{soc.ACCEL_INST}._a_", f"{soc.ACCEL_INST}._b_", -2.0),
+            _report_path(bank, "_cpu_", 1.526),
+            _report_path("_jtag_", "_jtag2_", -5.0, group="jtag_tck"),
+            _report_path("_i2s_", "_ws_", -3.0, edge="fall"),
+        ]
+    )
+    found = fit.paths(report)
+    assert [p.start for p in found] == ["_cpu_", f"{soc.ACCEL_INST}._a_", bank]
+    read, bus = fit.terms(found, {bank: "RM_IHPSG13_1P_1024x32_c2_bm_bist"})
+    assert read is not None and bus is not None
+    cq = IHP_1P_READ_NS["RM_IHPSG13_1P_1024x32_c2_bm_bist"]
+    assert read[0] == pytest.approx(27.778 - 1.526 - cq)
+    assert bus.start == "_cpu_" and bus.needed_ns == pytest.approx(27.997)
+
+
+def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
+    """The SoC's repairs keep 6 and 5 ns of estimated setup slack and 0.2 ns of hold after
+    global routing; CHIPLEAP_SOC_HOLD_MARGIN sets another hold margin, a number of ns."""
+    sources = soc_step.Sources((), (), (), None)  # type: ignore[arg-type]
+    monkeypatch.delenv(soc_step.HOLD_MARGIN_ENV, raising=False)
+    cfg = soc_step.config(sources, 36.0)
+    assert cfg["PL_RESIZER_SETUP_SLACK_MARGIN"] == 6.0
+    assert cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"] == 5.0
+    assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.2
+    monkeypatch.setenv(soc_step.HOLD_MARGIN_ENV, "0.3")
+    assert soc_step.config(sources, 36.0)["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.3
+    for bad in ("x", "nan", "-0.1", "2"):
+        monkeypatch.setenv(soc_step.HOLD_MARGIN_ENV, bad)
+        with pytest.raises(soc_step.SocError, match="CHIPLEAP_SOC_HOLD_MARGIN must be"):
+            soc_step.config(sources, 36.0)
+
+
+_DEF = """VERSION 5.8 ;
+UNITS DISTANCE MICRONS 1000 ;
+COMPONENTS 3 ;
+    - u_mcu.dma_i_gen\\[0\\].g_gate.i_icg sg13g2_slgcp_1 + PLACED ( 2218080 1202040 ) N ;
+    - u_mcu.other sg13g2_slgcp_1x + PLACED ( 1 2 ) N ;
+    - u_mcu.core_clock_gate_i.i_icg sg13g2_slgcp_1 + SOURCE TIMING + PLACED ( 2408000 809000 ) FS ;
+END COMPONENTS
+"""
+
+
+def test_clock_gates_are_read_where_placement_put_them():
+    gates = soc_step.clock_gates(_DEF)
+    assert gates == [
+        ("u_mcu.dma_i_gen[0].g_gate.i_icg", 2218.08, 1202.04),
+        ("u_mcu.core_clock_gate_i.i_icg", 2408.0, 809.0),
+    ]
+    assert soc_step.gate_buffers(gates)[0] == {
+        "target": "u_mcu.dma_i_gen[0].g_gate.i_icg/GCLK",
+        "buffer": "sg13g2_buf_16",
+        "placement": [2218.08, 1202.04],
+    }
+    with pytest.raises(soc_step.SocError, match="no database units"):
+        soc_step.clock_gates(_DEF.replace("UNITS DISTANCE MICRONS 1000 ;", ""))
+
+
+def test_the_layout_stops_after_the_clock_tree_to_buffer_the_gates(tmp_path, monkeypatch):
+    """The layout runs to the clock tree, reads the gates' places from the DEF it left,
+    and goes on from the buffers' step with a buffer after each gate besides the macros'."""
+    import json
+
+    from chipleap.verify import pnr
+
+    calls: list[tuple[dict, dict]] = []
+    run = tmp_path / "runs" / "chipleap"
+    outside = tmp_path / "elsewhere.def"
+
+    def fake(work, cfg, tag="chipleap", **kw):
+        calls.append((cfg, kw))
+        if kw.get("to") == soc_step.CTS:
+            step = run / "31-openroad-cts"
+            step.mkdir(parents=True)
+            target = outside if cfg.get("_outside") else step / "chipleap_soc.def"
+            target.write_text(_DEF)
+            (step / "state_out.json").write_text(json.dumps({"def": str(target)}))
+            return {}, None
+        return {"done": 1}, None
+
+    monkeypatch.setattr(pnr, "run_librelane", fake)
+    macro = {"target": "u_accel.abuf_s0_m0/A_CLK", "buffer": "sg13g2_buf_4", "placement": [1, 2]}
+    metrics, _ = soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [macro]})
+    assert metrics == {"done": 1}
+    assert calls[0][1] == {
+        "resume_from": soc_step.AFTER_SYNTHESIS,
+        "to": soc_step.CTS,
+        "timeout_s": soc_step.TIMEOUT_S,
+    }
+    assert calls[1][1]["resume_from"] == soc_step.ECO_BUFFERS and "to" not in calls[1][1]
+    eco = calls[1][0]["INSERT_ECO_BUFFERS"]
+    assert eco[0] == macro and [e["target"] for e in eco[1:]] == [
+        "u_mcu.dma_i_gen[0].g_gate.i_icg/GCLK",
+        "u_mcu.core_clock_gate_i.i_icg/GCLK",
+    ]
+    # A state that names a DEF outside the run is refused.
+    import shutil
+
+    shutil.rmtree(run)
+    calls.clear()
+    with pytest.raises(soc_step.SocError, match="names no DEF in its run"):
+        soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [], "_outside": True})
+
+
+def test_each_bank_output_gets_a_buffer_beside_its_pin():
+    """X-HEEP's bank macros' A_DOUT bits each get a buffer just past the halo beside the
+    pin (below a macro of the top row, above one of the bottom row); the accelerator's
+    macros get none; a bank macro without A_DOUT pins stops the step."""
+    from chipleap.macro import place
+    from chipleap.macro.layer import MacroPin, MacroView
+
+    p = Path("x")
+    pins = (
+        MacroPin("A_DOUT[0]", "output", "signal", (("Metal2", (10.62, 0.0, 10.88, 0.26)),)),
+        MacroPin("A_DOUT[31]", "output", "signal", (("Metal2", (405.76, 0.0, 406.02, 0.26)),)),
+        MacroPin("A_CLK", "input", "signal", (("Metal2", (200.0, 0.0, 200.26, 0.26)),)),
+    )
+    bank = MacroView("RM_B", "pdk", 416.64, 336.46, pins, p, p, p, p, ("RM_B",), ("RM_B",))
+    top, bottom = f"{soc.MCU_INST}.bank_m6", f"{soc.MCU_INST}.bank_m7"
+    fp = place.Floorplan(
+        (3426.72, 2192.4),
+        (20.16, 22.68, 3406.56, 2169.72),
+        (
+            place.Placed(top, 2543.04, 1823.26, "N"),
+            place.Placed(bottom, 2979.84, 32.68, "FS"),
+            place.Placed(f"{soc.ACCEL_INST}.abuf_s0_m0", 60.48, 2040.94, "N"),
+        ),
+    )
+    eco = soc_step.bank_output_buffers(fp, {m.instance: bank for m in fp.macros})
+    off = place.HALO_UM + soc_step.CLOCK_PIN_GAP_UM
+    assert [e["target"] for e in eco] == [
+        f"{top}/A_DOUT[0]",
+        f"{top}/A_DOUT[31]",
+        f"{bottom}/A_DOUT[0]",
+        f"{bottom}/A_DOUT[31]",
+    ]
+    assert eco[0]["placement"] == [2553.79, round(1823.26 - off, 3)]
+    assert eco[3]["placement"] == [3385.73, round(32.68 + 336.46 + off, 3)]
+    assert {e["buffer"] for e in eco} == {"sg13g2_buf_2"}
+    bare = MacroView("RM_C", "pdk", 10.0, 10.0, pins[2:], p, p, p, p, ("RM_C",), ("RM_C",))
+    with pytest.raises(soc_step.SocError, match="have no A_DOUT"):
+        soc_step.bank_output_buffers(fp, {m.instance: bare for m in fp.macros})
