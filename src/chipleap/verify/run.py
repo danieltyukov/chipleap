@@ -4,6 +4,8 @@ Every step is optional and skipped with a reason when its tool is missing:
 
 * lint:  Verilator --lint-only -Wall on the generated accelerator
 * sim:   randomized matrix multiplies against a golden model, cycles against the model
+  (with the accelerator on its own clock, X-HEEP's side on the SoC's)
+* cdc:   with the accelerator on its own clock, ChipLeap's CDC checker on its crossings
 * synth: Yosys on IHP SG13G2, logic area against the model's estimate, fmax estimate
 * xheep: X-HEEP's own generator loads, validates and renders the configuration
 """
@@ -25,7 +27,7 @@ from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.model.evaluate import buffer_mm2, soc_limit_mhz
 from chipleap.rtl import builddir
-from chipleap.verify import backends, pnr, sim, synth, xheep
+from chipleap.verify import backends, crossings, pnr, sim, synth, xheep
 from chipleap.verify.drc import describe_markers
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
@@ -61,15 +63,19 @@ def lint(design: Design, bundle: Path) -> StepResult:
     if not tool.found:
         return StepResult("lint", "skipped", "Verilator is not installed")
     rtl = bundle / "rtl"
-    # The standalone platform's AXI4 wrapper is linted together with the core it wraps.
+    # The standalone platform's AXI4 wrapper, and the crossings of an accelerator on its
+    # own clock, are linted together with the core they wrap.
     axi = design.platform == "standalone"
+    own = bool(design.accel_mhz)
     files = [rtl / "chipleap_accel.sv"] + ([rtl / "chipleap_accel_axi.sv"] if axi else [])
+    files += [rtl / "chipleap_accel_cdc.sv"] if own else []
+    top = "chipleap_accel_axi" if axi else crossings.TOP if own else "chipleap_accel"
     cmd = [
         str(tool.path),
         "--lint-only",
         "-Wall",
         "--top-module",
-        "chipleap_accel_axi" if axi else "chipleap_accel",
+        top,
         *rtl_params(design.accel).verilator_args(),
         *(str(f) for f in files),
     ]
@@ -80,19 +86,37 @@ def lint(design: Design, bundle: Path) -> StepResult:
     return StepResult("lint", "fail", f"{len(msgs)} lint messages", {"messages": msgs[:40]})
 
 
+def sim_clocks(design: Design) -> sim.Clocks | None:
+    """The two clocks a design whose accelerator has its own simulates on: X-HEEP's side
+    at the SoC's clock (the design's, or what the SoC meets after routing), the
+    accelerator at its own, its first edge a third of its period after the bus's."""
+    if not design.accel_mhz:
+        return None
+    limit = soc_limit_mhz(design, get_tech(design.tech))
+    bus = min(design.freq_mhz, limit) if limit else design.freq_mhz
+    accel_ps = round(1e6 / design.accel_mhz)
+    return sim.Clocks(round(1e6 / bus), accel_ps, accel_ps // 3 + 1)
+
+
 def simulate(design: Design, cases: int = 0, seed: int = 0) -> StepResult:
     if design.accel is None:
         return StepResult("sim", "skipped", "no accelerator in this design")
     if not verilator().found:
         return StepResult("sim", "skipped", "Verilator is not installed")
+    clocks = sim_clocks(design)
     try:
         todo = sim.default_cases(design.accel, seed=seed)
         if cases:
             todo = todo[:cases]
-        results = sim.run(design.accel, todo, platform=design.platform)
+        results = sim.run(design.accel, todo, platform=design.platform, clocks=clocks)
     except sim.SimError as exc:
         return StepResult("sim", "fail", str(exc).splitlines()[0], {"error": str(exc)})
     via = " through the AXI4 wrapper" if design.platform == "standalone" else ""
+    if clocks is not None:
+        via = (
+            f" on its own clock ({1e6 / clocks.accel_ps:.4g} MHz) through its crossings, "
+            f"X-HEEP's side at {1e6 / clocks.bus_ps:.4g} MHz"
+        )
     return sim_step(results, via=via)
 
 
@@ -568,7 +592,7 @@ def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | No
 def verify_bundle(
     bundle: Path,
     *,
-    steps: tuple[str, ...] = ("consistency", "lint", "sim", "synth", "xheep"),
+    steps: tuple[str, ...] = ("consistency", "lint", "sim", "cdc", "synth", "xheep"),
     xheep_dir: Path | None = None,
     fetch_xheep: bool = False,
     cases: int = 0,
@@ -592,6 +616,8 @@ def verify_bundle(
             results.append(consistency(design, bundle))
         elif step == "lint":
             results.append(lint(design, bundle))
+        elif step == "cdc":
+            results.append(crossings.check(design, builddir.work_dir(bundle, "verify", "cdc")))
         elif step == "sim" and sim_tool != "verilator":
             results.append(_simulate_on(design, sim_tool, bundle, remote, cases, seed))
         elif step == "sim":

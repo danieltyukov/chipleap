@@ -86,6 +86,13 @@ def test_an_asynchronous_fifo_with_gray_pointers_passes(tmp_path):
     assert ("fifo_memory", "mem", "rdata_o") in found
 
 
+def test_a_fifos_word_stored_straight_into_a_memory_of_the_reading_clock_passes(tmp_path):
+    fifo = {"clocks": FIFO_CLOCKS, "cdc": {"input_domains": {"baddr_i": "rclk"}}}
+    r = check(tmp_path, "fifo_into_memory", **fifo)
+    assert r.status == "pass", r.summary
+    assert ("fifo_memory", "mem", "buffer") in accepted(r)
+
+
 def test_binary_pointers_through_synchronizers_are_an_error(tmp_path):
     r = check(tmp_path, "fifo_binary", **FIFO)
     assert r.status == "fail"
@@ -157,3 +164,53 @@ def test_the_uart_example_has_one_clock_and_no_crossing(tmp_path):
     r = cdc.cdc(load_project(example))
     assert r.status == "pass", r.summary
     assert r.data["domains"] == {"clk_i": r.data["flops"]}
+
+
+def _accelerator(tmp_path: Path, cdc_rtl: str | None = None):
+    """ChipLeap's accelerator on a clock of its own, as the bundle's cdc step checks it:
+    the SmolLM2 example's GEMV 1 x 8, the bus at 35 MHz and the accelerator at 90."""
+    from chipleap.hw import Accel
+    from chipleap.verify import crossings
+
+    accel = Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2)
+    (tmp_path / "accel").mkdir()
+    root = crossings.write_project(accel, tmp_path / "accel", 35.0, 90.0, cdc_rtl)
+    return cdc.cdc(load_project(root))
+
+
+def test_the_accelerators_own_clock_crosses_only_through_synchronizers(tmp_path):
+    r = _accelerator(tmp_path)
+    assert r.status == "pass", r.summary
+    assert set(r.data["domains"]) == {"clk_i", "accel_clk_i"}
+    rules_seen = {a["rule"] for a in r.data["accepted"]}
+    assert rules_seen == {
+        "synchronizer",
+        "gray_synchronizer",
+        "handshake",
+        "fifo_memory",
+        "reset_synchronizer",
+    }
+    # The register interface's request and acknowledge, and the interrupt.
+    sync = {a["from"] for a in r.data["accepted"] if a["rule"] == "synchronizer"}
+    assert sync == {"u_reg.b_req_q", "u_reg.a_ack_q", "a_irq_q"}
+    assert ("fifo_memory", "g_rd[0].u_rd.u_rsp.mem", "u_accel.u_core.wbuf") in accepted(r)
+    assert r.data["warnings"] == 0
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "rule"),
+    [
+        # The interrupt straight from the accelerator's gate into the synchronizer.
+        (".d_i   (a_irq_q)", ".d_i   (a_irq)", "logic_before_synchronizer"),
+        # The response FIFO's read side compares with the write pointer unsynchronized.
+        ("assign empty_o = rptr == wptr_r;", "assign empty_o = rptr == wptr;", "unsynchronized"),
+    ],
+)
+def test_a_broken_crossing_in_the_accelerators_is_found(tmp_path, old, new, rule):
+    from chipleap.gen.rtl import cdc_sv
+
+    text = cdc_sv()
+    assert text.count(old) == 1
+    r = _accelerator(tmp_path, text.replace(old, new))
+    assert r.status == "fail"
+    assert rule in {f["rule"] for f in r.data["findings"] if f["severity"] == "error"}

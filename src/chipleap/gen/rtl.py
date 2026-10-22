@@ -80,12 +80,22 @@ def axi_sv() -> str:
     return _source("rtl", "chipleap_accel_axi.sv")
 
 
+def cdc_sv() -> str:
+    """The accelerator in a clock domain of its own, with its crossings
+    (``chipleap_accel_cdc``)."""
+    return _source("rtl", "chipleap_accel_cdc.sv")
+
+
 def testbench_cpp() -> str:
     return _source("tb", "tb_chipleap.cpp")
 
 
 def testbench_axi_cpp() -> str:
     return _source("tb", "tb_chipleap_axi.cpp")
+
+
+def testbench_cdc_cpp() -> str:
+    return _source("tb", "tb_chipleap_cdc.cpp")
 
 
 def driver_header(
@@ -126,13 +136,18 @@ def write_rtl(
     out: Path,
     base: int = DEFAULT_REG_BASE,
     platform: str = "xheep",
+    own_clock: bool = False,
 ) -> list[Path]:
     """Write the accelerator, its wrappers, driver and testbench into ``out``.
 
     ``xheep`` adds the X-HEEP adapter (register interface and OBI); ``standalone`` adds
-    the AXI4 wrapper and its testbench instead, for any host. Nothing is written through
-    a symlink in ``out`` (``chipleap.rtl.builddir.write_text``).
+    the AXI4 wrapper and its testbench instead, for any host. With ``own_clock`` (X-HEEP
+    only) the accelerator runs on a clock of its own, ``accel_clk_i``, behind its clock
+    domain crossings (``chipleap_accel_cdc``). Nothing is written through a symlink in
+    ``out`` (``chipleap.rtl.builddir.write_text``).
     """
+    if own_clock and platform == "standalone":
+        raise ValueError("the accelerator's own clock is offered on X-HEEP only")
     p = rtl_params(accel)
     files: dict[Path, str] = {out / "rtl" / "chipleap_accel.sv": accel_sv()}
     if platform == "standalone":
@@ -145,24 +160,36 @@ def write_rtl(
         }
     else:
         files |= {
-            out / "rtl" / "chipleap_accel_top.sv": _top_wrapper(p, name),
-            out / "rtl" / "chipleap_accel_xheep.sv": _xheep_wrapper(p, name),
-            out / "rtl" / "chipleap_accel.core": _fusesoc_core(name, platform),
+            out / "rtl" / "chipleap_accel_top.sv": _top_wrapper(p, name, own_clock),
+            out / "rtl" / "chipleap_accel_xheep.sv": _xheep_wrapper(p, name, own_clock),
+            out / "rtl" / "chipleap_accel.core": _fusesoc_core(name, platform, own_clock),
             out / "sw" / "chipleap_driver.h": driver_header(accel, name, base, platform),
             out / "tb" / "tb_chipleap.cpp": testbench_cpp(),
         }
+        if own_clock:
+            files |= {
+                out / "rtl" / "chipleap_accel_cdc.sv": cdc_sv(),
+                out / "tb" / "tb_chipleap_cdc.cpp": testbench_cdc_cpp(),
+            }
     for path, text in files.items():
         builddir.write_text(out, path.relative_to(out), text)
     return list(files)
 
 
-def _top_wrapper(p: RtlParams, name: str) -> str:
-    return f"""// Parameterised instance of the ChipLeap accelerator for design "{name}".
+def _top_wrapper(p: RtlParams, name: str, own_clock: bool = False) -> str:
+    # On a clock of its own the accelerator sits behind its crossings, whose ports are its
+    # own plus that clock.
+    module, clock, note = (
+        ("chipleap_accel_cdc", "\n    input logic accel_clk_i,", " on its own clock, accel_clk_i")
+        if own_clock
+        else ("chipleap_accel", "", "")
+    )
+    return f"""// Parameterised instance of the ChipLeap accelerator for design "{name}"{note}.
 // SPDX-License-Identifier: MIT
 
 module chipleap_accel_top (
     input logic clk_i,
-    input logic rst_ni,
+    input logic rst_ni,{clock}
     input logic reg_valid_i,
     input logic reg_write_i,
     input logic [31:0] reg_addr_i,
@@ -184,14 +211,25 @@ module chipleap_accel_top (
     input logic wr_rvalid_i,
     output logic irq_o
 );
-  chipleap_accel #(
+  {module} #(
 {p.sv_overrides()}
   ) u_accel (.*);
 endmodule
 """
 
 
-def _xheep_wrapper(p: RtlParams, name: str) -> str:
+def _xheep_wrapper(p: RtlParams, name: str, own_clock: bool = False) -> str:
+    module, clock, conn, note = (
+        (
+            "chipleap_accel_cdc",
+            "\n    input logic accel_clk_i,",
+            "\n      .accel_clk_i,",
+            "\n// The accelerator runs on accel_clk_i, behind its clock domain crossings\n"
+            "// (chipleap_accel_cdc); everything else here is on X-HEEP's clk_i.\n//",
+        )
+        if own_clock
+        else ("chipleap_accel", "", "", "")
+    )
     return f"""// X-HEEP adapter for the ChipLeap accelerator of design "{name}".
 //
 // Connect reg_req_i/reg_rsp_o to a slot of X-HEEP's external peripheral bus, the
@@ -199,7 +237,7 @@ def _xheep_wrapper(p: RtlParams, name: str) -> str:
 // ext_xbar_master_resp_o, and irq_o to a free fast interrupt. The type parameters are
 // X-HEEP's own: reg_pkg::reg_req_t, reg_pkg::reg_rsp_t, obi_pkg::obi_req_t and
 // obi_pkg::obi_resp_t.
-//
+//{note}
 // SPDX-License-Identifier: MIT
 
 module chipleap_accel_xheep #(
@@ -209,7 +247,7 @@ module chipleap_accel_xheep #(
     parameter type obi_resp_t = logic
 ) (
     input logic clk_i,
-    input logic rst_ni,
+    input logic rst_ni,{clock}
     input reg_req_t reg_req_i,
     output reg_rsp_t reg_rsp_o,
     output obi_req_t [{p.ports}-1:0] rd_req_o,
@@ -241,11 +279,11 @@ module chipleap_accel_xheep #(
   assign wr_req_o.addr = waddr;
   assign wr_req_o.wdata = wdata;
 
-  chipleap_accel #(
+  {module} #(
 {p.sv_overrides()}
   ) u_accel (
       .clk_i,
-      .rst_ni,
+      .rst_ni,{conn}
       .reg_valid_i(reg_req_i.valid),
       .reg_write_i(reg_req_i.write),
       .reg_addr_i(reg_req_i.addr),
@@ -348,15 +386,17 @@ endmodule
 """
 
 
-def _fusesoc_core(name: str, platform: str = "xheep") -> str:
+def _fusesoc_core(name: str, platform: str = "xheep", own_clock: bool = False) -> str:
     if platform == "standalone":
         files = ["chipleap_accel.sv", "chipleap_accel_axi.sv", "chipleap_accel_axi_top.sv"]
         top = "chipleap_accel_axi_top"
         what = "with AXI4 interfaces"
     else:
         files = ["chipleap_accel.sv", "chipleap_accel_top.sv", "chipleap_accel_xheep.sv"]
+        if own_clock:
+            files.insert(1, "chipleap_accel_cdc.sv")
         top = "chipleap_accel_top"
-        what = "for X-HEEP"
+        what = "for X-HEEP" + (", on its own clock" if own_clock else "")
     listing = "\n".join(f"      - {f}" for f in files)
     return f"""CAPI=2:
 # SPDX-License-Identifier: MIT

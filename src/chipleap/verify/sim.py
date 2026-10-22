@@ -6,7 +6,9 @@ prediction for the same job under the same memory behaviour.
 
 ``platform="xheep"`` simulates the core on its OBI and register interfaces;
 ``platform="standalone"`` simulates it behind the AXI4 wrapper, programmed over
-AXI4-Lite against an AXI4 memory model that also checks the protocol.
+AXI4-Lite against an AXI4 memory model that also checks the protocol. With ``clocks``
+(``Clocks``), the X-HEEP interfaces are on one clock and the accelerator on another,
+through its crossings (``chipleap_accel_cdc``).
 """
 
 from __future__ import annotations
@@ -24,19 +26,34 @@ from chipleap.gen import banks
 from chipleap.gen.rtl import (
     accel_sv,
     axi_sv,
+    cdc_sv,
     driver_header,
     rtl_params,
     testbench_axi_cpp,
+    testbench_cdc_cpp,
     testbench_cpp,
 )
 from chipleap.hw.design import Accel
 from chipleap.macro.sram import Sram, model
-from chipleap.model.accel import Bandwidth, k_align, plan_tiles, simulate_job
+from chipleap.model.accel import Bandwidth, crossed, k_align, plan_tiles, simulate_job
 from chipleap.verify.tools import clean_env, verilator
 
 
 class SimError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class Clocks:
+    """The bus clock and the accelerator's, in picoseconds: their periods and the time of
+    the accelerator clock's first rising edge (the bus clock's is at 0)."""
+
+    bus_ps: int
+    accel_ps: int
+    phase_ps: int = 0
+
+    def args(self) -> list[str]:
+        return [str(self.bus_ps), str(self.accel_ps), str(self.phase_ps)]
 
 
 @dataclass(frozen=True)
@@ -85,16 +102,22 @@ def build(
     jobs: int = 0,
     platform: str = "xheep",
     srams: Sequence[Sram] | None = None,
+    cdc: bool = False,
 ) -> Path:
     """Build the Verilator model for ``accel`` (cached by parameters) and return the binary.
     With ``srams``, the buffers are banks of those SRAM macros (``chipleap.gen.banks``),
-    each simulated by ChipLeap's model of its ports."""
+    each simulated by ChipLeap's model of its ports. With ``cdc``, the accelerator runs on
+    a clock of its own behind its crossings (``chipleap_accel_cdc``)."""
     tool = verilator()
     if not tool.found:
         raise SimError("Verilator is not installed; see docs/verification.md")
     p = rtl_params(accel)
     axi = platform == "standalone"
-    top = "chipleap_accel_axi" if axi else "chipleap_accel"
+    if cdc and (axi or srams is not None):
+        raise SimError(
+            "the accelerator's own clock is simulated with flop buffers on X-HEEP's interfaces"
+        )
+    top = "chipleap_accel_axi" if axi else "chipleap_accel_cdc" if cdc else "chipleap_accel"
     params = p.verilator_args()
     macro_rtl: dict[str, str] = {}
     if srams is not None:
@@ -108,15 +131,16 @@ def build(
     tb_name, tb_text = (
         ("tb_chipleap_axi.cpp", testbench_axi_cpp())
         if axi
-        else (
-            "tb_chipleap.cpp",
-            testbench_cpp(),
-        )
+        else ("tb_chipleap_cdc.cpp", testbench_cdc_cpp())
+        if cdc
+        else ("tb_chipleap.cpp", testbench_cpp())
     )
     header = driver_header(accel, "sim", platform=platform)
     rtl = {"chipleap_accel.sv": accel_sv()}
     if axi:
         rtl["chipleap_accel_axi.sv"] = axi_sv()
+    if cdc:
+        rtl["chipleap_accel_cdc.sv"] = cdc_sv()
     rtl |= macro_rtl
     sources = "".join(rtl.values()) + tb_text + header + " ".join(params)
     digest = hashlib.sha256(sources.encode()).hexdigest()[:16]
@@ -185,10 +209,11 @@ def default_cases(accel: Accel, fmts: tuple[int, ...] | None = None, seed: int =
     return cases
 
 
-def predicted_cycles(accel: Accel, case: Case) -> float:
+def predicted_cycles(accel: Accel, case: Case, clocks: Clocks | None = None) -> float:
     """The model's prediction for a testbench case. The memory model grants each request
     unless it stalls and answers ``latency`` cycles after the grant, so every read port
-    moves one word per cycle at best."""
+    moves one word per cycle at best. With ``clocks``, those are bus cycles, and the count
+    is the accelerator's, through its crossings (``chipleap.model.accel.crossed``)."""
     g = 1 - case.stall_pct / 100
     words = accel.ports * g
     bw = Bandwidth(
@@ -201,6 +226,8 @@ def predicted_cycles(accel: Accel, case: Case) -> float:
         grant=g,
         ports=accel.ports,
     )
+    if clocks is not None:
+        bw = crossed(bw, clocks.bus_ps / clocks.accel_ps, accel.ports)
     return simulate_job(accel, case.m, case.k, case.n, case.fmt, bw, 1.0)
 
 
@@ -211,12 +238,13 @@ def run(
     timeout: float = 600,
     platform: str = "xheep",
     srams: Sequence[Sram] | None = None,
+    clocks: Clocks | None = None,
 ) -> list[CaseResult]:
-    exe = binary or build(accel, platform=platform, srams=srams)
+    exe = binary or build(accel, platform=platform, srams=srams, cdc=clocks is not None)
     stdin = "\n".join(c.line() for c in cases) + "\n"
     try:
         out = subprocess.run(
-            [str(exe)],
+            [str(exe), *(clocks.args() if clocks else [])],
             input=stdin,
             capture_output=True,
             text=True,
@@ -253,7 +281,7 @@ def run(
                 case,
                 bool(d["ok"]),
                 int(d["cycles"]),
-                predicted_cycles(accel, case),
+                predicted_cycles(accel, case, clocks),
                 d["tm"],
                 d["tn"],
                 d["tk"],
