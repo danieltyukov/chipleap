@@ -327,14 +327,28 @@ SLOW = "nom_slow_1p08V_125C"
 def group_note(groups: dict[str, dict[str, dict[str, float]]]) -> str:
     """Each path group's worst setup slack at the slow corner and the worst hold slack of
     all corners, for a summary: each clock's paths, and the crossings' ("path delay")."""
-    setup = groups.get("setup", {}).get(SLOW, {})
-    hold: dict[str, float] = {}
-    for per in groups.get("hold", {}).values():
-        for g, v in per.items():
-            hold[g] = min(hold.get(g, v), v)
-    names = {"path delay": "crossings"}
-    parts = [f"setup {names.get(g, g)} {v:+.3f} ns" for g, v in sorted(setup.items())]
-    parts += [f"hold {names.get(g, g)} {v:+.3f} ns" for g, v in sorted(hold.items())]
+    names = {"path delay": "crossings", "asynchronous": "resets"}
+
+    def worst(kind: str, corner: str | None) -> tuple[dict[str, float], dict[str, float]]:
+        # The worst at the corner (or of every corner), and the groups only bounded below.
+        exact: dict[str, float] = {}
+        above: dict[str, float] = {}
+        for key, into in ((kind, exact), (f"{kind}_above", above)):
+            for c, per in groups.get(key, {}).items():
+                if corner is None or c == corner:
+                    for g, v in per.items():
+                        into[g] = min(into.get(g, v), v)
+        return exact, above
+
+    parts: list[str] = []
+    for kind, corner in (("setup", SLOW), ("hold", None)):
+        exact, above = worst(kind, corner)
+        parts += [f"{kind} {names.get(g, g)} {v:+.3f} ns" for g, v in sorted(exact.items())]
+        parts += [
+            f"{kind} {names.get(g, g)} above {v:+.3f} ns"
+            for g, v in sorted(above.items())
+            if g not in exact
+        ]
     return ", ".join(parts) if parts else "no path groups reported"
 
 

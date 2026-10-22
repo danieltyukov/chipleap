@@ -254,3 +254,13 @@ def test_each_path_groups_worst_slack_is_read_from_the_signoff_reports(tmp_path)
         "setup accel_clk_i +0.500 ns, setup clk_i +12.250 ns, setup crossings +7.500 ns, "
         "hold accel_clk_i +0.120 ns, hold clk_i +0.200 ns"
     )
+    # The reports list the design's worst thousand paths, not each group's: a clock with
+    # none among them is bounded by the largest slack listed.
+    rpt = run / "58-openroad-stapostpnr" / "nom_slow_1p08V_125C" / "max.rpt"
+    rpt.write_text(path("accel_clk_i", 0.29) + path("accel_clk_i", 1.75) + path("path delay", 4.5))
+    got = group_slacks(run, ("clk_i", "accel_clk_i"))
+    assert got["setup_above"]["nom_slow_1p08V_125C"] == {"clk_i": 4.5}
+    assert "setup_above" not in got or "nom_fast_1p32V_m40C" not in got["setup_above"]
+    assert group_note(got).startswith(
+        "setup accel_clk_i +0.290 ns, setup crossings +4.500 ns, setup clk_i above +4.500 ns, "
+    )

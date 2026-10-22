@@ -832,18 +832,26 @@ _SLACK_LINE_RE = re.compile(
 )
 
 
-def group_slacks(run: Path) -> dict[str, dict[str, dict[str, float]]]:
+CROSSINGS = "path delay"  # OpenSTA's path group for the set_max_delay of two_clock_sdc
+
+
+def group_slacks(run: Path, clocks: tuple[str, ...] = ()) -> dict[str, dict[str, dict[str, float]]]:
     """The worst slack of each path group at each corner, for setup and hold, from the
     paths LibreLane's signoff timing reports (the last ``OpenROAD.STAPostPNR``'s
-    ``max.rpt`` and ``min.rpt``, which list the worst paths of every group)."""
+    ``max.rpt`` and ``min.rpt``). Those list the worst paths of the design, a thousand,
+    not of each group, so a group with none among them (each of ``clocks`` and the
+    crossings for setup, each clock for hold) is entered under ``setup_above`` or
+    ``hold_above`` at the report's largest slack, which its worst path exceeds."""
     steps = sorted(run.glob("*-openroad-stapostpnr"), key=lambda p: int(p.name.split("-")[0]))
     out: dict[str, dict[str, dict[str, float]]] = {}
     if not steps:
         return out
     for kind, name in (("setup", "max.rpt"), ("hold", "min.rpt")):
+        expected = (*clocks, CROSSINGS) if kind == "setup" and clocks else clocks
         for rpt in sorted(steps[-1].glob(f"*/{name}")):
             corner = rpt.parent.name
             text = rpt.read_text(errors="replace")
+            listed: list[float] = []
             for block in text.split("Startpoint: ")[1:]:
                 g, s = _GROUP_RE.search(block), _SLACK_LINE_RE.search(block)
                 if g is None or s is None:
@@ -851,6 +859,11 @@ def group_slacks(run: Path) -> dict[str, dict[str, dict[str, float]]]:
                 worst = out.setdefault(kind, {}).setdefault(corner, {})
                 group = g.group(1).strip()
                 worst[group] = min(worst.get(group, math.inf), float(s.group(1)))
+                listed.append(float(s.group(1)))
+            seen = out.get(kind, {}).get(corner, {})
+            for group in expected:
+                if group not in seen and listed:
+                    out.setdefault(f"{kind}_above", {}).setdefault(corner, {})[group] = max(listed)
     return out
 
 
@@ -905,7 +918,7 @@ def place_and_route(
                 "clk_i": round(1000.0 / clock_mhz, 3),
                 "accel_clk_i": round(1000.0 / accel_mhz, 3),
             },
-            groups=group_slacks(run),
+            groups=group_slacks(run, ("clk_i", "accel_clk_i")),
         )
 
     if flops:
