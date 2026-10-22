@@ -104,6 +104,24 @@ ACCEL_ROUTED_NS = 9.33
 ACCEL_SIGNOFF_FACTOR = ACCEL_ROUTED_NS / (ACCEL_DELAY_NS["gemv"] + FLOP_OVERHEAD_NS)
 ACCEL_LANE_NS = 0.46
 ACCEL_PORT_NS = (8.966, 0.1413)
+# A GEMV engine whose buffers are IHP's SRAM macros (chipleap.gen.banks, routed with
+# LibreLane at the slow corner, 100 MHz):
+# - It registers each bank word in the cycle after its read, so the macro's read time
+#   (chipleap.macro.sram.IHP_1P_READ_NS: 5.0 ns at 256 words, 7.0 to 7.3 ns at 1024, 8.8
+#   to 9.4 ns at 2048 and more) bounds its period, with what follows the read: the word's
+#   select and weight unpacking into the operand registers, and the wires from the macro
+#   rows. ACCEL_BANK_PATH_NS is the most that took after the liberty's read time: 2.36 ns
+#   in the GEMV 1 x 4 build with 256 x 32 macros, 2.61 ns in the 1 x 8 with 256 x 64,
+#   2.53 ns in the 1 x 8 with 1024 x 64, whose read path (9.81 ns) came within 0.2 ns of
+#   its clock, and 2.64 ns in the 1 x 8 with 2048 x 64, whose read path (8.97 + 2.64 ns)
+#   set its clock at 86.5 MHz.
+# - Its logic is spread along the rows of macros, across a die several times the flop
+#   build's, and can route slower than the flop build: the 1 x 4 at 9.31 ns, the 1 x 8 at
+#   9.47 ns and, with 1024-word macros, 9.76 ns in one run and 10.06 ns in another, where
+#   the model has 9.33 ns for each flop build, and the 2 x 8 at 10.07 ns, where it has
+#   9.79 ns. ACCEL_BANK_NS is added to the flop build's period.
+ACCEL_BANK_PATH_NS = 2.65
+ACCEL_BANK_NS = 0.75
 
 
 def accel_delay_ns(dataflow: str, cols: int, ports: int) -> float:
@@ -115,14 +133,21 @@ def accel_delay_ns(dataflow: str, cols: int, ports: int) -> float:
     return max(d, a + b * ports)
 
 
-def accel_signoff_mhz(dataflow: str, cols: int, ports: int, rows: int = 1) -> float:
-    """The clock the routed accelerator meets on SG13G2 at the slow corner."""
+def accel_signoff_mhz(
+    dataflow: str, cols: int, ports: int, rows: int = 1, bank_read_ns: float = 0.0
+) -> float:
+    """The clock the routed accelerator meets on SG13G2 at the slow corner. ``bank_read_ns``
+    is the slowest read of the SRAM macros its buffers are, for a macro-backed GEMV build
+    (0 for flop buffers)."""
     datapath = (accel_delay_ns(dataflow, cols, ports) + FLOP_OVERHEAD_NS) * ACCEL_SIGNOFF_FACTOR
     datapath = max(ACCEL_ROUTED_NS, datapath)
     if dataflow == "gemv" and rows > 1:
         datapath += ACCEL_LANE_NS * math.log2(rows)
     a, b = ACCEL_PORT_NS
-    return 1000.0 / max(datapath, a + b * ports)
+    period = max(datapath, a + b * ports)
+    if bank_read_ns > 0:
+        period = max(period + ACCEL_BANK_NS, bank_read_ns + ACCEL_BANK_PATH_NS)
+    return 1000.0 / period
 
 
 def accel_logic_kge(dataflow: str, rows: int, cols: int, ports: int) -> float:
@@ -180,13 +205,21 @@ class Technology:
     user: bool = False  # added by the user, not shipped with ChipLeap
 
     def clock_limit_mhz(
-        self, dataflow: str = "", cols: int = 0, ports: int = 0, rows: int = 1
+        self,
+        dataflow: str = "",
+        cols: int = 0,
+        ports: int = 0,
+        rows: int = 1,
+        bank_read_ns: float = 0.0,
     ) -> float:
         """The fastest clock a design on this node may use: the node's limit, and with an
         accelerator on a node with measured timing, what that accelerator meets after
-        routing at the slow corner."""
+        routing at the slow corner (``bank_read_ns`` as in ``accel_signoff_mhz``)."""
         if self.accel_timing and dataflow:
-            return min(self.max_freq_mhz, accel_signoff_mhz(dataflow, cols, ports, rows))
+            return min(
+                self.max_freq_mhz,
+                accel_signoff_mhz(dataflow, cols, ports, rows, bank_read_ns),
+            )
         return self.max_freq_mhz
 
     def logic_mm2(self, kge: float) -> float:

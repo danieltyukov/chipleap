@@ -81,6 +81,18 @@ def test_the_layout_says_why_it_keeps_flop_buffers(tmp_path):
     assert pnr.sram_reason(SMOLLM2, stand_in_pdk(tmp_path)) is None
 
 
+def test_a_floorplan_too_flat_to_route_keeps_flop_buffers(tmp_path):
+    """The GEMV 1 x 16's eight 784 um macros make rows of four and a core 7.4 times as wide
+    as tall, which did not route; the 2 x 8's rows of three (3.7 to 1) did."""
+    pdk = stand_in_pdk(tmp_path)
+    reason = pnr.sram_reason(Accel("gemv", 1, 16, 8, ports=1, abuf_kib=2, wbuf_kib=2), pdk)
+    assert reason is not None and "8 macros" in reason and "(7.4 to 1), too flat" in reason
+    assert pnr.sram_reason(Accel("gemv", 2, 8, 8, ports=1, abuf_kib=2, wbuf_kib=4), pdk) is None
+    # A single buffer halves the 1 x 16's macros, two to a row.
+    one = Accel("gemv", 1, 16, 8, ports=1, abuf_kib=1, wbuf_kib=1, double_buffer=False)
+    assert pnr.sram_reason(one, pdk) is None
+
+
 def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -88,7 +100,8 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     work = tmp_path / "pnr"
     seen = {}
 
-    def run(workdir, cfg, tag="chipleap"):
+    def run(workdir, cfg, tag="chipleap", *, late_antenna_repair=False):
+        assert late_antenna_repair  # every layout but the SoC's repairs antennas twice
         seen["cfg"] = cfg
         metrics = {
             "design__instance__area__stdcell": 250000.0,
@@ -108,6 +121,13 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     # The macros' long input nets are repaired after global routing too.
     assert cfg["RUN_POST_GRT_DESIGN_REPAIR"] is True
     assert cfg["DESIGN_REPAIR_MAX_WIRE_LENGTH"] == cfg["GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH"] == 300
+    # Placed and routed against a slew limit under the macros' own, signed off against
+    # LibreLane's constraints and every cell's own limit.
+    assert cfg["PNR_SDC_FILE"] == "dir::pnr.sdc" and cfg["SIGNOFF_SDC_FILE"] == "dir::signoff.sdc"
+    pnr_sdc, signoff_sdc = ((work / n).read_text() for n in ("pnr.sdc", "signoff.sdc"))
+    assert "source $::env(SCRIPTS_DIR)/base.sdc" in pnr_sdc and "base.sdc" in signoff_sdc
+    assert "set_max_transition 0.3 [current_design]" in pnr_sdc
+    assert "set_max_transition" not in signoff_sdc
     assert cfg["VERILOG_FILES"] == ["dir::src/chipleap_accel.v", "dir::src/chipleap_accel_sram.v"]
     assert set(cfg["MACROS"]) == {cell}
     entry = cfg["MACROS"][cell]
@@ -117,6 +137,14 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     # Two macros a row, pins facing the logic between the rows.
     orients = sorted(i["orientation"] for i in entry["instances"].values())
     assert orients == ["FS", "FS", "N", "N"]
+    # The band between the rows holds the build's logic with its banks' interface at 45 %,
+    # not the logic of the flop-buffer build.
+    x0, _, x1, _ = cfg["CORE_AREA"]
+    ys = {i["orientation"]: i["location"][1] for i in entry["instances"].values()}
+    band = (ys["N"] - ys["FS"] - 118.78) * (x1 - x0)
+    banked = pnr.model_cell_um2(SMOLLM2, banked=True)
+    assert banked > pnr.model_cell_um2(SMOLLM2)
+    assert banked / 0.45 <= band < banked / 0.45 + 30 * (x1 - x0)
     pdn = (work / "pdn.tcl").read_text()
     assert "source $::env(SCRIPTS_DIR)/openroad/common/pdn_cfg.tcl" in pdn
     assert f"define_pdn_grid -macro -cells {{{cell}}}" in pdn
@@ -152,6 +180,19 @@ def test_the_floorplan_puts_macros_in_two_rows_under_supply_pairs():
     assert grid.tm2_pairs(fp.core[1], p.y, p.y + 64.36)
     with pytest.raises(place.PlaceError, match="utilisation"):
         place.rows(ms, 1000, util=1.5)
+
+
+def test_the_core_ends_at_the_widest_rows_last_halo():
+    """No sliver of rows between the last macro's halo and the core's edge: pdngen cannot
+    reach the rails of rows a few sites wide (the SoC's six-macro rows left 2.4 um)."""
+    from chipleap.macro import place
+
+    ms = [place.Macro(f"b{i}", 416.64, 336.46) for i in range(8)]
+    ms += [place.Macro(f"a{i}", 784.48, 118.78) for i in range(4)]
+    fp = place.rows(ms, 3.2e6)
+    size = {m.instance: m for m in ms}
+    right = max(p.x + size[p.instance].width for p in fp.macros) + place.HALO_UM
+    assert 0 <= fp.core[2] - right < place.SITE_UM[0]
 
 
 def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch):
@@ -200,3 +241,28 @@ def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch
     kge = accel_logic_kge("gemv", 1, 8, 1) + accel_bank_kge(1, 8, True)
     assert d["model_cell_um2"] == round(kge * 1000 * get_tech("ihp-sg13g2").ge_um2)
     assert "synthesis 0.250 mm2" in step.summary and "place and route adds 20%" in step.summary
+
+
+def test_an_antenna_violation_fails_the_step(tmp_path, monkeypatch):
+    """As in a project's and a chip's place and route: a net over the PDK's antenna ratio
+    fails the step, with DRC and LVS clean and timing met."""
+    from dataclasses import replace
+
+    from chipleap.hw.design import Design
+    from chipleap.verify import run
+
+    metrics = {
+        "design__instance__area__stdcell": 300000.0,
+        "design__core__area": 1.1e6,
+        "timing__setup__ws": 1.0,
+        "timing__hold__ws": 0.1,
+    }
+    clean = pnr.parse(metrics, 90.0, None)
+    for antenna, status, words in (
+        (0, "pass", "DRC, LVS and antenna clean"),
+        (1, "fail", "0 DRC, 0 LVS and 1 antenna violations"),
+    ):
+        r = replace(clean, antenna_nets=antenna)
+        monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work, r=r: r)
+        step = run.place_route(Design(accel=SMOLLM2, freq_mhz=90.0), tmp_path)
+        assert step.status == status and words in step.summary and "90 MHz met" in step.summary
