@@ -388,6 +388,12 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     _, sealed, _, _ = E.base(p)
     good = {"DESIGN_NAME": "counter", "VERILOG_FILES": ["dir::src/counter.v"]}
     assert E._settings(p, good, sealed) == good
+    # The wire estimates every layout gets (chipleap.verify.pnr.signoff) are passed on.
+    from chipleap.verify.pnr import signoff
+
+    keys = ("LAYERS_RC", "SIGNAL_WIRE_RC_LAYERS", "CLOCK_WIRE_RC_LAYERS")
+    rc = {k: signoff()[k] for k in keys}
+    assert E._settings(p, {**good, **rc}, sealed) == {**good, **rc}
     for bad, why in [
         ({"PLACEMENT_SCRIPT": "x.tcl"}, "does not pass on"),
         ({"PRE_GLOBAL_PLACEMENT_HOOK": 1}, "does not pass on"),
@@ -398,6 +404,10 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
         ({"VERILOG_FILES": ["/abs/counter.v"]}, "not a file ChipLeap wrote"),
         ({"VERILOG_FILES": ["dir::src/other.v"]}, "not a file ChipLeap recorded"),
         ({"CLOCK_PERIOD": "10"}, "not a number"),
+        ({"LAYERS_RC": {"*": {"Metal2": {"res": "x", "cap": 1e-4}}}}, "not a number"),
+        ({"LAYERS_RC": {"*": {"Metal2": {"res": 1e-3}}}}, "for 'Metal2'"),
+        ({"LAYERS_RC": {"expr::[x]": {}}}, "cannot go into a tool script"),
+        ({"LAYERS_RC": ["x"]}, "not a mapping"),
     ]:
         with pytest.raises(E.EcoError, match=why):
             E._settings(p, bad, sealed)

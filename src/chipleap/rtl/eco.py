@@ -28,6 +28,7 @@ script found in ``build/`` that ChipLeap did not record is never run.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -118,6 +119,9 @@ TEMPLATE_KEYS = {
     "GRT_RESIZER_SETUP_SLACK_MARGIN": "number",
     "GRT_RESIZER_HOLD_SLACK_MARGIN": "number",
     "KLAYOUT_DRC_THREADS": "number",
+    "LAYERS_RC": "layers_rc",
+    "SIGNAL_WIRE_RC_LAYERS": "text",
+    "CLOCK_WIRE_RC_LAYERS": "text",
     # A project with hard macros (chipleap.rtl.pnr.macro_config).
     "CORE_AREA": "number",
     "FP_MACRO_HORIZONTAL_HALO": "number",
@@ -436,6 +440,9 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
             _check(sealed, sealed.root / "pdn.tcl", key)
             del out[key]
             continue
+        if kind == "layers_rc":
+            _layers_rc(key, value)
+            continue
         if kind is None:
             own = project.pnr.librelane
             if key not in own or own[key] != value or SCRIPT_KEY_RE.search(key):
@@ -458,6 +465,28 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
                     f"the routed run's configuration sets {key} to {item!r}, not a number"
                 )
     return out
+
+
+def _layers_rc(key: str, value: Any) -> None:
+    """LAYERS_RC as ChipLeap writes it (``chipleap.verify.pnr.ihp_layers_rc``): corners to
+    layers to a resistance and a capacitance, each name plain text and each value a
+    number of at least zero."""
+    if not isinstance(value, dict):
+        raise EcoError(f"the routed run's configuration sets {key} to {value!r}, not a mapping")
+    for corner, layers in value.items():
+        _plain_text(key, corner)
+        if not isinstance(layers, dict):
+            raise EcoError(f"the routed run's configuration sets {key}[{corner!r}] to {layers!r}")
+        for layer, rc in layers.items():
+            _plain_text(key, layer)
+            if not isinstance(rc, dict) or set(rc) != {"res", "cap"}:
+                raise EcoError(f"the routed run's configuration sets {key} for {layer!r} to {rc!r}")
+            for v in rc.values():
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v < math.inf:
+                    raise EcoError(
+                        f"the routed run's configuration sets {key} for {layer!r} to {v!r}, "
+                        "not a number"
+                    )
 
 
 def _macros(value: Any, sealed: Sealed) -> None:
