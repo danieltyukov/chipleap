@@ -83,6 +83,7 @@ accel:                              # or null
   abuf_kib: 16
   wbuf_kib: 8
   double_buffer: true
+  buffers: auto                     # auto (SRAM macros where the build takes them) | flops
 platform: xheep                     # xheep (an X-HEEP SoC) | standalone (AXI4 IP, any host)
 ```
 
