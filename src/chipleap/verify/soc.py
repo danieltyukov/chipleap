@@ -21,6 +21,7 @@ LibreLane on IHP SG13G2.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -413,6 +414,32 @@ PINS = "pins.cfg"
 AFTER_SYNTHESIS = "Checker.YosysUnmappedCells"
 
 
+# The estimated setup slack the repairs keep after CTS and after global routing (``config``).
+SETUP_MARGINS_NS = (6.0, 5.0)
+# The hold slack the repair after global routing keeps, in ns. The worst hold endpoints
+# after routing are DMA0's registers, whose clock gate hangs on the clock tree's long
+# first-level net with the accelerator's macros, and routing moves them by more than the
+# margin: from one 36 MHz placement they came out at -0.047 ns with a 0.1 ns margin and
+# -0.060 ns with 0.2 ns. CHIPLEAP_SOC_HOLD_MARGIN sets another margin for a trial run.
+HOLD_MARGIN_NS = 0.2
+HOLD_MARGIN_ENV = "CHIPLEAP_SOC_HOLD_MARGIN"
+
+
+def hold_margin_ns() -> float:
+    """The hold margin after global routing: ``HOLD_MARGIN_ENV`` when set, a number of ns
+    from 0 to 1, else ``HOLD_MARGIN_NS``."""
+    raw = os.environ.get(HOLD_MARGIN_ENV, "").strip()
+    if not raw:
+        return HOLD_MARGIN_NS
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not 0.0 <= value <= 1.0:
+        raise SocError(f"{HOLD_MARGIN_ENV} must be a number of ns from 0 to 1, not {raw[:20]!r}")
+    return value
+
+
 # The step LibreLane runs the clock tree in, and the one inserted after it.
 CTS = "OpenROAD.CTS"
 ECO_BUFFERS = "Odb.InsertECOBuffers"
@@ -475,7 +502,14 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         "PDN_CFG": "dir::pdn.tcl",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
-        **pnr.signoff(),
+        # The repairs keep SETUP_MARGINS_NS of estimated setup slack, after CTS and after
+        # global routing, where the accelerator keeps 0.8 and 1.6 ns. Hold repair puts its
+        # delay cells wherever the estimate shows setup slack, and on the SoC's long paths
+        # the estimate after global routing shows 4 to 5 ns more than routing leaves (36 MHz:
+        # +4.56 ns there, -0.22 ns after routing). From one 36 MHz placement, routed:
+        # 0.8 and 1.6 ns left +0.259 ns of setup and -0.060 ns of hold, 6 and 5 ns +0.349
+        # and +0.047 ns.
+        **pnr.signoff(*SETUP_MARGINS_NS),
         # The SoC's wires are millimetres long, and the extraction after detailed routing
         # puts 14 to 20 % more capacitance on them than the global router's estimate that
         # the repairs work against: at 50 MHz a 0.0576 pF net (LibreLane's 10 % margin
@@ -483,12 +517,8 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # routing keeps that much margin on slew and capacitance.
         "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 25,
         "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 25,
-        # Hold is repaired after global routing to the 0.1 ns the repair after CTS keeps
-        # (LibreLane's default). Hold repair puts delay cells wherever the estimate shows
-        # setup slack, which on the SoC's long paths is 4 to 5 ns more than routing leaves:
-        # at 0.2 ns it inserted about 10,900 more delay cells in the 36 MHz SoC, some on its
-        # slowest paths, for 0.8 ns less setup slack in the estimate.
-        "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.1,
+        # Hold after global routing (``hold_margin_ns``).
+        "GRT_RESIZER_HOLD_SLACK_MARGIN": hold_margin_ns(),
         # The clock tree hangs the accelerator's macros, at the top and bottom of the core,
         # and X-HEEP's clock gates on one net of its first level, millimetres of wire. IHP's
         # strongest buffer drives the tree's long nets, which alone left the macros' clock

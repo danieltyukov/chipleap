@@ -377,9 +377,10 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     # Antenna repair may reroute with a little overflow; the detailed router resolves it.
     assert cfg["GRT_ALLOW_CONGESTION"] is True and cfg["DRT_ANTENNA_REPAIR_ITERS"] > 0
     # The repair after global routing keeps a margin for what routing adds to long wires,
-    # and repairs hold to the margin the repair after CTS keeps.
+    # and the repairs keep setup slack for what routing takes from the long paths.
     assert cfg["GRT_DESIGN_REPAIR_MAX_CAP_PCT"] == 25
-    assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == pytest.approx(0.1)
+    assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == pytest.approx(0.2)
+    assert (cfg["PL_RESIZER_SETUP_SLACK_MARGIN"], cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"]) == (6, 5)
     assert cfg["CTS_CLK_BUFFERS"][0] == cfg["CTS_ROOT_BUFFER"] == "sg13g2_buf_16"
     # A clock other than the design's, for a signoff the SoC can meet.
     slow, _ = soc_step.prepare(design, xheep_config(design), co, work, pdk, clock_mhz=55.0)
@@ -587,3 +588,20 @@ def test_the_socs_clock_terms_are_measured_from_its_routed_paths(monkeypatch):
     cq = IHP_1P_READ_NS["RM_IHPSG13_1P_1024x32_c2_bm_bist"]
     assert read[0] == pytest.approx(27.778 - 1.526 - cq)
     assert bus.start == "_cpu_" and bus.needed_ns == pytest.approx(27.997)
+
+
+def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
+    """The SoC's repairs keep 6 and 5 ns of estimated setup slack and 0.2 ns of hold after
+    global routing; CHIPLEAP_SOC_HOLD_MARGIN sets another hold margin, a number of ns."""
+    sources = soc_step.Sources((), (), (), None)  # type: ignore[arg-type]
+    monkeypatch.delenv(soc_step.HOLD_MARGIN_ENV, raising=False)
+    cfg = soc_step.config(sources, 36.0)
+    assert cfg["PL_RESIZER_SETUP_SLACK_MARGIN"] == 6.0
+    assert cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"] == 5.0
+    assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.2
+    monkeypatch.setenv(soc_step.HOLD_MARGIN_ENV, "0.3")
+    assert soc_step.config(sources, 36.0)["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.3
+    for bad in ("x", "nan", "-0.1", "2"):
+        monkeypatch.setenv(soc_step.HOLD_MARGIN_ENV, bad)
+        with pytest.raises(soc_step.SocError, match="CHIPLEAP_SOC_HOLD_MARGIN must be"):
+            soc_step.config(sources, 36.0)
