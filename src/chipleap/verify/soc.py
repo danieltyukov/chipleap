@@ -479,11 +479,16 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # The SoC's wires are millimetres long, and the extraction after detailed routing
         # puts 14 to 20 % more capacitance on them than the global router's estimate that
         # the repairs work against: at 50 MHz a 0.0576 pF net (LibreLane's 10 % margin
-        # under an SRAM output's 0.064 pF) came out 0.0657 pF, and hold at the fast corner
-        # lost up to 0.1 ns. The repair after global routing keeps that much margin.
+        # under an SRAM output's 0.064 pF) came out 0.0657 pF. The repair after global
+        # routing keeps that much margin on slew and capacitance.
         "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 25,
         "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 25,
-        "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.2,
+        # Hold is repaired after global routing to the 0.1 ns the repair after CTS keeps
+        # (LibreLane's default). Hold repair puts delay cells wherever the estimate shows
+        # setup slack, which on the SoC's long paths is 4 to 5 ns more than routing leaves:
+        # at 0.2 ns it inserted about 10,900 more delay cells in the 36 MHz SoC, some on its
+        # slowest paths, for 0.8 ns less setup slack in the estimate.
+        "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.1,
         # The clock tree hangs the accelerator's macros, at the top and bottom of the core,
         # and X-HEEP's clock gates on one net of its first level, millimetres of wire. IHP's
         # strongest buffer drives the tree's long nets, which alone left the macros' clock

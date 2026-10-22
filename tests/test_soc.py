@@ -376,9 +376,10 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     assert cfg["DESIGN_REPAIR_BUFFER_OUTPUT_PORTS"] is False
     # Antenna repair may reroute with a little overflow; the detailed router resolves it.
     assert cfg["GRT_ALLOW_CONGESTION"] is True and cfg["DRT_ANTENNA_REPAIR_ITERS"] > 0
-    # The repair after global routing keeps a margin for what routing adds to long wires.
+    # The repair after global routing keeps a margin for what routing adds to long wires,
+    # and repairs hold to the margin the repair after CTS keeps.
     assert cfg["GRT_DESIGN_REPAIR_MAX_CAP_PCT"] == 25
-    assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == pytest.approx(0.2)
+    assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == pytest.approx(0.1)
     assert cfg["CTS_CLK_BUFFERS"][0] == cfg["CTS_ROOT_BUFFER"] == "sg13g2_buf_16"
     # A clock other than the design's, for a signoff the SoC can meet.
     slow, _ = soc_step.prepare(design, xheep_config(design), co, work, pdk, clock_mhz=55.0)
