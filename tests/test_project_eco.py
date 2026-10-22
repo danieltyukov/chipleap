@@ -62,9 +62,10 @@ CHIPLEAP-PATHS end
 """
 
 
-def routed(project_dir, state=None, pdk=None):
+def routed(project_dir, state=None, pdk=None, meta=None):
     """A routed run that ChipLeap recorded: its step directories, the state before
-    detailed routing, the configuration beside it and, with ``pdk``, its PDK views."""
+    detailed routing, the configuration beside it (with ``meta``, the flow it names) and,
+    with ``pdk``, its PDK views."""
     pnr = project_dir / "build/pnr"
     run = pnr / "runs/chipleap"
     for n, step in enumerate(STEPS, 1):
@@ -102,6 +103,7 @@ def routed(project_dir, state=None, pdk=None):
                 "VERILOG_FILES": ["dir::src/counter.v"],
                 "PNR_SDC_FILE": f"dir::{SDC_NAME}",
                 "CLOCK_PERIOD": 10,
+                **({"meta": meta} if meta is not None else {}),
             }
         )
     )
@@ -139,7 +141,8 @@ def test_edits_and_the_resumed_flow(counter_project):
         "resize\t_150_\tsg13g2_nand4_2\nbuffer\t\\u_rx.q[3]\tD\tsg13g2_buf_2\n"
     )
     cfg = E.eco_config(p, changes, steps, sealed)
-    assert cfg["meta"]["flow"] == [*E.PREFIX, E.REPAIR, *STEPS[2:]]
+    # Antennas are repaired again after the timing repair, as in place and route.
+    assert cfg["meta"]["flow"] == [*E.PREFIX, E.REPAIR, "OpenROAD.RepairAntennas", *STEPS[2:]]
     assert cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"] == 0.5
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.1
     flow = E.eco_config(p, changes[:1], steps, sealed)["meta"]["flow"]
@@ -147,6 +150,21 @@ def test_edits_and_the_resumed_flow(counter_project):
     # Names reach OpenROAD as data, never as script text.
     script = E.edit_script({"tech_lef": "t.lef", "cell_lefs": ["c.lef"]}, "in.def", "changes.txt")
     assert "_150_" not in script and "set changes_file {changes.txt}" in script
+
+
+def test_the_flow_a_routed_run_names_is_its_own_or_refused(counter_project):
+    """Place and route names the Classic flow with the late antenna repair; an ECO writes
+    its own step list in its place, and refuses any other flow."""
+    routed(counter_project, meta=E.ROUTED_META)
+    p = load_project(counter_project)
+    _, sealed, _, steps = E.base(p)
+    flow = E.eco_config(p, [], steps, sealed)["meta"]["flow"]
+    assert flow == [*E.PREFIX, *STEPS[2:]]
+    shutil.rmtree(counter_project / "build")
+    routed(counter_project, meta={**E.ROUTED_META, "substituting_steps": {"+A.B": "Misc.C"}})
+    _, sealed, _, steps = E.base(p)
+    with pytest.raises(E.EcoError, match=r"sets meta to .*not the flow ChipLeap's place and"):
+        E.eco_config(p, [], steps, sealed)
 
 
 def test_edit_results(counter_project):
@@ -340,6 +358,28 @@ def test_a_routed_run_from_elsewhere_is_refused(counter_project, ihp_pdk, fake_f
     assert ran(fake_flow) == []
 
 
+def test_a_macro_projects_place_and_route_constraints_are_passed_on(counter_project):
+    """With macros, placement and routing read chipleap.pnr.sdc, which the routed run
+    records; the ECO passes it on, and signoff's chipleap.sdc."""
+    from chipleap.rtl.pnr import PNR_SDC_NAME, pnr_sdc
+
+    run = routed(counter_project)
+    pnr = run.parent.parent
+    (pnr / PNR_SDC_NAME).write_text(pnr_sdc())
+    seal_routed(pnr, with_macros=True)
+    p = load_project(counter_project)
+    _, sealed, _, _ = E.base(p)
+    cfg = {
+        "DESIGN_NAME": "counter",
+        "PNR_SDC_FILE": f"dir::{PNR_SDC_NAME}",
+        "SIGNOFF_SDC_FILE": f"dir::{SDC_NAME}",
+    }
+    assert E._settings(p, cfg, sealed) == cfg
+    (pnr / PNR_SDC_NAME).write_text("set_max_transition 9 [current_design]\n")
+    with pytest.raises(E.EcoError):
+        E._settings(p, cfg, sealed)
+
+
 def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     """Even in a recorded run, a variable that names a script, hook or plugin, a
     substitution, or a file outside the sources ChipLeap copied is not passed on."""
@@ -381,3 +421,20 @@ def test_a_repair_closes_timing_the_routed_run_missed(tmp_path):
     r = E.eco(p)
     assert r.status == "pass", r.summary
     assert r.data["after"]["setup_slack_ns"] >= 0 and r.data["after"]["lvs_errors"] == 0
+
+
+def test_an_eco_is_signed_off_as_place_and_route_is(counter_project, tmp_path):
+    """The ECO's result meets pnr's criteria: a slew or capacitance violation fails it, a
+    driver over its fanout limit is reported."""
+    from chipleap.verify import pnr as P
+
+    p = load_project(counter_project)
+    base = {"timing__setup__ws": 0.5, "timing__hold__ws": 0.1}
+    before = P.parse(base, 100.0, None)
+    for extra, status, words in (
+        ({"design__max_fanout_violation__count": 1}, "pass", "1 driver over the fanout limit"),
+        ({"design__max_cap_violation__count__corner:nom_fast_1p32V_m40C": 1}, "fail", "1 cap"),
+    ):
+        after = P.parse({**base, **extra}, 100.0, None)
+        status_, msg = E.summarize(p, E.EcoResult([{}], before, after, tmp_path))
+        assert status_ == status and words in msg, msg

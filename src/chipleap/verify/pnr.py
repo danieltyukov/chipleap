@@ -6,12 +6,13 @@ for layout versus schematic, and OpenSTA for timing at the design's clock. The r
 passes the checks a foundry shuttle asks for.
 
 The activation and weight buffers are SRAM macros in silicon. When the build can have
-them without a change to its schedule (``chipleap.gen.banks``) and the IHP PDK ChipLeap
-uses is installed, the layout has them: IHP's own macros at the design's buffer sizes, in
-rows above and below the logic (``chipleap.macro.place``), each with its halo and the
-macro power grid (``chipleap.macro.grid``), timed at every corner from their liberty and
-checked by LVS as boxes with their pins. Otherwise the layout holds the accelerator's
-logic with 16-word flop buffers, and the result says why.
+them without a change to its schedule (``chipleap.gen.banks``), the IHP PDK ChipLeap
+uses is installed and the macros' rows leave a core that routes, the layout has them:
+IHP's own macros at the design's buffer sizes, in rows above and below the logic
+(``chipleap.macro.place``), each with its halo and the macro power grid
+(``chipleap.macro.grid``), timed at every corner from their liberty and checked by LVS as
+boxes with their pins. Otherwise the layout holds the accelerator's logic with 16-word
+flop buffers, and the result says why.
 """
 
 from __future__ import annotations
@@ -30,11 +31,16 @@ from chipleap.chip import io
 from chipleap.gen import banks
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
-from chipleap.hw.tech import accel_logic_kge, get_tech
 from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
-from chipleap.verify import launch, minarea
-from chipleap.verify.drc import DrcReportError, DrcResult, pdk_cells, read_lyrdb
+from chipleap.verify import antenna, launch, minarea
+from chipleap.verify.drc import (
+    DrcReportError,
+    DrcResult,
+    describe_markers,
+    pdk_cells,
+    read_lyrdb,
+)
 from chipleap.verify.synth import _sv2v
 from chipleap.verify.tools import librelane, librelane_env, librelane_pdk_args, librelane_ran
 
@@ -68,13 +74,76 @@ class PnrResult:
     synth_cell_um2: float = 0.0  # LibreLane's synthesis, before placement's repairs
     max_slew_violations: int = 0  # pins over their slew limit, at any corner
     max_cap_violations: int = 0  # nets over their capacitance limit, at any corner
+    max_fanout_violations: int = 0  # drivers over their fanout limit, at any corner
     # Off-grid pin markers inside the PDK's own macros, left out of drc_errors
     # (``chipleap.verify.drc``): rule, cell, the macros that hold it, count.
     pin_markers: list[dict[str, Any]] = field(default_factory=list)
+    # IHP's antenna deck on the GDS (``chipleap.verify.antenna``), or why it did not run
+    # (``ihp_antenna_skipped``); neither when the flow does not run it.
+    ihp_antenna: DrcResult | None = None
+    ihp_antenna_skipped: str = ""
 
     @property
     def clean(self) -> bool:
         return self.drc_errors == 0 and self.lvs_errors == 0
+
+    @property
+    def checks_clean(self) -> bool:
+        """DRC and LVS clean, antenna clean under OpenROAD's check and IHP's deck, and no
+        pin or net over its slew or capacitance limit at any corner. A driver over its
+        fanout limit does not count: fanout is a constraint for the repairs, and the slew
+        and capacitance limits carry what it costs (a diode the router adds is a load to
+        the count and switches nothing)."""
+        ihp = self.ihp_antenna
+        return (
+            self.clean
+            and self.antenna_nets == 0
+            and (ihp is None or ihp.total == 0)
+            and self.max_slew_violations == 0
+            and self.max_cap_violations == 0
+        )
+
+    def checks(self) -> str:
+        """The checks for a step's summary: DRC, LVS and OpenROAD's antenna counts, IHP's
+        antenna deck's violations with their rules and places, or why it did not run, the
+        slew and capacitance violations, the drivers over their fanout limit (reported
+        only), and the pin markers set apart."""
+        ihp = self.ihp_antenna
+        if self.checks_clean:
+            text = "DRC, LVS and antenna clean"
+            if ihp is not None:
+                text += ", IHP's antenna deck included"
+            text += ", no slew or capacitance violations"
+        else:
+            text = (
+                f"{self.drc_errors} DRC, {self.lvs_errors} LVS and {self.antenna_nets} "
+                f"antenna violations, {self.max_slew_violations} slew and "
+                f"{self.max_cap_violations} capacitance violations"
+            )
+        if ihp is not None and ihp.total:
+            n = ihp.total
+            text += (
+                f"; IHP's antenna deck: {n} violation{'s' if n != 1 else ''}, "
+                f"{antenna.describe(antenna.summary(ihp), ihp.top)}"
+            )
+        elif ihp is None and self.ihp_antenna_skipped:
+            text += f"; IHP's antenna deck not run: {self.ihp_antenna_skipped}"
+        if n := self.max_fanout_violations:
+            text += f"; {n} driver{'s' if n != 1 else ''} over the fanout limit (reported only)"
+        if self.pin_markers:
+            text += f"; {describe_markers(self.pin_markers)}"
+        return text
+
+    def ihp_antenna_data(self) -> dict[str, Any]:
+        """IHP's antenna deck for a step's result (``chipleap.verify.antenna.summary``), or
+        why it did not run; empty when the flow does not run it."""
+        if self.ihp_antenna is not None:
+            return {"ihp_antenna": antenna.summary(self.ihp_antenna)}
+        return (
+            {"ihp_antenna": {"skipped": self.ihp_antenna_skipped}}
+            if self.ihp_antenna_skipped
+            else {}
+        )
 
     def _fmax(self, slack: float) -> float:
         period = 1000.0 / self.clock_mhz - slack
@@ -161,6 +230,19 @@ def _worst(metrics: dict[str, Any], prefix: str) -> float:
     return min(vals) if vals else 0.0
 
 
+def _violations(metrics: dict[str, Any], prefix: str) -> int:
+    """The largest of a violation count overall and at each corner."""
+    vals = [
+        v
+        for k, v in metrics.items()
+        if (k == prefix or k.startswith(prefix + "__corner:"))
+        and isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+    ]
+    return int(max(vals, default=0))
+
+
 def _corner(metrics: dict[str, Any], prefix: str, corner: str) -> float | None:
     for k, v in metrics.items():
         if k.startswith(prefix + "__corner:") and corner in k and isinstance(v, (int, float)):
@@ -194,8 +276,9 @@ def parse(
         power_mw=_num(metrics, "power__total") * 1000,
         gds=gds,
         metrics=metrics,
-        max_slew_violations=int(_num(metrics, "design__max_slew_violation__count")),
-        max_cap_violations=int(_num(metrics, "design__max_cap_violation__count")),
+        max_slew_violations=_violations(metrics, "design__max_slew_violation__count"),
+        max_cap_violations=_violations(metrics, "design__max_cap_violation__count"),
+        max_fanout_violations=_violations(metrics, "design__max_fanout_violation__count"),
         pin_markers=klayout.markers_data() if klayout else [],
     )
 
@@ -240,6 +323,26 @@ def parse_run(
 ) -> PnrResult:
     """``parse`` with the run's own KLayout DRC report (``klayout_drc``)."""
     return parse(metrics, clock_mhz, gds, klayout_drc(metrics, klayout_report(run), held))
+
+
+ANTENNA_DIR = "antenna"  # beside the run: IHP's antenna deck's report and log
+
+
+def with_ihp_antenna(
+    r: PnrResult, pdk: Path | None, top: str, work: Path, name: str = ANTENNA_DIR
+) -> PnrResult:
+    """``r`` with IHP's antenna deck run on its GDS (``chipleap.verify.antenna``), its
+    report in ``work/name`` (emptied first), or with why it could not run here. A run of
+    the deck that did not finish fails the step."""
+    why = "the run left no GDS" if r.gds is None else antenna.unavailable(pdk)
+    if why or pdk is None or r.gds is None:
+        return replace(r, ihp_antenna_skipped=why)
+    out = builddir.work_dir(work, name, empty=True)
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    try:
+        return replace(r, ihp_antenna=antenna.check(pdk, r.gds, top, out, limit))
+    except antenna.AntennaError as exc:
+        raise PnrError(str(exc)) from None
 
 
 DETAILED_ROUTING = "OpenROAD.DetailedRouting"
@@ -335,6 +438,7 @@ def run_librelane(
     to: str | None = None,
     resume_from: str | None = None,
     timeout_s: float = 10800,
+    late_antenna_repair: bool = False,
 ) -> tuple[dict[str, Any], Path | None]:
     """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
     Returns the final metrics and the GDS.
@@ -348,7 +452,13 @@ def run_librelane(
     With ``to`` (a step before detailed routing) the run stops after that step and
     returns no metrics; with ``resume_from`` it goes on in the same run from that step,
     with the state the run's last step left and the configuration given now.
-    ``CHIPLEAP_PNR_TIMEOUT`` (seconds) bounds the run, ``timeout_s`` when it is unset."""
+    ``CHIPLEAP_PNR_TIMEOUT`` (seconds) bounds the run, ``timeout_s`` when it is unset.
+
+    With ``late_antenna_repair``, antennas are repaired again after the timing repair
+    (``with_late_antenna_repair``). The accelerator, an RTL project and a chip ask for it
+    (an ECO adds it to its own step list). The SoC step does not yet: the runs its
+    results stand on were routed without it, and it turns it on once a SoC run with it
+    has been checked."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
@@ -357,6 +467,8 @@ def run_librelane(
         env = librelane_env()
     except ValueError as exc:
         raise PnrError(str(exc)) from None
+    if late_antenna_repair:
+        cfg = with_late_antenna_repair(cfg)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
     base = [tool.path, *pdk_args, "--run-tag", tag]
     first = ["--from", resume_from] if resume_from else ["--overwrite"]
@@ -501,6 +613,48 @@ def with_def_to_odb(cfg: dict[str, Any]) -> dict[str, Any]:
     return {**cfg, "meta": meta}
 
 
+# LibreLane repairs antennas after global routing (jumpers, and diodes at the gates of
+# nets over the PDK's ratios) and then repairs timing, whose buffers are new gates on nets
+# routed again; nothing checks those nets until the detailed router's own repair. In the
+# SmolLM2 accelerator's layout a hold buffer's input (a dlygate4sd3_1) was left on a Metal2
+# island at a cumulative ratio of 312.72 against 200, out of reach of the router's diodes,
+# which joined only through Metal3. So every layout ChipLeap routes with LibreLane but the
+# SoC's (``run_librelane``) repairs antennas once more after the timing repair: in that
+# layout the second repair found 35 nets over the ratios and put 17 diodes on them, the
+# routed design was clean under OpenROAD's antenna check and IHP's rule deck, and its slack
+# at the slow corner moved by +0.004 ns. Only a repair's diodes last: LibreLane's step
+# routes globally again after repair_antennas, over the jumpers it inserted (40 there),
+# and the detailed router follows that route. The second repair put no diode on a clock
+# net there; the detailed router's own repair put 10 on one (see docs/verification.md).
+TIMING_REPAIR = "OpenROAD.ResizerTimingPostGRT"
+ANTENNA_REPAIR = "OpenROAD.RepairAntennas"
+
+
+def with_late_antenna_repair(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``cfg`` with LibreLane's antenna repair once more after the timing repair after
+    global routing: after that step in a flow given as a step list, else as a substitution.
+    Unchanged when the configuration turns antenna repair off, or the timing repair (a
+    Classic flow's) or a step list has none."""
+    if cfg.get("RUN_ANTENNA_REPAIR") is False:
+        return cfg
+    meta = dict(cfg.get("meta") or {"version": 2, "flow": "Classic"})
+    flow = meta.get("flow")
+    if isinstance(flow, list):
+        if TIMING_REPAIR not in flow:
+            return cfg
+        i = flow.index(TIMING_REPAIR)
+        if flow[i + 1 : i + 2] != [ANTENNA_REPAIR]:
+            meta["flow"] = [*flow[: i + 1], ANTENNA_REPAIR, *flow[i + 1 :]]
+    elif cfg.get("RUN_POST_GRT_RESIZER_TIMING"):
+        meta["substituting_steps"] = {
+            **(meta.get("substituting_steps") or {}),
+            f"+{TIMING_REPAIR}": ANTENNA_REPAIR,
+        }
+    else:
+        return cfg
+    return {**cfg, "meta": meta}
+
+
 # A design with hard macros has long nets to the macros' pins (a word written to every
 # bank, in rows at the top and the bottom of the core), whose slew and capacitance only
 # show once they are routed: LibreLane repairs them after global routing too, and buffers
@@ -514,6 +668,32 @@ MACRO_REPAIR = {
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
 }
+# IHP's SRAMs allow a slew of 0.595 ns at their inputs at the slow corner, a quarter of the
+# standard cells' 2.5 ns, and OpenROAD's repair_design holds a net to its driver's limit
+# and the design's, not to its loads': in the macro-backed GEMV 1 x 4 build, an address bit
+# driven 190 um from an o21ai_1 was estimated at 0.54 ns at the macro's pin, nothing
+# repaired it (not with a 50 % slew margin either), and routed it reached 0.80 ns, its
+# wire 45 to 60 % more capacitive than estimated. So a macro-backed accelerator is placed
+# and routed against a design-wide limit of MACRO_PNR_SLEW_NS (PNR_SDC), under which a
+# routed slew stays within the macros', and signed off against LibreLane's own constraints
+# (SIGNOFF_SDC), with every cell's own limit: in that build the repair added about 400
+# buffers, 1.6 % of its cells, and took the address pins to 0.09 ns estimated.
+MACRO_PNR_SLEW_NS = 0.3
+PNR_SDC = "pnr.sdc"
+SIGNOFF_SDC = "signoff.sdc"
+
+
+def macro_sdc(pnr: bool) -> str:
+    """The constraints of a macro-backed accelerator: LibreLane's own (base.sdc), and for
+    placement and routing the design-wide slew limit ``MACRO_PNR_SLEW_NS``."""
+    lines = ["# LibreLane's own constraints.", "source $::env(SCRIPTS_DIR)/base.sdc"]
+    if pnr:
+        lines += [
+            "# A slew target for repair under the SRAM macros' input limit (0.595 ns at the",
+            "# slow corner), since repair holds nets to their drivers' limits, not their loads'.",
+            f"set_max_transition {MACRO_PNR_SLEW_NS} [current_design]",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def sram_config(
@@ -536,16 +716,18 @@ def sram_config(
         "PL_TARGET_DENSITY_PCT": 55,
         "MACROS": macros,
         "PDN_CFG": "dir::pdn.tcl",
+        "PNR_SDC_FILE": f"dir::{PNR_SDC}",
+        "SIGNOFF_SDC_FILE": f"dir::{SIGNOFF_SDC}",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
         **signoff(),
     }
 
 
-def model_cell_um2(accel: Accel) -> float:
-    """The model's standard-cell area for the accelerator's logic on SG13G2."""
-    ihp = get_tech("ihp-sg13g2")
-    return accel_logic_kge(accel.dataflow, accel.rows, accel.cols, accel.ports) * 1000 * ihp.ge_um2
+def model_cell_um2(accel: Accel, banked: bool = False) -> float:
+    """The model's standard-cell area for the accelerator's logic on SG13G2; ``banked``
+    for a macro-backed build, whose logic also has its banks' interface."""
+    return banks.cell_um2(accel, banked)
 
 
 def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
@@ -553,8 +735,12 @@ def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
     reason = banks.unsupported(accel)
     if reason is None and pdk is None:
         reason = f"no IHP PDK with its SRAM macros ({io.PDK_ENV})"
-    if reason is None and pdk is not None and not sram.catalog(pdk):
-        reason = f"the PDK at {pdk} has no single-port SRAM macros"
+    if reason is None and pdk is not None:
+        catalog = sram.catalog(pdk)
+        if not catalog:
+            reason = f"the PDK at {pdk} has no single-port SRAM macros"
+        else:
+            reason = banks.layout_reason(accel, catalog)
     return reason
 
 
@@ -572,11 +758,12 @@ def place_and_route(
     reason = sram_reason(accel, pdk)
     run = workdir / "runs" / "chipleap"
     if reason is not None or pdk is None:
-        metrics, gds = run_librelane(workdir, config(accel, clock_mhz))
+        metrics, gds = run_librelane(workdir, config(accel, clock_mhz), late_antenna_repair=True)
         result = parse_run(metrics, clock_mhz, gds, run, {})
+        result = with_ihp_antenna(result, pdk, "chipleap_accel", workdir)
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
     cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
-    metrics, gds = run_librelane(workdir, cfg)
+    metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
     from chipleap.rtl.pnr import check_merged
 
     check_merged(run, workdir, banks.TOP)
@@ -585,6 +772,7 @@ def place_and_route(
         (banks.TOP,),
     )
     result = replace(parse_run(metrics, clock_mhz, gds, run, held), synth_cell_um2=synth_area(run))
+    result = with_ihp_antenna(result, pdk, banks.TOP, workdir)
     counts: dict[str, int] = {}
     for _, cell in plan.instances():
         counts[cell] = counts.get(cell, 0) + 1
@@ -609,7 +797,7 @@ def sram_flow(
             place.Macro(inst, views[cell].view.width, views[cell].view.height)
             for inst, cell in plan.instances()
         ],
-        model_cell_um2(accel),
+        model_cell_um2(accel, banked=True),
     )
     (workdir / "src" / f"{banks.TOP}.v").write_text(banks.top_sv(plan))
     placements = [
@@ -617,6 +805,8 @@ def sram_flow(
         for p in fp.macros
     ]
     (workdir / "pdn.tcl").write_text(grid.core_script(placements, fp.core[1]))
+    (workdir / PNR_SDC).write_text(macro_sdc(pnr=True))
+    (workdir / SIGNOFF_SDC).write_text(macro_sdc(pnr=False))
     macros, _ = sram.librelane_macros(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )

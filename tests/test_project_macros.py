@@ -204,6 +204,14 @@ def test_place_and_route_sizes_the_die_around_the_macro(
     x = entry["instances"]["u_mem"]["location"][0]
     assert x >= cfg["CORE_AREA"][0] + 40
     assert module_check == [[CELL]]
+    # Placed and routed against a slew limit under the macro's own, then the project's
+    # constraints; signed off against those alone.
+    assert cfg["PNR_SDC_FILE"] == "dir::chipleap.pnr.sdc"
+    assert cfg["SIGNOFF_SDC_FILE"] == "dir::chipleap.sdc"
+    lines = (work / "chipleap.pnr.sdc").read_text().splitlines()
+    assert "set_max_transition 0.3 [current_design]" in lines
+    assert lines[-1] == "source [file join [file dirname [info script]] chipleap.sdc]"
+    assert "set_max_transition 0.3" not in (work / "chipleap.sdc").read_text()
 
 
 def test_a_die_of_the_projects_own_places_each_macro_where_it_says(
@@ -409,7 +417,8 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
     monkeypatch.setattr(pnr, "check_merged", lambda *a: {})
     items: list[tuple[str, str]] = []
 
-    def run(workdir, cfg, tag="chipleap"):
+    def run(workdir, cfg, tag="chipleap", *, late_antenna_repair=False):
+        assert late_antenna_repair  # every layout but the SoC's repairs antennas twice
         (workdir / "config.json").write_text("{}")
         reports = workdir / "runs" / tag / "66-klayout-drc" / "reports"
         reports.mkdir(parents=True, exist_ok=True)
@@ -426,6 +435,7 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
         return metrics, None
 
     monkeypatch.setattr(pnr, "run_librelane", run)
+    monkeypatch.setattr(pnr, "with_ihp_antenna", lambda r, *a: r)  # tests/test_antenna.py
     p = load_project(sram_project)
     markers = [("metal1_pin_Offgrid", f"{bldrv}:r0")] * 3 + [("metal1_pin_Offgrid", f"{bldrv}:m90")]
     items[:] = markers
@@ -436,7 +446,8 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
         {"rule": "metal1_pin_Offgrid", "cell": bldrv, "macros": [CELL], "count": 4}
     ]
     assert result.summary.endswith(
-        "DRC, LVS and antenna clean; 4 pin markers off the grid inside the PDK's own macros, "
+        "DRC, LVS and antenna clean, no slew or capacitance violations; 4 pin markers off the "
+        "grid inside the PDK's own macros, "
         f"not counted: 4 metal1_pin_Offgrid in {bldrv}"
     )
     for other in (
@@ -447,7 +458,10 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
         items[:] = [*markers, other]
         result = pnr.pnr(p)
         assert result.status == "fail" and result.data["drc_errors"] == 1, other
-        assert "1 DRC, 0 LVS and 0 antenna violations; 4 pin markers" in result.summary
+        assert (
+            "1 DRC, 0 LVS and 0 antenna violations, 0 slew and 0 capacitance violations; "
+            "4 pin markers" in result.summary
+        )
 
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="Yosys not installed")

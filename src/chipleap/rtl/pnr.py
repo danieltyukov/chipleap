@@ -29,6 +29,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from chipleap.chip import io
 from chipleap.macro import grid, place, sram
 from chipleap.rtl import builddir, macros
 from chipleap.rtl import quote as q
@@ -36,19 +37,37 @@ from chipleap.rtl.openroad import ECO_MANIFEST, PNR_MANIFEST, RUN_TAG
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
-from chipleap.verify.drc import describe_markers
 from chipleap.verify.pnr import (
+    MACRO_PNR_SLEW_NS,
     MACRO_REPAIR,
     PnrError,
     PnrResult,
     parse_run,
     run_librelane,
     signoff,
+    with_ihp_antenna,
 )
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane
 
 SDC_NAME = "chipleap.sdc"
+# With macros, placement and routing read this instead (``pnr_sdc``) and signoff the
+# project's own constraints, as the accelerator's layout does (chipleap.verify.pnr).
+PNR_SDC_NAME = "chipleap.pnr.sdc"
+
+
+def pnr_sdc() -> str:
+    """The constraints placement and routing read for a project with SRAM macros: the
+    design-wide slew limit repair needs to keep the macros' inputs within theirs
+    (``chipleap.verify.pnr.MACRO_PNR_SLEW_NS``), then the project's constraints from the
+    file beside this one, so a limit they set themselves wins."""
+    return (
+        "# A slew target for repair under the SRAM macros' input limit (0.595 ns at the\n"
+        "# slow corner), since repair holds nets to their drivers' limits, not their loads'.\n"
+        f"set_max_transition {MACRO_PNR_SLEW_NS} [current_design]\n"
+        "# The project's constraints, which signoff reads alone.\n"
+        f"source [file join [file dirname [info script]] {SDC_NAME}]\n"
+    )
 
 
 def sdc(project: Project) -> str:
@@ -325,6 +344,9 @@ def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, A
         (workdir / SDC_NAME).write_text(sdc(project))
     cfg["PNR_SDC_FILE"] = f"dir::{SDC_NAME}"
     cfg["SIGNOFF_SDC_FILE"] = f"dir::{SDC_NAME}"
+    if project.macros:
+        builddir.write_text(workdir, PNR_SDC_NAME, pnr_sdc())
+        cfg["PNR_SDC_FILE"] = f"dir::{PNR_SDC_NAME}"
     cfg["PL_TARGET_DENSITY_PCT"] = project.pnr.density
     if not project.macros:
         cfg["FP_CORE_UTIL"] = project.pnr.utilisation
@@ -361,7 +383,7 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     if (why := macros.unsupported(project, "dft")) and project.dft and project.dft.insert:
         raise PnrError(f"scan insertion (dft.insert): {why}")
     cfg = config(project, work)
-    metrics, gds = run_librelane(work, cfg, RUN_TAG)
+    metrics, gds = run_librelane(work, cfg, RUN_TAG, late_antenna_repair=True)
     if project.macros:
         check_merged(work / "runs" / RUN_TAG, work, project.top)
     seal_routed(work, bool(project.macros))
@@ -373,6 +395,7 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     r = parse_run(
         metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds, work / "runs" / RUN_TAG, held
     )
+    r = with_ihp_antenna(r, io.pdk_dir(), project.top, work)
     if not project.macros:
         return r
     area = macros.area_um2(project) or 0.0
@@ -400,19 +423,13 @@ def seal_routed(work: Path, with_macros: bool = False) -> Sealed:
     """Record the routed run in ``work`` (``build/pnr``): the configuration, the
     constraints and sources ChipLeap copied beside it (and the macros' views and their
     power grid), and LibreLane's run directory."""
-    extra = ["macros", "pdn.tcl"] if with_macros else []
+    extra = ["macros", "pdn.tcl", PNR_SDC_NAME] if with_macros else []
     return seal(
         work, PNR_MANIFEST, "pnr", ["config.json", SDC_NAME, "src", *extra, f"runs/{RUN_TAG}"]
     )
 
 
 def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
-    m = r.metrics
-
-    def count(key: str) -> int:
-        v = m.get(key)
-        return int(v) if isinstance(v, (int, float)) else 0
-
     return {
         "tool": "LibreLane",
         "technology": project.tech,
@@ -430,9 +447,11 @@ def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
         "drc_errors": r.drc_errors,
         "lvs_errors": r.lvs_errors,
         "antenna_nets": r.antenna_nets,
+        **r.ihp_antenna_data(),
         **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
-        "max_slew_violations": count("design__max_slew_violation__count"),
-        "max_cap_violations": count("design__max_cap_violation__count"),
+        "max_slew_violations": r.max_slew_violations,
+        "max_cap_violations": r.max_cap_violations,
+        "max_fanout_violations": r.max_fanout_violations,
         "power_mw": round(r.power_mw, 4),
         "gds": project.rel(r.gds) if r.gds else None,
         **(
@@ -449,7 +468,8 @@ def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
 @runs_tools
 def pnr(project: Project) -> StepResult:
     """The place-and-route step: passes when setup is met at the slow corner, hold at every
-    corner, and DRC, LVS and antenna checks are clean."""
+    corner, DRC, LVS and antenna checks are clean, and no pin or net is over its slew or
+    capacitance limit at any corner."""
     try:
         r = place_route(project)
     except PnrError as exc:
@@ -457,13 +477,8 @@ def pnr(project: Project) -> StepResult:
         status = "skipped" if "not installed" in msg or "runs on IHP" in msg else "fail"
         return StepResult("pnr", status, msg, {"error": str(exc)})
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
-    clean = r.clean and r.antenna_nets == 0
-    if clean:
-        checks = "DRC, LVS and antenna clean"
-    else:
-        checks = f"{r.drc_errors} DRC, {r.lvs_errors} LVS and {r.antenna_nets} antenna violations"
-    if r.pin_markers:
-        checks += f"; {describe_markers(r.pin_markers)}"
+    clean = r.checks_clean
+    checks = r.checks()
     clk = project.fastest_clock
     clock = f"{r.clock_mhz:g} MHz on {clk.port}" if clk else f"a {r.clock_mhz:g} MHz virtual clock"
     srams = ""

@@ -494,3 +494,49 @@ def test_the_soc_reports_setup_and_hold_at_every_corner():
         "min_fast_1p32V_m40C": {"hold": 0.04},
         "nom_slow_1p08V_125C": {"setup": 0.51, "hold": 0.2},
     }
+
+
+def test_the_soc_fails_on_ihps_antenna_deck():
+    """The soc step signs the SoC off as every layout: a violation of IHP's antenna deck
+    fails it, with its rule in the summary, and a clean deck is said so."""
+    from dataclasses import replace
+
+    from chipleap.hw.design import Design
+    from chipleap.verify import pnr
+    from chipleap.verify.drc import DrcResult
+    from chipleap.verify.run import soc_step_result
+
+    design = Design(
+        tech="ihp-sg13g2",
+        freq_mhz=36.0,
+        cpu="cv32e20",
+        bus="onetoM",
+        banks=1,
+        bank_kib=32,
+        accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2),
+    )
+    routed = pnr.PnrResult(
+        36.0,
+        7.5e6,
+        7.3e6,
+        3.1e6,
+        0.54,
+        181280,
+        0.4,
+        10.0,
+        0.05,
+        0,
+        0,
+        0,
+        58.6,
+        None,
+        ihp_antenna=DrcResult(top=soc.TOP),
+    )
+    s = soc_step.SocResult(routed, (), 2.1e6, 1.5e6)
+    ok = soc_step_result(design, s, 1.0)
+    assert ok.status == "pass" and "IHP's antenna deck included" in ok.summary
+    bad = DrcResult(violations={"Ant.e_Metal5": 1}, top=soc.TOP)
+    bad.places["Ant.e_Metal5"] = [(soc.TOP, 1200.0, 900.0)]
+    failed = soc_step_result(design, replace(s, pnr=replace(routed, ihp_antenna=bad)), 1.0)
+    assert failed.status == "fail" and "Ant.e_Metal5" in failed.summary
+    assert failed.data["ihp_antenna"]["violations"] == 1

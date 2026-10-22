@@ -15,6 +15,7 @@ from chipleap.hw.cpu import CPUS
 from chipleap.hw.design import DATAFLOWS, Accel, Design, DesignError
 from chipleap.hw.memory import MEMORIES, NONE_KEY
 from chipleap.hw.tech import TECHNOLOGIES
+from chipleap.model.evaluate import bank_read_ns
 from chipleap.spec import Spec
 from chipleap.workload.llm import format_bits
 from chipleap.workload.ops import Workload
@@ -46,7 +47,9 @@ def _freq_limit(spec: Spec, tech: str, accel: Accel | None = None) -> float:
     node has it, and the spec's."""
     t = TECHNOLOGIES[tech]
     limit = (
-        t.clock_limit_mhz(accel.dataflow, accel.cols, accel.ports, accel.rows)
+        t.clock_limit_mhz(
+            accel.dataflow, accel.cols, accel.ports, accel.rows, bank_read_ns(accel, t)
+        )
         if accel
         else t.max_freq_mhz
     )

@@ -62,7 +62,7 @@ running Innovus by hand. The place-and-route step below runs it for you.
 ```text
 $ chipleap verify out --steps pnr --pnr-tool innovus --synth-tech ihp-sg13g2 \
     --remote eda-server --remote-setup "source /opt/eda/licences.sh; source /opt/eda/cadence/genus.sh; source /opt/eda/cadence/innovus.sh"
-pnr    PASS     Innovus: placed and routed on ihp-sg13g2: ... mm2 core at 60% utilisation, ... cells; 100 MHz met at the slow corner (about ... MHz, and about ... MHz at the typical one); DRC and connectivity clean
+pnr    PASS     Innovus: placed and routed on ihp-sg13g2: ... mm2 core at 60% utilisation, ... cells; 100 MHz met at the slow corner (about ... MHz, and about ... MHz at the typical one); DRC, connectivity and antenna clean
 ```
 
 `--pnr-tool innovus` is the commercial counterpart of the LibreLane step and reports the

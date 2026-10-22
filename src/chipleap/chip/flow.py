@@ -170,7 +170,7 @@ def run(flow: Path, cfg: dict[str, Any]) -> tuple[dict[str, Any], Path]:
     """Run LibreLane in ``flow``; the metrics and the run directory."""
     run_dir = flow / "runs" / TAG
     try:
-        metrics, gds = run_librelane(flow, cfg, TAG)
+        metrics, gds = run_librelane(flow, cfg, TAG, late_antenna_repair=True)
     except PnrError as exc:
         # LibreLane's own summary of what stopped it is in the run's error log.
         log = run_dir / "error.log"

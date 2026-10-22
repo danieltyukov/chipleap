@@ -433,8 +433,9 @@ def buffer_mm2(a: Accel, tech: Technology) -> float:
     banks the layout gives a macro-backed build (``chipleap.gen.banks``: a bank of COLS
     bytes per slot, and per lane for the weights), whatever its number of DMA ports,
     since more ports read the same words; for a one-port build these are exactly the
-    macros the layout places. Any other build gets each slot of each buffer as the
-    macros of 32-bit words ``choose`` picks. Either way a 1 KiB slot of a double buffer
+    macros the layout places. Any other build, and one whose banks' floorplan does not
+    route (``floorplan_reason``), gets each slot of each buffer as the macros of 32-bit
+    words ``choose`` picks. Either way a 1 KiB slot of a double buffer
     costs the macro that holds it, not 1 KiB of the largest macro's density. Other nodes
     use ``Technology.sram_mm2``."""
     if tech.key == "ihp-sg13g2":
@@ -456,9 +457,45 @@ def accel_kge(a: Accel, tech: Technology) -> float:
 def _banked(a: Accel) -> bool:
     """Whether ``a``'s buffers are banks of IHP macros, as a one-port build of it lays them
     out; more ports read the same words, so they get the same banks."""
+    return _layout_reason(a) is None
+
+
+@lru_cache(maxsize=4096)
+def _layout_reason(a: Accel) -> str | None:
+    from chipleap.gen import banks
+    from chipleap.macro.sram import IHP_1P
+
+    return banks.layout_reason(replace(a, ports=1), IHP_1P)
+
+
+def floorplan_reason(a: Accel, tech: Technology) -> str | None:
+    """On IHP SG13G2, why a GEMV engine whose core could read its buffers as banks of macros
+    gets flop buffers in ChipLeap's layout instead: their floorplan does not route
+    (``chipleap.gen.banks.too_flat``), and place and route keeps flop buffers, so the model
+    prices and times it as a build without banks. None for any other build or node."""
     from chipleap.gen import banks
 
-    return banks.unsupported(replace(a, ports=1)) is None
+    if tech.key != "ihp-sg13g2" or banks.unsupported(replace(a, ports=1)) is not None:
+        return None
+    return _layout_reason(a)
+
+
+def bank_read_ns(a: Accel, tech: Technology) -> float:
+    """On IHP SG13G2, the slowest read at the slow corner of the macros a GEMV engine's
+    buffers are priced as (``buffer_mm2``), which caps its clock (``accel_signoff_mhz``);
+    0 for any other build or node."""
+    if tech.key != "ihp-sg13g2" or not _banked(a):
+        return 0.0
+    return _ihp_bank_read_ns(a)
+
+
+@lru_cache(maxsize=4096)
+def _ihp_bank_read_ns(a: Accel) -> float:
+    from chipleap.gen import banks
+    from chipleap.macro.sram import IHP_1P, IHP_1P_READ_NS
+
+    plan = banks.plan(replace(a, ports=1), IHP_1P)
+    return max(IHP_1P_READ_NS[b.macro.cell] for b in (plan.abuf, plan.wbuf))
 
 
 @lru_cache(maxsize=4096)
@@ -558,12 +595,14 @@ def evaluate(
         )
     elif design.accel and tech.accel_timing:
         a = design.accel
-        limit = accel_limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows)
+        read = bank_read_ns(a, tech)
+        limit = accel_limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows, read)
         if design.freq_mhz > limit + 1e-9:
+            buffers = f" and its buffers in SRAM macros that read in {read:.1f} ns" if read else ""
             violations.add(
                 f"the {a.dataflow} {a.rows}x{a.cols} accelerator with {a.ports} port"
-                f"{'s' if a.ports > 1 else ''} closes timing at about {limit:.0f} MHz on "
-                f"{tech.name} after routing, at the slow corner"
+                f"{'s' if a.ports > 1 else ''}{buffers} closes timing at about {limit:.0f} MHz "
+                f"on {tech.name} after routing, at the slow corner"
             )
     if mem is not None:
         if not mem.phy_exists(tech.node_nm):
@@ -646,6 +685,13 @@ def evaluate(
         for k, v in r.parts.items():
             by_bound[k] = by_bound.get(k, 0.0) + v
 
+    if design.accel and (flat := floorplan_reason(design.accel, tech)):
+        warnings.append(
+            f"the accelerator's buffers are flop buffers in ChipLeap's layout, not banks of "
+            f"SRAM macros: {flat}; the model prices each buffer slot in macros of 32-bit "
+            "words and holds the clock to the flop-buffer build's, as for any build without "
+            "banks"
+        )
     if design.accel and design.accel.ports > max(1, design.il_banks) and design.bus == "NtoM":
         warnings.append(
             f"{design.accel.ports} accelerator ports but only {max(1, design.il_banks)} "

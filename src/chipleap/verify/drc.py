@@ -23,6 +23,12 @@ PIN_OFFGRID_RE = re.compile(r"[A-Za-z0-9]+_pin_Offgrid")
 # KLayout names the variant of a cell a deep-mode check ran on after a colon: its
 # orientation (RM_IHPSG13_1P_BLDRV:r0, :m90).
 VARIANT_RE = re.compile(r":[rm]\d+$")
+# A marker's shape in a report, in um in its cell: "polygon: (x,y;x,y;...)", "box:
+# (x,y;x,y)", "edge-pair: (x,y;x,y)/(x,y;x,y)" and the like; its other values are
+# properties ("[#m5_ratio] float: 186.78").
+SHAPE_RE = re.compile(r"(?:polygon|box|edge|edge-pair|path|text): \(")
+POINT_RE = re.compile(r"(-?\d+(?:\.\d+)?(?:e-?\d+)?),(-?\d+(?:\.\d+)?(?:e-?\d+)?)")
+PLACES_KEPT = 20  # locations kept per rule
 
 
 class DrcReportError(RuntimeError):
@@ -37,6 +43,10 @@ class DrcResult:
     # not counted. ``held_by`` names the PDK macros each of those cells is part of.
     pin_markers: dict[tuple[str, str], int] = field(default_factory=dict)
     held_by: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Where the first PLACES_KEPT violations of each rule are: (cell, x, y), the centre of
+    # the marker's bounding box in um, in that cell's coordinates.
+    places: dict[str, list[tuple[str, float, float]]] = field(default_factory=dict)
+    top: str = ""  # the checked layout's top cell, when the reader knows it
 
     @property
     def total(self) -> int:
@@ -90,9 +100,25 @@ def read_lyrdb(
                     into.held_by[cell] = held[cell]
                 else:
                     into.violations[rule] = into.violations.get(rule, 0) + 1
+                    kept = into.places.setdefault(rule, [])
+                    if len(kept) < PLACES_KEPT and (at := _centre(el)) is not None:
+                        kept.append((cell, *at))
                 el.clear()
     except ET.ParseError as exc:
         raise DrcReportError(f"{path.name} is not a report database: {exc}") from None
+
+
+def _centre(item: ET.Element) -> tuple[float, float] | None:
+    """The centre of the bounding box of a report item's shape, or None without one."""
+    for value in item.iter("value"):
+        text = value.text or ""
+        if SHAPE_RE.match(text):
+            points = POINT_RE.findall(text)
+            if points:
+                xs = [float(x) for x, _ in points]
+                ys = [float(y) for _, y in points]
+                return (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    return None
 
 
 def describe_markers(markers: list[dict[str, Any]]) -> str:

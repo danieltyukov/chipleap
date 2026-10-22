@@ -217,22 +217,34 @@ def test_the_models_catalog_is_the_pdks():
     assert catalog(pdk) == list(IHP_1P)
 
 
-def test_the_soc_clocks_bank_macros_are_the_pdks():
-    """The SoC's clock limit takes each bank macro's clock to output from the PDK's slow
-    liberty: the sharpest clock edge, the largest load in the table."""
-    import re
-
+def test_the_models_read_times_are_the_pdks():
+    """The model caps a macro-backed build's clock with IHP_1P_READ_NS; each is the slow
+    liberty's clock to output."""
     from chipleap.chip import io
-    from chipleap.hw.tech import SOC_BANK_CLK_TO_Q_NS
-    from chipleap.macro.sram import LIBRARY
 
     pdk = io.pdk_dir()
     if pdk is None:
         pytest.skip("no IHP PDK")
-    for cell, ns in SOC_BANK_CLK_TO_Q_NS.items():
-        lib = (pdk / "libs.ref" / LIBRARY / "lib" / f"{cell}_slow_1p08V_125C.lib").read_text()
-        dout = lib[lib.index("bus(A_DOUT)") :]
-        arc = dout[re.search(r'related_pin\s*:\s*"A_CLK"', dout).start() :]
-        rise = re.search(r'cell_rise\(\w+\)\s*\{.*?values\s*\(\s*"([^"]+)"', arc, re.S)
-        assert rise is not None, cell
-        assert float(rise.group(1).split(",")[-1]) == pytest.approx(ns, abs=0.001), cell
+    ref = pdk / "libs.ref" / sram.LIBRARY / "lib"
+    assert set(sram.IHP_1P_READ_NS) == {s.cell for s in sram.IHP_1P}
+    for cell, ns in sram.IHP_1P_READ_NS.items():
+        assert sram.read_ns((ref / f"{cell}_slow_1p08V_125C.lib").read_text()) == ns, cell
+
+
+def test_a_read_time_is_the_later_edge_of_the_clock_to_output_arc():
+    lib = """
+    bus(A_ADDR) { timing() { related_pin : "A_CLK"; cell_rise(t) { values ("9.9"); } } }
+    bus(A_DOUT) {
+      pin(A_DOUT[7:0]) { internal_power() { rise_power("scalar") { values (0); } } }
+      timing() {
+        related_pin : "A_CLK";
+        cell_rise(SIG2SRAM_delay_template) { index_1("0.008"); values ("5.15,5.2", "5.3,5.4"); }
+        cell_fall(SIG2SRAM_delay_template) { index_1("0.008"); values ("5.04,5.1"); }
+      }
+    }
+    """
+    assert sram.read_ns(lib) == 5.15
+    with pytest.raises(SramError, match="A_DOUT bus"):
+        sram.read_ns(lib.replace("A_DOUT", "Q"))
+    with pytest.raises(SramError, match="A_CLK to A_DOUT"):
+        sram.read_ns(lib.replace('related_pin : "A_CLK";\n        cell_rise', "cell_rise"))

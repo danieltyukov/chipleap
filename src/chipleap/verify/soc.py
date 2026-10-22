@@ -677,6 +677,8 @@ def place_and_route(
     if synth <= 0:
         raise SocError("LibreLane's synthesis reported no standard-cell area")
     full, _ = with_floorplan(cfg, prep, synth, work)
+    # Without the second antenna repair (``late_antenna_repair``): the SoC's evidence was
+    # routed without it, and it is turned on once a SoC run with it has been checked.
     metrics, gds = pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S)
     return routed(design, work, pdk, clock, prep.instances, synth, metrics, gds)
 
@@ -693,7 +695,9 @@ def routed(
 ) -> SocResult:
     """What the SoC LibreLane laid out in ``work`` measures, from its final metrics and
     GDS: its names merged once (``chipleap.rtl.pnr.check_merged``), the PDK
-    macros' own pin markers set apart, and the measures against the model's."""
+    macros' own pin markers set apart, IHP's antenna deck on the GDS, as every layout
+    ChipLeap signs off gets it (``chipleap.verify.pnr.with_ihp_antenna``), and the
+    measures against the model's."""
     from chipleap.rtl.pnr import check_merged
 
     run = work / "runs" / "chipleap"
@@ -713,4 +717,5 @@ def routed(
         macros=placed,
         macro_um2=sum(area[cell] for _, cell in placed),
     )
+    result = pnr.with_ihp_antenna(result, pdk, soc.TOP, work)
     return SocResult(result, placed, *model_areas_um2(design))

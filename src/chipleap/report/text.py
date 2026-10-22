@@ -162,6 +162,7 @@ def format_explore(r: ExploreResult, verbose: bool = False) -> str:
         "  " + headline(b.evaluation),
         "  bottleneck: " + b.evaluation.bound,
     ]
+    lines += ["  warning: " + w for w in b.evaluation.warnings]
     if ip_note(b.evaluation):
         lines.append("  " + ip_note(b.evaluation))
     if b.assessment.violations:
