@@ -25,7 +25,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -39,6 +39,7 @@ from chipleap.hw.design import Design
 from chipleap.hw.memory import NONE_KEY
 from chipleap.hw.tech import get_tech
 from chipleap.macro import grid, layer, place, sram
+from chipleap.macro.layer import MacroView
 from chipleap.rtl import builddir
 from chipleap.verify import pnr
 from chipleap.verify.drc import pdk_cells
@@ -412,6 +413,19 @@ PINS = "pins.cfg"
 AFTER_SYNTHESIS = "Checker.YosysUnmappedCells"
 
 
+# The step LibreLane runs the clock tree in, and the one inserted after it.
+CTS = "OpenROAD.CTS"
+ECO_BUFFERS = "Odb.InsertECOBuffers"
+# IHP's SRAM macros take their clock on A_CLK.
+SRAM_CLOCK_PIN = "A_CLK"
+# The buffer's input is about as small as the pin it drives (3.5 fF against A_CLK's
+# 3.8 fF), so the clock net it joins carries no more than it did.
+CLOCK_PIN_BUFFER = "sg13g2_buf_4"
+# How far beyond its halo, from the macro's edge where the pin is, the buffer is put; the
+# legaliser moves it to the nearest free site.
+CLOCK_PIN_GAP_UM = 5.0
+
+
 @dataclass(frozen=True)
 class Prepared:
     """What the LibreLane runs read, in the step's directory."""
@@ -471,19 +485,77 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 25,
         "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.2,
         # The clock tree hangs the accelerator's macros, at the top and bottom of the core,
-        # and X-HEEP's clock gates on one net of its first level, about 3 mm of wire on a
-        # buf_8: 0.73 ns at the macros' clock pins after routing, against their 0.595 ns
-        # limit. IHP's strongest buffer drives the tree's long nets.
+        # and X-HEEP's clock gates on one net of its first level, millimetres of wire. IHP's
+        # strongest buffer drives the tree's long nets, which alone left the macros' clock
+        # pins at 0.66 to 0.76 ns after routing, against their 0.595 ns: a buffer beside
+        # each macro drives its clock pin, inserted right after CTS (``clock_pin_buffers``),
+        # so the repairs after CTS see it.
         "CTS_CLK_BUFFERS": [f"sg13g2_buf_{n}" for n in (16, 8, 4, 2, 1)],
         "CTS_ROOT_BUFFER": "sg13g2_buf_16",
+        "meta": {
+            "version": 2,
+            "flow": "Classic",
+            "substituting_steps": {f"+{CTS}": ECO_BUFFERS},
+        },
     }
+
+
+def _pin_at(p: place.Placed, view: MacroView, pin: str) -> tuple[float, float] | None:
+    """The centre of ``pin``'s first shape on the placed macro ``p``, in the core's um."""
+    shapes = [rect for mp in view.pins if mp.name == pin for _, rect in mp.shapes]
+    if not shapes:
+        return None
+    x0, y0, x1, y1 = shapes[0]
+    x, y = (x0 + x1) / 2, (y0 + y1) / 2
+    if p.orient in ("S", "FN"):
+        x = view.width - x
+    if p.orient in ("S", "FS"):
+        y = view.height - y
+    return p.x + x, p.y + y
+
+
+def clock_pin_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer before the clock pin of each of the
+    accelerator's macros (``views`` by instance), placed just off the macro's edge where
+    the pin is, in the band of logic.
+
+    OpenROAD's CTS builds a tree of its own for the sinks of clk_i that are not
+    registers, the accelerator's macros and X-HEEP's clock gates (nine on the SmolLM2 SoC),
+    and stops it at its first level, each half holding fewer sinks than it gives one
+    buffer (eight). So one buffer at mid-die drove the macros at the core's corners and a
+    clock gate over 4.7 mm of wire, and nothing after CTS buffers a clock net: after
+    routing their clock pins saw 0.66 to 0.76 ns at the slow corner, against the macros'
+    0.595 ns. No setting of LibreLane's CTS step changed that tree (the macros' cluster
+    size and diameter, the distance between buffers, the maximum slew, the registers'
+    cluster size). X-HEEP's banks are clocked through its memory subsystem's gate, under a
+    tree of their own."""
+    out: list[dict[str, Any]] = []
+    for p in fp.macros:
+        if not p.instance.startswith(f"{soc.ACCEL_INST}."):
+            continue
+        view = views[p.instance]
+        at = _pin_at(p, view, SRAM_CLOCK_PIN)
+        if at is None:
+            raise SocError(f"{view.cell} has no {SRAM_CLOCK_PIN} pin")
+        x, y = at
+        off = place.HALO_UM + CLOCK_PIN_GAP_UM
+        y = p.y - off if y - p.y < view.height / 2 else p.y + view.height + off
+        out.append(
+            {
+                "target": f"{p.instance}/{SRAM_CLOCK_PIN}",
+                "buffer": CLOCK_PIN_BUFFER,
+                "placement": [round(x, 3), round(y, 3)],
+            }
+        )
+    return out
 
 
 def with_floorplan(
     cfg: dict[str, Any], prep: Prepared, cell_um2: float, work: Path
 ) -> tuple[dict[str, Any], place.Floorplan]:
     """``cfg`` with a floorplan for ``cell_um2`` of standard cells: the die, the macros
-    where ChipLeap puts them and their power grid (``pdn.tcl``)."""
+    where ChipLeap puts them, their power grid (``pdn.tcl``) and the buffers at the
+    accelerator's macros' clock pins (``clock_pin_buffers``)."""
     fp = floorplan(prep.instances, prep.views, cell_um2)
     by_inst = dict(prep.instances)
     placements = [
@@ -502,6 +574,9 @@ def with_floorplan(
         "DIE_AREA": [0, 0, *fp.die],
         "CORE_AREA": list(fp.core),
         "MACROS": macros,
+        "INSERT_ECO_BUFFERS": clock_pin_buffers(
+            fp, {i: prep.views[c].view for i, c in prep.instances}
+        ),
     }
     netlists = sorted((work / "runs" / "chipleap").glob("*-yosys-synthesis/*.nl.v"))
     if netlists:

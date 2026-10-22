@@ -365,6 +365,10 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     assert set(full["MACROS"]) == set(cells)
     assert {p.instance for p in fp.macros} == {i for i, _ in prep.instances}
     assert (work / "pdn.tcl").is_file()
+    # A buffer beside each of the accelerator's four macros drives its clock pin.
+    accel = {i for i, _ in prep.instances if i.startswith(f"{soc.ACCEL_INST}.")}
+    assert len(accel) == 4
+    assert {e["target"] for e in full["INSERT_ECO_BUFFERS"]} == {f"{i}/A_CLK" for i in accel}
     # More standard cells, a larger core.
     _, small = soc_step.with_floorplan(cfg, prep, 1.0e6, work)
     assert small.core_um2 < fp.core_um2
@@ -435,6 +439,46 @@ def test_pins_go_west_and_east_within_the_band():
     # Virtual pins fill the edge beside each macro row, in proportion to its height.
     below = int(lines[west + 1][1:])
     assert 0 < below < 36 and "#N" not in cfg and "#S" not in cfg
+
+
+def test_each_accelerator_macro_gets_a_clock_buffer_beside_its_clock_pin():
+    """IHP's 256 x 64 has A_CLK in the middle of its lower edge: below a macro of the top
+    row, above one of the bottom row (mirrored), past the halo; X-HEEP's banks get none."""
+    from chipleap.macro import place
+    from chipleap.macro.layer import MacroPin, MacroView
+
+    p = Path("x")
+    clk = MacroPin("A_CLK", "input", "signal", (("Metal2", (386.4, 0.0, 386.66, 0.26)),))
+    ram = MacroView("RM_X", "pdk", 784.48, 118.78, (clk,), p, p, p, p, ("RM_X",), ("RM_X",))
+    fp = place.Floorplan(
+        (3426.72, 2192.4),
+        (20.16, 22.68, 3406.56, 2169.72),
+        (
+            place.Placed(f"{soc.ACCEL_INST}.abuf_s0_m0", 60.48, 2040.94, "N"),
+            place.Placed(f"{soc.ACCEL_INST}.abuf_s1_m0", 60.48, 32.68, "FS"),
+            place.Placed(f"{soc.MCU_INST}.memory_subsystem_i.bank_m0", 1669.44, 1823.26, "N"),
+        ),
+    )
+    eco = soc_step.clock_pin_buffers(fp, {m.instance: ram for m in fp.macros})
+    off = place.HALO_UM + soc_step.CLOCK_PIN_GAP_UM
+    assert eco == [
+        {
+            "target": f"{soc.ACCEL_INST}.abuf_s0_m0/A_CLK",
+            "buffer": "sg13g2_buf_4",
+            "placement": [447.01, round(2040.94 - off, 3)],
+        },
+        {
+            "target": f"{soc.ACCEL_INST}.abuf_s1_m0/A_CLK",
+            "buffer": "sg13g2_buf_4",
+            "placement": [447.01, round(32.68 + 118.78 + off, 3)],
+        },
+    ]
+    # The buffers are inserted right after the clock tree, before the repairs that follow.
+    cfg = soc_step.config(soc_step.Sources((), (), (), None), 36.0)  # type: ignore[arg-type]
+    assert cfg["meta"]["substituting_steps"] == {"+OpenROAD.CTS": "Odb.InsertECOBuffers"}
+    no_pin = MacroView("RM_Y", "pdk", 10.0, 10.0, (), p, p, p, p, ("RM_Y",), ("RM_Y",))
+    with pytest.raises(soc_step.SocError, match="RM_Y has no A_CLK pin"):
+        soc_step.clock_pin_buffers(fp, {m.instance: no_pin for m in fp.macros})
 
 
 def test_the_soc_reports_setup_and_hold_at_every_corner():
