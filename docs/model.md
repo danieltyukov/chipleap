@@ -93,6 +93,23 @@ Element-wise cycles per element on CV32E40X, multiplied by the factor above: nor
 
 Accelerator jobs cost the CPU 80 cycles each to program and to take the completion interrupt. While the accelerator runs, the CPU waits in WFI at 10 % of its active-cycle energy.
 
+## The SoC's clock
+
+The CPU, its bus and the accelerator share X-HEEP's clock. On IHP SG13G2 the model runs them at the design's clock or at what X-HEEP's SoC meets after routing, whichever is lower, and reports that clock, the SoC's limit and the accelerator's own limit apart (`chipleap explore` and `chipleap evaluate`, and the datasheet).
+
+The SoC does in one cycle two things the accelerator alone never does, across a die of millimetres:
+
+- It reads a bank. The bank's macro puts the word out a clock-to-output after the clock edge (7.39 ns for the 1024 x 32 at the slow corner, the liberty's value at the sharpest clock edge and largest load), and the crossbar takes it to the CPU's load path or into the accelerator's buffer macro.
+- Its OBI bus grants a master in the cycle it asks. The CPU's request leaves its decoder and load-store unit, passes the crossbar's arbiter, and the grant it leaves another master, the accelerator's write port, ends in that master's store engine.
+
+So the model takes the SoC's period as the slower of the two (`chipleap.hw.tech.soc_signoff_mhz`):
+
+    period = max(clock-to-output of the bank's macro + SOC_READ_PATH_NS, SOC_BUS_PATH_NS)
+
+Both terms are measured on the SmolLM2 SoC (CV32E20, the one-to-many bus, one 32 KiB bank of eight 1024 x 32 macros, the GEMV 1 x 8 accelerator) laid out with `chipleap verify --steps soc --soc-clock 40`, after detailed routing and extraction, at the slow corner (1.08 V, 125 C) with the 5 % derate the step's constraints apply: SOC_READ_PATH_NS is the period the slowest path from a bank needs, less the 1024 x 32's clock-to-output, and SOC_BUS_PATH_NS the period the slowest other path needs. The macro of each of the design's banks gives its clock-to-output (the 1024 x 32 for banks of 4 KiB and more, 512 x 32 for 2 KiB, 256 x 32 for 1 KiB), so smaller banks shorten the read but not the bus.
+
+The first estimate of this limit, 17.64 ns (56.7 MHz), was the slowest bank read after the repair that follows global routing, in a layout at 90 MHz, without the derate. That is no basis for a clock. The repairs work against the global router's estimate of each wire, and on the SoC's long wires the extraction after detailed routing puts 14 to 20 % more capacitance on them: at 50 MHz an SRAM output net repaired to 0.0576 pF came out 0.0657 pF, a clock net's slew went from 0.607 to 0.728 ns, and the slow corner's worst setup slack went from +0.54 ns after global routing to -3.63 ns after routing, a period of 23.63 ns. The SoC's step now keeps margins for that (docs/verification.md), and the model's limit is what the routed layout needs.
+
 ## Placement and feasibility
 
 On-chip SRAM holds, in order: firmware (32 KiB unless the spec says otherwise), activations, the KV cache, weights. Anything left over goes to external memory, and a design is infeasible when:

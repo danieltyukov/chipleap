@@ -191,22 +191,33 @@ SMOL_SOC = Design(
 
 
 def test_x_heeps_soc_runs_at_what_it_meets_and_the_accelerator_is_reported_apart(smol):
-    from chipleap.hw.tech import SOC_MEASURED_NS
+    from chipleap.hw.tech import (
+        SOC_BANK_CLK_TO_Q_NS,
+        SOC_BUS_PATH_NS,
+        SOC_EVIDENCE_MHZ,
+        SOC_READ_PATH_NS,
+    )
     from chipleap.report.text import clock_note
 
     fast = evaluate(smol, SMOL_SOC)
-    assert fast.soc_limit_mhz == pytest.approx(1000 / SOC_MEASURED_NS)
+    read = SOC_BANK_CLK_TO_Q_NS["RM_IHPSG13_1P_1024x32_c2_bm_bist"] + SOC_READ_PATH_NS
+    assert fast.soc_limit_mhz == pytest.approx(1000 / max(read, SOC_BUS_PATH_NS))
+    # The SoC was laid out at a clock it met, so what it meets is no slower.
+    assert fast.soc_limit_mhz >= SOC_EVIDENCE_MHZ
     assert fast.soc_mhz == fast.soc_limit_mhz and fast.accel_limit_mhz > 90
     assert any("X-HEEP reads its SRAM in one cycle" in w for w in fast.warnings)
     assert clock_note(fast).startswith(f"{fast.soc_mhz:.1f} MHz, what X-HEEP's SoC meets")
     # The CPU and the accelerator share the clock: the same design asked for the limit.
     at_limit = evaluate(smol, SMOL_SOC.with_(freq_mhz=fast.soc_mhz))
     assert at_limit.throughput == pytest.approx(fast.throughput)
-    slow = evaluate(smol, SMOL_SOC.with_(freq_mhz=50))
-    assert slow.soc_mhz == 50 and slow.throughput < fast.throughput
+    slow = evaluate(smol, SMOL_SOC.with_(freq_mhz=SOC_EVIDENCE_MHZ - 5))
+    assert slow.soc_mhz == SOC_EVIDENCE_MHZ - 5 and slow.throughput < fast.throughput
     assert not any("one cycle" in w for w in slow.warnings)
-    # A smaller bank is a faster macro; the standalone IP and other nodes have no X-HEEP limit.
+    # A smaller bank is a faster macro, but the bus's own paths do not get shorter; the
+    # standalone IP and other nodes have no X-HEEP limit.
     small = evaluate(smol, SMOL_SOC.with_(bank_kib=2, banks=16))
-    assert small.soc_limit_mhz > fast.soc_limit_mhz
+    small_read = SOC_BANK_CLK_TO_Q_NS["RM_IHPSG13_1P_512x32_c2_bm_bist"] + SOC_READ_PATH_NS
+    assert small.soc_limit_mhz == pytest.approx(1000 / max(small_read, SOC_BUS_PATH_NS))
+    assert small.soc_limit_mhz >= fast.soc_limit_mhz
     assert evaluate(smol, SMOL_SOC.with_(platform="standalone")).soc_mhz == 90
     assert evaluate(smol, SMOL_SOC.with_(tech="generic-65nm")).soc_limit_mhz is None

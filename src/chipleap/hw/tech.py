@@ -126,33 +126,41 @@ def accel_signoff_mhz(dataflow: str, cols: int, ports: int, rows: int = 1) -> fl
     return 1000.0 / max(datapath, a + b * ports)
 
 
-# X-HEEP's SoC on SG13G2 (``chipleap verify --steps soc``) reads a bank in one cycle: the
-# bank's macro puts the word out a clock-to-output after the clock edge, and the crossbar,
-# the CPU's load path and the wire between them take it to a register in the same cycle.
-# That path sets the SoC's clock, whatever the accelerator meets on its own. On the SmolLM2
-# SoC (cv32e20, one-to-many bus, one 32 KiB bank of eight 1024 x 32 macros), repaired for
-# setup at the slow corner after global routing at 90 MHz, it took 17.64 ns: the clock
-# reaches the macro 2.53 ns late through the bank's clock gate, the macro's output follows
-# 7.39 ns later (the liberty's clock to output at the largest load), then 9.4 ns of wire,
-# crossbar and CPU, less the capture register's own clock latency. SOC_PATH_NS is that
-# path without the macro's clock to output, which the model takes from the macro that
-# holds each of the design's banks (SOC_BANK_CLK_TO_Q_NS: the 1024 x 32 for banks of
-# 4 KiB and more, the 256 x 32 and 512 x 32 for 1 and 2 KiB).
-SOC_MEASURED_NS = 17.64
+# X-HEEP's SoC on SG13G2 (``chipleap verify --steps soc``) does in one cycle what the
+# accelerator alone never does, across a die of millimetres:
+# - it reads a bank: the bank's macro puts the word out a clock-to-output after the clock
+#   edge, and the crossbar takes it to the CPU's load path or the accelerator's buffer;
+# - its bus grants a master in the cycle it asks: the CPU's request leaves its decoder and
+#   load-store unit, passes the crossbar's arbiter, and the grant it leaves another master
+#   (the accelerator's write port) ends in that master's registers.
+# Those paths set the SoC's clock, whatever the accelerator meets on its own. They are
+# measured after detailed routing and extraction, at the slow corner with the 5 % derate,
+# on the SmolLM2 SoC (cv32e20, one-to-many bus, one 32 KiB bank of eight 1024 x 32 macros)
+# laid out at SOC_EVIDENCE_MHZ (docs/model.md, "The SoC's clock"): the period the slowest
+# path from a bank needs, without its macro's clock to output (SOC_READ_PATH_NS), and the
+# period the slowest other path needs (SOC_BUS_PATH_NS). The model takes the clock to
+# output of the macro that holds each of the design's banks (SOC_BANK_CLK_TO_Q_NS: the
+# 1024 x 32 for banks of 4 KiB and more, the 256 x 32 and 512 x 32 for 1 and 2 KiB).
+# The estimate after global routing is no basis: extraction after routing put 14 to 20 %
+# more capacitance on these wires, and at 50 MHz the slow corner went from +0.54 ns after
+# global routing to -3.63 ns after routing.
+SOC_EVIDENCE_MHZ = 40.0
 SOC_BANK_CLK_TO_Q_NS = {
     "RM_IHPSG13_1P_256x32_c2_bm_bist": 5.263,
     "RM_IHPSG13_1P_512x32_c2_bm_bist": 6.519,
     "RM_IHPSG13_1P_1024x32_c2_bm_bist": 7.385,
 }
-SOC_PATH_NS = SOC_MEASURED_NS - SOC_BANK_CLK_TO_Q_NS["RM_IHPSG13_1P_1024x32_c2_bm_bist"]
+SOC_READ_PATH_NS = 21.50 - SOC_BANK_CLK_TO_Q_NS["RM_IHPSG13_1P_1024x32_c2_bm_bist"]
+SOC_BUS_PATH_NS = 23.63
 
 
 def soc_signoff_mhz(bank_cells: Iterable[str]) -> float:
     """The clock X-HEEP's SoC meets on SG13G2 at the slow corner, with its banks in the
-    macros ``bank_cells``: the slowest macro's clock to output and the measured rest of the
-    path (``SOC_PATH_NS``)."""
+    macros ``bank_cells``: the slower of a bank's read (the slowest macro's clock to output
+    and the measured rest, ``SOC_READ_PATH_NS``) and the bus's other paths
+    (``SOC_BUS_PATH_NS``)."""
     cq = max(SOC_BANK_CLK_TO_Q_NS[c] for c in bank_cells)
-    return 1000.0 / (cq + SOC_PATH_NS)
+    return 1000.0 / max(cq + SOC_READ_PATH_NS, SOC_BUS_PATH_NS)
 
 
 def accel_logic_kge(dataflow: str, rows: int, cols: int, ports: int) -> float:

@@ -127,7 +127,8 @@ def test_standalone_area_separates_the_ip_from_the_host():
     # not modelled, so its accelerator runs at the design's clock. Below the SoC's limit
     # the two are the same.
     assert xh.soc_mhz < 100 and sa.soc_mhz == 100 and sa.throughput > xh.throughput
-    slow = wl, XHEEP.with_(freq_mhz=50.0), STANDALONE.with_(freq_mhz=50.0)
+    below = float(int(xh.soc_limit_mhz) - 1)
+    slow = wl, XHEEP.with_(freq_mhz=below), STANDALONE.with_(freq_mhz=below)
     assert evaluate(slow[0], slow[1]).throughput == evaluate(slow[0], slow[2]).throughput
 
 
