@@ -103,6 +103,133 @@ class Accel:
                 raise DesignError(f"accel.{name} must be a power of two from 1 to 256")
 
 
+GPIO_PINS = (0, 8, 24, 32)
+TIMERS = (2, 4)
+DMA_PORTS = (1, 2, 4)
+MAX_DMA_CHANNELS = 16
+
+
+@dataclass(frozen=True)
+class Peripherals:
+    """X-HEEP's peripherals that a configuration may leave out, and its DMA.
+
+    Every X-HEEP ChipLeap configures has X-HEEP's always-on peripherals (SoC control, boot
+    ROM, the flash's SPI host and controller, power manager, timers 0 and 1, fast
+    interrupt controller, the external peripheral port, pad control), the DMA and the
+    debug module with its JTAG port. The rest is here, as the spec asks for it
+    (``chipleap.spec``, its ``peripherals`` section), with these defaults where it does not
+    say: what ChipLeap configured before a spec could say, X-HEEP's default without the
+    SPI hosts, the I2C and the I2S. The platform interrupt controller (PLIC) is there when
+    a peripheral that raises its interrupts through it is (``plic``).
+    """
+
+    uart: bool = True
+    gpio: int = 32  # pins: 8 on the always-on GPIO, 24 on X-HEEP's other GPIO, 32 on both
+    timers: int = 4  # 2: the always-on timer alone; 4: with the second timer block
+    spi_hosts: int = 0  # 0, 1 (X-HEEP's SPI host) or 2 (and SPI2)
+    i2c: bool = False
+    i2s: bool = False
+    pdm2pcm: bool = False
+    spi_slave: bool = True  # the debug module's SPI slave, which reads and writes memory
+    dma_channels: int = 2
+    dma_ports: int = (
+        1  # the DMA's master ports on the bus, each a read, a write and an address port
+    )
+
+    @property
+    def plic(self) -> bool:
+        """The UART, the GPIO beyond the always-on eight, the I2C, SPI2 and the I2S raise
+        their interrupts through the PLIC; the SPI host, the DMA, the timers and the
+        always-on GPIO through the fast interrupt controller."""
+        return self.uart or self.user_gpio or self.i2c or self.spi_hosts > 1 or self.i2s
+
+    @property
+    def ao_gpio(self) -> bool:
+        """X-HEEP's always-on GPIO, pins 0 to 7."""
+        return self.gpio in (8, 32)
+
+    @property
+    def user_gpio(self) -> bool:
+        """X-HEEP's other GPIO, pins 8 to 31."""
+        return self.gpio in (24, 32)
+
+    def validate(self) -> None:
+        if self.gpio not in GPIO_PINS:
+            raise DesignError("peripherals.gpio must be 0, 8 (always-on), 24 or 32 pins")
+        if self.timers not in TIMERS:
+            raise DesignError("peripherals.timers must be 2 (the always-on timer) or 4")
+        if self.spi_hosts not in (0, 1, 2):
+            raise DesignError("peripherals.spi_hosts must be 0, 1 or 2")
+        for name in ("uart", "i2c", "i2s", "pdm2pcm", "spi_slave"):
+            if not isinstance(getattr(self, name), bool):
+                raise DesignError(f"peripherals.{name} must be true or false")
+        if self.dma_ports not in DMA_PORTS:
+            raise DesignError("peripherals.dma_ports must be 1, 2 or 4")
+        ch = self.dma_channels
+        if isinstance(ch, bool) or not isinstance(ch, int) or not 1 <= ch <= MAX_DMA_CHANNELS:
+            raise DesignError(f"peripherals.dma_channels must be 1 to {MAX_DMA_CHANNELS}")
+        if ch % self.dma_ports:
+            raise DesignError("peripherals.dma_channels must be a multiple of dma_ports")
+
+    @staticmethod
+    def from_dict(data: Any) -> Peripherals:
+        if data is None:
+            return Peripherals()
+        if isinstance(data, Peripherals):
+            return data
+        if not isinstance(data, dict):
+            raise DesignError("peripherals must be a mapping")
+        bad = set(data) - set(Peripherals.__dataclass_fields__)
+        if bad:
+            raise DesignError(f"unknown peripherals fields: {', '.join(sorted(bad))}")
+        p = Peripherals(**data)
+        p.validate()
+        return p
+
+    def missing_from(self, have: Peripherals) -> list[str]:
+        """What these peripherals, as a spec asks for them, have that ``have`` lacks, in
+        words."""
+        out = []
+        for name, label in (
+            ("uart", "a UART"),
+            ("i2c", "an I2C"),
+            ("i2s", "an I2S"),
+            ("pdm2pcm", "a PDM2PCM"),
+            ("spi_slave", "the debug SPI slave"),
+        ):
+            if getattr(self, name) and not getattr(have, name):
+                out.append(label)
+        for name, label in (
+            ("gpio", "GPIO pins"),
+            ("timers", "timers"),
+            ("spi_hosts", "SPI hosts"),
+            ("dma_channels", "DMA channels"),
+            ("dma_ports", "DMA master ports"),
+        ):
+            if getattr(have, name) < getattr(self, name):
+                out.append(f"{getattr(self, name)} {label} ({getattr(have, name)} in the design)")
+        return out
+
+    def summary(self) -> str:
+        """The peripherals beyond the always-on ones, in words."""
+        parts = []
+        if self.uart:
+            parts.append("UART")
+        if self.gpio:
+            parts.append(f"{self.gpio} GPIO")
+        parts.append(f"{self.timers} timers")
+        if self.spi_hosts:
+            parts.append(f"{self.spi_hosts} SPI host" + ("s" if self.spi_hosts > 1 else ""))
+        parts += [
+            n for n, on in (("I2C", self.i2c), ("I2S", self.i2s), ("PDM2PCM", self.pdm2pcm)) if on
+        ]
+        if self.spi_slave:
+            parts.append("debug SPI slave")
+        ports = f", {self.dma_ports} ports" if self.dma_ports > 1 else ""
+        parts.append(f"DMA {self.dma_channels} ch{ports}")
+        return ", ".join(parts)
+
+
 @dataclass(frozen=True)
 class Design:
     name: str = "design"
@@ -118,6 +245,7 @@ class Design:
     ext_channels: int = 1
     accel: Accel | None = None
     platform: str = "xheep"
+    peripherals: Peripherals = field(default_factory=Peripherals)
     notes: tuple[str, ...] = field(default=(), compare=False)
 
     @property
@@ -156,6 +284,9 @@ class Design:
             raise DesignError("ext_channels must be 1, 2 or 4")
         if self.freq_mhz <= 0:
             raise DesignError("freq_mhz must be positive")
+        if not isinstance(self.peripherals, Peripherals):
+            raise DesignError("peripherals must be a mapping")
+        self.peripherals.validate()
         if self.accel is not None:
             self.accel.validate()
             if self.accel.ports > 1 and self.bus != "NtoM":
@@ -193,6 +324,7 @@ class Design:
             if bad:
                 raise DesignError(f"unknown accel fields: {', '.join(sorted(bad))}")
             values["accel"] = Accel(**accel)
+        values["peripherals"] = Peripherals.from_dict(values.get("peripherals"))
         design = Design(**values)
         design.validate()
         return design

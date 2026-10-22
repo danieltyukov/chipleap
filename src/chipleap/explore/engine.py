@@ -241,7 +241,12 @@ def baseline_point(spec: Spec) -> Point:
     freq = float(max(f for f in FREQ_STEPS if f <= min(100.0, _freq_limit(spec, tech))))
     wl = spec.workload()
     design = Design(
-        name=f"{spec.name}-baseline", tech=tech, freq_mhz=freq, cpu=cpu, platform=spec.platform
+        name=f"{spec.name}-baseline",
+        tech=tech,
+        freq_mhz=freq,
+        cpu=cpu,
+        platform=spec.platform,
+        peripherals=spec.peripherals,
     )
     on_chip = design.sram_kib * 1024 - spec.firmware_kib * 1024
     if wl.storage.total > on_chip:
@@ -293,6 +298,7 @@ def random_point(spec: Spec, rng: random.Random, workload: Workload) -> Point | 
         ext_channels=rng.choice((1, 1, 2, 4)) if mem != NONE_KEY else 1,
         accel=accel,
         platform=spec.platform,
+        peripherals=spec.peripherals,
     )
     limit = _freq_limit(spec, tech, accel)
     if design.freq_mhz > limit:

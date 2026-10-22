@@ -120,6 +120,10 @@ def format_evaluation(ev: Evaluation) -> str:
         table(OP_HEADERS, op_rows(ev), right=(2, 3, 5)),
         "",
         "Area (mm2): " + ", ".join(f"{k} {v:.3g}" for k, v in ev.area_mm2.items()),
+        "SoC logic (mm2): "
+        + ", ".join(
+            f"{k} {v:.3g}" for k, v in sorted(ev.soc_logic_mm2.items(), key=lambda kv: -kv[1])
+        ),
         "Energy per step (mJ): "
         + ", ".join(f"{k} {v / 1e9:.3g}" for k, v in ev.energy_pj_by.items()),
     ]
