@@ -144,9 +144,10 @@ def ihp_runner(
     timeout: float,
 ) -> tuple[int, str]:
     """Run IHP's run_drc.py or run_lvs.py in a private directory on copies of
-    ``inputs``; copy back the files named in ``keep``, every report (.lyrdb) and every
-    log; ``timeout`` bounds the run in seconds. Returns the exit code and the runner's output with the logs named in ``keep``.
-    A report too large to read is an error: it would be the one with the most in it."""
+    ``inputs``, for at most ``timeout`` seconds; copy back the files named in ``keep``,
+    every report (.lyrdb) and every log. Returns the exit code and the runner's output
+    with the logs named in ``keep``. A report too large to read is an error: it would be
+    the one with the most in it."""
     found = python_with_klayout()
     if found is None:
         raise ToolError(
