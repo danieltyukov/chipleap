@@ -318,10 +318,12 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     try:
         if clocks is not None:
             accel = min(design.accel_mhz, ihp.max_freq_mhz)
-            r = pnr.place_and_route(design.accel, bus, workdir, accel_mhz=accel)
+            r = pnr.place_and_route(
+                design.accel, bus, workdir, accel_mhz=accel, direct=design.direct_memory
+            )
             clock = accel
         else:
-            r = pnr.place_and_route(design.accel, clock, workdir)
+            r = pnr.place_and_route(design.accel, clock, workdir, direct=design.direct_memory)
     except pnr.PnrError as exc:
         msg = str(exc).splitlines()[0]
         return StepResult(

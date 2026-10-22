@@ -188,8 +188,9 @@ def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[
     }
 
 
-def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
-    """The LibreLane configuration for the accelerator at ``clock_mhz``."""
+def config(accel: Accel, clock_mhz: float, direct: bool = False) -> dict[str, Any]:
+    """The LibreLane configuration for the accelerator at ``clock_mhz`` (with ``direct``, with
+    its direct read path to external memory)."""
     p = rtl_params(accel)
     params = {
         "DATAFLOW": p.dataflow,
@@ -201,6 +202,7 @@ def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
         "WBUF_WORDS": PNR_WORDS,
         "DOUBLE_BUF": p.double_buf,
         "ACC_ROWS": p.acc_rows,
+        **({"EXT_DIRECT": 1} if direct else {}),
     }
     return {
         "DESIGN_NAME": "chipleap_accel",
@@ -734,7 +736,9 @@ CDC_INSTANCE = "u_accel"  # the accelerator in it
 CDC_DEPTH = 8  # words of each crossing FIFO (CDC_AW = 3), and reads in flight per port
 
 
-def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None) -> str:
+def two_clock_sdc(
+    bus_mhz: float, accel_mhz: float, slew_ns: float | None = None, direct: bool = False
+) -> str:
     """Constraints for the accelerator behind its crossings: X-HEEP's clock (``clk_i``)
     and the accelerator's (``accel_clk_i``), the ports timed against the first, as
     LibreLane's base SDC would (``chipleap.rtl.pnr.io_lines``), and the two clocks
@@ -749,7 +753,8 @@ def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None
     keeps the bits of a gray-coded pointer within a cycle of each other where they are
     sampled, and ``set_false_path -hold``, since a hold check between unrelated clocks
     times nothing. ``slew_ns`` adds a design-wide slew target (``MACRO_PNR_SLEW_NS`` for a
-    macro build's placement and routing)."""
+    macro build's placement and routing). With ``direct`` the direct read ports
+    (``ext_*``), which stay on the accelerator's clock, are timed against it instead."""
     from chipleap.rtl.pnr import io_lines
 
     bus = round(1000.0 / bus_mhz, 3)
@@ -779,6 +784,19 @@ def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None
             for a, b in (("clk_i", "accel_clk_i"), ("accel_clk_i", "clk_i"))
         ),
     ]
+    if direct:
+        lines += [
+            "# The direct read ports to external memory stay on the accelerator's clock.",
+            f"set ext_delay [expr {acc:g} * $::env(IO_DELAY_CONSTRAINT) / 100]",
+            "set ext_in [get_ports -quiet {ext_gnt_i* ext_rvalid_i* ext_rdata_i*}]",
+            "set ext_out [get_ports -quiet {ext_req_o* ext_addr_o*}]",
+            "if { [llength $ext_in] } {",
+            "    set_input_delay $ext_delay -clock [get_clocks accel_clk_i] $ext_in",
+            "}",
+            "if { [llength $ext_out] } {",
+            "    set_output_delay $ext_delay -clock [get_clocks accel_clk_i] $ext_out",
+            "}",
+        ]
     if slew_ns is not None:
         lines += [
             "# A slew target for repair under the SRAM macros' input limit.",
@@ -801,21 +819,25 @@ def model_cell_um2(accel: Accel, banked: bool = False, crossings: bool = False) 
 
 
 def with_crossings(
-    cfg: dict[str, Any], workdir: Path, bus_mhz: float, accel_mhz: float
+    cfg: dict[str, Any], workdir: Path, bus_mhz: float, accel_mhz: float, direct: bool = False
 ) -> dict[str, Any]:
     """``cfg`` for the accelerator behind its crossings (``CDC_TOP``): that top, from
     ``src/chipleap_accel_cdc.v`` in place of ``src/chipleap_accel.v``, both clocks, and
     ``two_clock_sdc`` for placement, routing and signoff, written into ``workdir`` (with
-    the macros' slew target for placement and routing when ``cfg`` has macros)."""
+    the macros' slew target for placement and routing when ``cfg`` has macros). With
+    ``direct`` the accelerator has its direct read path, whose ports are on its clock."""
     files = [
         "dir::src/chipleap_accel_cdc.v" if f == "dir::src/chipleap_accel.v" else f
         for f in cfg["VERILOG_FILES"]
     ]
     slew = MACRO_PNR_SLEW_NS if cfg.get("MACROS") else None
-    (workdir / PNR_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz, slew))
-    (workdir / SIGNOFF_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz))
+    (workdir / PNR_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz, slew, direct))
+    (workdir / SIGNOFF_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz, direct=direct))
+    params = [p for p in cfg.get("SYNTH_PARAMETERS", []) if not p.startswith("EXT_DIRECT=")]
     return {
         **cfg,
+        # The macro build's top takes the path from the crossings' parameter.
+        **({"SYNTH_PARAMETERS": [*params, "EXT_DIRECT=1"]} if direct else {}),
         "DESIGN_NAME": CDC_TOP,
         "VERILOG_FILES": files,
         "CLOCK_PORT": ["clk_i", "accel_clk_i"],
@@ -874,10 +896,12 @@ def place_and_route(
     workdir: Path,
     pdk: Path | None = None,
     accel_mhz: float = 0.0,
+    direct: bool = False,
 ) -> PnrResult:
     """The accelerator through LibreLane at ``clock_mhz``. With ``accel_mhz``, the
     accelerator runs on its own clock behind its crossings (``CDC_TOP``), and
-    ``clock_mhz`` is X-HEEP's side's."""
+    ``clock_mhz`` is X-HEEP's side's. With ``direct`` it has its direct read path to
+    external memory (``EXT_DIRECT``), its ports beside the others."""
     if not librelane().found:
         raise PnrError("LibreLane is not installed")
     workdir.mkdir(parents=True, exist_ok=True)
@@ -909,15 +933,15 @@ def place_and_route(
         )
 
     if flops:
-        cfg = config(accel, clock_mhz)
+        cfg = config(accel, clock_mhz, direct)
         if accel_mhz:
-            cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz)
+            cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz, direct)
         metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
         result = timed(parse_run(metrics, clock, gds, run, {}))
         result = with_ihp_antenna(result, pdk, cfg["DESIGN_NAME"], workdir)
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
     assert pdk is not None
-    cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk, accel_mhz)
+    cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk, accel_mhz, direct)
     top = cfg["DESIGN_NAME"]
     metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
     from chipleap.rtl.pnr import check_merged
@@ -941,7 +965,12 @@ def place_and_route(
 
 
 def sram_flow(
-    accel: Accel, clock_mhz: float, workdir: Path, pdk: Path, accel_mhz: float = 0.0
+    accel: Accel,
+    clock_mhz: float,
+    workdir: Path,
+    pdk: Path,
+    accel_mhz: float = 0.0,
+    direct: bool = False,
 ) -> tuple[dict[str, Any], banks.Banks]:
     """The files of a macro-backed run in ``workdir`` (the generated top, the macros'
     views, the power grid) and its LibreLane configuration; the RTL is in ``src``. With
@@ -960,7 +989,7 @@ def sram_flow(
     )
     # Behind the crossings the core keeps as many reads in flight per port as they hold.
     (workdir / "src" / f"{banks.TOP}.v").write_text(
-        banks.top_sv(plan, CDC_DEPTH if accel_mhz else None)
+        banks.top_sv(plan, CDC_DEPTH if accel_mhz else None, direct)
     )
     placements = [
         grid.Placement(p.instance, views[cells[p.instance]].view, p.x, p.y, p.orient)
@@ -974,7 +1003,7 @@ def sram_flow(
     )
     cfg = sram_config(accel, clock_mhz, fp, macros)
     if accel_mhz:
-        cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz)
+        cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz, direct)
     return cfg, plan
 
 

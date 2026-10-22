@@ -219,7 +219,7 @@ def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch
         buffers=f"SRAM macros: 2 x {cell}",
         synth_cell_um2=250000.0,
     )
-    monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work: result)
+    monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work, **kw: result)
     step = run.place_route(Design(accel=SMOLLM2, freq_mhz=90.0), tmp_path)
     d = step.data
     assert d["macros"] == [
@@ -263,7 +263,7 @@ def test_an_antenna_violation_fails_the_step(tmp_path, monkeypatch):
         (1, "fail", "0 DRC, 0 LVS and 1 antenna violations"),
     ):
         r = replace(clean, antenna_nets=antenna)
-        monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work, r=r: r)
+        monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work, r=r, **kw: r)
         step = run.place_route(Design(accel=SMOLLM2, freq_mhz=90.0), tmp_path)
         assert step.status == status and words in step.summary and "90 MHz met" in step.summary
 
@@ -296,7 +296,7 @@ def test_slew_and_capacitance_violations_at_any_corner_fail_the_step_and_fanout_
         ({fanout: 0, fanout + fast: 1}, "pass", "1 driver over the fanout limit (reported only)"),
     ):
         r = pnr.parse({**base, **extra}, 90.0, None)
-        monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work, r=r: r)
+        monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work, r=r, **kw: r)
         step = run.place_route(Design(accel=SMOLLM2, freq_mhz=90.0), tmp_path)
         assert step.status == status and words in step.summary, step.summary
         assert step.data["max_slew_violations"] == r.max_slew_violations

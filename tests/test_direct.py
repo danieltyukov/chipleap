@@ -116,3 +116,17 @@ def test_the_direct_path_is_priced_in_the_accelerators_logic():
     own = direct_kge(SMOLLM2.with_(accel_mhz=90.0))
     assert own - MEM_ARB_KGE - MEM_CDC_KGE < direct_kge(SMOLLM2) - MEM_ARB_KGE
     assert direct_kge(SMOLLM2.with_(ext_mem="none")) == 0.0
+
+
+def test_the_layout_has_the_direct_ports_timed_on_the_accelerators_clock(tmp_path):
+    from chipleap.verify import pnr
+
+    assert "EXT_DIRECT=1" in pnr.config(SMOLLM2.accel, 90.0, direct=True)["SYNTH_PARAMETERS"]
+    assert not any("EXT" in p for p in pnr.config(SMOLLM2.accel, 90.0)["SYNTH_PARAMETERS"])
+    sdc = pnr.two_clock_sdc(35.0, 90.0, direct=True)
+    assert "set_input_delay $ext_delay -clock [get_clocks accel_clk_i] $ext_in" in sdc
+    assert "set ext_delay [expr 11.111 *" in sdc
+    assert "ext_" not in pnr.two_clock_sdc(35.0, 90.0)
+    # Behind the crossings the macro build's top takes the path from the crossings' top.
+    cfg = pnr.with_crossings({"VERILOG_FILES": []}, tmp_path, 35.0, 90.0, direct=True)
+    assert cfg["SYNTH_PARAMETERS"] == ["EXT_DIRECT=1"]
