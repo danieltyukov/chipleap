@@ -127,3 +127,23 @@ def test_librelane_leaves_the_drc_and_timing_verdicts_to_chipleap():
     s = accel_pnr.signoff()
     assert s["ERROR_ON_KLAYOUT_DRC"] is False
     assert s["SETUP_VIOLATION_CORNERS"] == s["HOLD_VIOLATION_CORNERS"] == [""]
+
+
+def test_slew_and_capacitance_violations_fail_a_project_and_fanout_is_reported(
+    counter_project, monkeypatch
+):
+    from chipleap.rtl import pnr as pnr_mod
+
+    base = {"timing__setup__ws": 1.0, "timing__hold__ws": 0.1}
+    p = load_project(counter_project)
+    for extra, status, words in (
+        ({}, "pass", "no slew or capacitance violations"),
+        ({"design__max_slew_violation__count__corner:nom_slow_1p08V_125C": 1}, "fail", "1 slew"),
+        ({"design__max_cap_violation__count": 2}, "fail", "2 capacitance violations"),
+        ({"design__max_fanout_violation__count": 1}, "pass", "1 driver over the fanout limit"),
+    ):
+        r = accel_pnr.parse({**base, **extra}, 100.0, None)
+        monkeypatch.setattr(pnr_mod, "place_route", lambda project, r=r: r)
+        step = pnr(p)
+        assert step.status == status and words in step.summary, step.summary
+        assert step.data["max_fanout_violations"] == r.max_fanout_violations

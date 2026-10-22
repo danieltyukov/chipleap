@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -28,7 +27,14 @@ from chipleap.chip.iotiming import IoTimingError
 from chipleap.chip.merge import MergeError
 from chipleap.chip.netlist import NetlistError
 from chipleap.chip.pdn import PdnError
-from chipleap.chip.run import ToolError, klayout, plain, private_dir, python_with_klayout, run
+from chipleap.chip.run import (
+    ToolError,
+    ihp_runner,
+    klayout,
+    klayout_threads,
+    python_with_klayout,
+    run,
+)
 from chipleap.macro import layer, sram
 from chipleap.macro.layer import MacroImportError
 from chipleap.macro.manifest import MANIFEST, MacroError, Manifest, parse_toml
@@ -37,8 +43,8 @@ from chipleap.rtl.openroad import OpenroadError
 from chipleap.rtl.pnr import verilog_config
 from chipleap.rtl.project import Project, runs_tools
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS
+from chipleap.verify import antenna
 from chipleap.verify.drc import (
-    DB_MAX,
     DrcReportError,
     DrcResult,
     describe_markers,
@@ -393,7 +399,7 @@ def run_lvs(pdk: Path, out_dir: Path, view: Path, netlist_file: Path, name: str)
     """IHP's run_lvs.py on ``view`` against ``netlist_file``; its log, which says whether
     the netlists match (``checks.lvs_outcome``). A run that compared nothing, or whose
     exit code disagrees with a match, is an error, never a result."""
-    code, log = _ihp_runner(
+    code, log = ihp_runner(
         pdk,
         "lvs",
         out_dir,
@@ -406,66 +412,12 @@ def run_lvs(pdk: Path, out_dir: Path, view: Path, netlist_file: Path, name: str)
             "--run_mode=deep",
         ],
         ("layout.lvsdb", "layout_extracted.cir", "layout.log"),
+        timeout(),
     )
     outcome = checks.lvs_outcome(log)
     if outcome == "unknown" or (outcome == "pass" and code != 0):
         raise ToolError(f"IHP's LVS did not compare the netlists (exit {code}): {_last(log)}")
     return log
-
-
-def _ihp_runner(
-    pdk: Path,
-    which: str,
-    out_dir: Path,
-    inputs: dict[str, Path],
-    args: Any,
-    keep: tuple[str, ...],
-) -> tuple[int, str]:
-    """Run IHP's run_drc.py or run_lvs.py in a private directory on copies of
-    ``inputs``; copy back the files named in ``keep``, every report (.lyrdb) and every
-    log. Returns the exit code and the runner's output with the logs named in ``keep``.
-    A report too large to read is an error: it would be the one with the most in it."""
-    found = python_with_klayout()
-    if found is None:
-        raise ToolError(
-            "IHP's DRC and LVS runners need a Python with KLayout's module (pip install "
-            "klayout); set CHIPLEAP_KLAYOUT_PYTHON to one"
-        )
-    python, module_dir = found
-    runner = pdk / "libs.tech" / "klayout" / "tech" / which / f"run_{which}.py"
-    plain(runner, "IHP's KLayout decks")
-    with private_dir(f"chipleap-{which}-") as tmp:
-        for dest, src in inputs.items():
-            shutil.copyfile(src, tmp / dest)
-        run_dir = tmp / "run"
-        # The runners import klayout.db; with HOME private, Python would not look in
-        # the user's site directory, where pip puts it.
-        # run_drc.py runs its tables in parallel with Python's multiprocessing, whose
-        # semaphores are files in /dev/shm.
-        shm = [Path("/dev/shm")] if which == "drc" and Path("/dev/shm").is_dir() else []
-        code, tail = run(
-            [python, str(runner), *args(run_dir)],
-            tmp,
-            [pdk, Path(module_dir), *shm],
-            out_dir,
-            f"{which}.log",
-            timeout(),
-            {"PYTHONPATH": module_dir},
-        )
-        log = tail
-        if run_dir.is_dir():
-            for f in sorted(run_dir.iterdir()):
-                wanted = f.name in keep or f.suffix in (".lyrdb", ".log")
-                if not f.is_file() or not wanted:
-                    continue
-                if f.stat().st_size > DB_MAX:
-                    raise ToolError(
-                        f"IHP's {which.upper()} wrote {f.name}, larger than ChipLeap reads"
-                    )
-                builddir.write_bytes(out_dir, f.name, f.read_bytes())
-                if f.name in keep and f.suffix == ".log":
-                    log += "\n" + f.read_text(errors="replace")
-    return code, log
 
 
 # The DRC tables a run must have reported: the main deck's tables, merged into one
@@ -478,8 +430,10 @@ def drc(p: Prepared, final: Path, name: str) -> DrcResult:
     included, recommended rules left out (bond pads against their IO cells break
     Pad.d1R and Pad.fR_* by design, as on IHP's own reference chips)."""
     drc_dir = builddir.work_dir(p.work, "drc", empty=True)
-    workers = max(1, min(4, (os.cpu_count() or 2) // 4))
-    code, log = _ihp_runner(
+    # Up to four parts of the deck at once, the run's threads shared among them.
+    threads = klayout_threads()
+    workers = max(1, min(4, threads // 4))
+    code, log = ihp_runner(
         p.pdk,
         "drc",
         drc_dir,
@@ -489,12 +443,24 @@ def drc(p: Prepared, final: Path, name: str) -> DrcResult:
             f"--topcell={name}",
             f"--run_dir={d}",
             f"--mp={workers}",
+            f"--density_thr={max(1, threads // workers)}",
             "--run_mode=deep",
             "--no_recommended",
         ],
         (),
+        timeout(),
     )
     return drc_result(drc_dir, name, code, log, drc_held(p.imported.views.values(), name))
+
+
+def ihp_antenna(p: Prepared, final: Path, name: str) -> DrcResult:
+    """IHP's antenna deck on the finished chip (``chipleap.verify.antenna``), which the
+    DRC run above leaves out."""
+    out = builddir.work_dir(p.work, "antenna", empty=True)
+    try:
+        return antenna.check(p.pdk, final, name, out, timeout())
+    except antenna.AntennaError as exc:
+        raise ToolError(str(exc)) from None
 
 
 def drc_held(views: Iterable[layer.MacroView], name: str) -> dict[str, tuple[str, ...]]:
@@ -568,6 +534,7 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
     nofill, final = finish(p, outs["gds"], name)
     lvs_data = lvs(p, nofill, outs, name)
     drc_result = drc(p, final, name)
+    antenna_result = ihp_antenna(p, final, name)
     hookup = checks.supply_hookup(outs["def"].read_text(), p.plan)
     pre = precheck(p, final, name)
     csv_text, rows = checks.bond_map(p.plan, float(BOND_SIZE.rstrip("u")))
@@ -614,6 +581,7 @@ def assemble(project: Project, pdk: Path) -> dict[str, Any]:
                 else {}
             ),
         },
+        "ihp_antenna": antenna.summary(antenna_result),
         "supply_hookup": hookup,
         "precheck": pre,
         "gds": f"build/chip/{name}.gds",
@@ -635,6 +603,13 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
     if data["drc"]["violations"]:
         rules = ", ".join(list(data["drc"]["rules"])[:3])
         problems.append(f"{data['drc']['violations']} DRC violations ({rules})")
+    ant = data.get("ihp_antenna")
+    if ant and ant["violations"]:
+        n = ant["violations"]
+        problems.append(
+            f"{n} violation{'s' if n != 1 else ''} of IHP's antenna deck: "
+            f"{antenna.describe(ant, data['name'])}"
+        )
     for net in ("VDD", "VSS"):
         if not sum(data["supply_hookup"].get(net, {}).values()):
             problems.append(f"{net} does not reach the pad ring")
@@ -677,7 +652,7 @@ def verdict(data: dict[str, Any]) -> tuple[bool, str]:
     markers = describe_markers(data["drc"].get("pin_markers_in_pdk_macros", []))
     pdk = f"; {markers}" if markers else ""
     return True, (
-        f"{head}; {lvs}, DRC clean on IHP's deck (density included, "
+        f"{head}; {lvs}, DRC clean on IHP's deck (density{' and antenna' if ant else ''} included, "
         f"recommended rules not checked{pdk}), supplies reach the ring, precheck "
         f"passed{timing}"
     )

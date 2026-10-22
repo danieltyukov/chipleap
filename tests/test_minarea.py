@@ -510,6 +510,24 @@ def test_klayouts_drc_threads_reach_ihps_deck(tmp_path, monkeypatch, version, de
     assert "KLAYOUT_DRC_DEFINES" not in pnr.for_librelane({}, "3.0.14")
 
 
+def test_librelanes_drc_threads_come_from_the_runs_budget(monkeypatch):
+    """Half the run's threads, at most 8: LIBRELANE_MAX_CORES when the run gives it, else
+    the CPUs the process may use, as the chip's DRC and IHP's antenna deck count them, not
+    every CPU of a shared machine."""
+    from chipleap.chip import run
+
+    monkeypatch.setenv("LIBRELANE_MAX_CORES", "6")
+    assert pnr.signoff()["KLAYOUT_DRC_THREADS"] == 3
+    monkeypatch.setenv("LIBRELANE_MAX_CORES", "40")
+    assert pnr.signoff()["KLAYOUT_DRC_THREADS"] == 8
+    monkeypatch.delenv("LIBRELANE_MAX_CORES")
+    monkeypatch.setattr(run.os, "sched_getaffinity", lambda pid: {0, 1, 2, 3}, raising=False)
+    monkeypatch.setattr(run.os, "cpu_count", lambda: 255)
+    assert pnr.signoff()["KLAYOUT_DRC_THREADS"] == 2
+    monkeypatch.setattr(run.os, "sched_getaffinity", lambda pid: {0}, raising=False)
+    assert pnr.signoff()["KLAYOUT_DRC_THREADS"] == 1
+
+
 @pytest.mark.parametrize(
     ("version", "cfg", "driven"),
     [
