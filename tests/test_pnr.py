@@ -266,3 +266,40 @@ def test_an_antenna_violation_fails_the_step(tmp_path, monkeypatch):
         monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work, r=r: r)
         step = run.place_route(Design(accel=SMOLLM2, freq_mhz=90.0), tmp_path)
         assert step.status == status and words in step.summary and "90 MHz met" in step.summary
+
+
+def test_slew_and_capacitance_violations_at_any_corner_fail_the_step_and_fanout_is_reported(
+    tmp_path, monkeypatch
+):
+    """A pin over its slew limit or a net over its capacitance limit, at any corner, fails
+    the accelerator's place and route as it does a project's. A driver over its fanout
+    limit is reported and passes: in the SmolLM2 layout the detailed router's diodes were
+    10 of a clock leaf's 12 loads, with its slew and capacitance well within limits."""
+    from chipleap.hw.design import Design
+    from chipleap.verify import run
+
+    base = {
+        "design__instance__area__stdcell": 300000.0,
+        "design__core__area": 1.1e6,
+        "timing__setup__ws": 1.0,
+        "timing__hold__ws": 0.1,
+    }
+    slew = "design__max_slew_violation__count"
+    cap = "design__max_cap_violation__count"
+    fanout = "design__max_fanout_violation__count"
+    fast = "__corner:nom_fast_1p32V_m40C"
+    for extra, status, words in (
+        ({slew: 0, cap: 0, fanout: 0}, "pass", "no slew or capacitance violations"),
+        ({slew: 2}, "fail", "2 slew and 0 capacitance violations"),
+        ({cap: 0, cap + fast: 3}, "fail", "0 slew and 3 capacitance violations"),
+        ({slew + fast: 1, slew: True}, "fail", "1 slew and 0 capacitance violations"),
+        ({fanout: 0, fanout + fast: 1}, "pass", "1 driver over the fanout limit (reported only)"),
+    ):
+        r = pnr.parse({**base, **extra}, 90.0, None)
+        monkeypatch.setattr(run.pnr, "place_and_route", lambda accel, clock, work, r=r: r)
+        step = run.place_route(Design(accel=SMOLLM2, freq_mhz=90.0), tmp_path)
+        assert step.status == status and words in step.summary, step.summary
+        assert step.data["max_slew_violations"] == r.max_slew_violations
+        assert step.data["max_cap_violations"] == r.max_cap_violations
+        assert step.data["max_fanout_violations"] == r.max_fanout_violations
+    assert pnr.parse({**base, slew: float("nan")}, 90.0, None).max_slew_violations == 0

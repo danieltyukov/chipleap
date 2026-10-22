@@ -421,3 +421,20 @@ def test_a_repair_closes_timing_the_routed_run_missed(tmp_path):
     r = E.eco(p)
     assert r.status == "pass", r.summary
     assert r.data["after"]["setup_slack_ns"] >= 0 and r.data["after"]["lvs_errors"] == 0
+
+
+def test_an_eco_is_signed_off_as_place_and_route_is(counter_project, tmp_path):
+    """The ECO's result meets pnr's criteria: a slew or capacitance violation fails it, a
+    driver over its fanout limit is reported."""
+    from chipleap.verify import pnr as P
+
+    p = load_project(counter_project)
+    base = {"timing__setup__ws": 0.5, "timing__hold__ws": 0.1}
+    before = P.parse(base, 100.0, None)
+    for extra, status, words in (
+        ({"design__max_fanout_violation__count": 1}, "pass", "1 driver over the fanout limit"),
+        ({"design__max_cap_violation__count__corner:nom_fast_1p32V_m40C": 1}, "fail", "1 cap"),
+    ):
+        after = P.parse({**base, **extra}, 100.0, None)
+        status_, msg = E.summarize(p, E.EcoResult([{}], before, after, tmp_path))
+        assert status_ == status and words in msg, msg

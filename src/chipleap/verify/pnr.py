@@ -33,8 +33,14 @@ from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
-from chipleap.verify import launch, minarea
-from chipleap.verify.drc import DrcReportError, DrcResult, pdk_cells, read_lyrdb
+from chipleap.verify import antenna, launch, minarea
+from chipleap.verify.drc import (
+    DrcReportError,
+    DrcResult,
+    describe_markers,
+    pdk_cells,
+    read_lyrdb,
+)
 from chipleap.verify.synth import _sv2v
 from chipleap.verify.tools import librelane, librelane_env, librelane_pdk_args, librelane_ran
 
@@ -66,13 +72,78 @@ class PnrResult:
     macro_um2: float = 0.0
     buffers: str = ""  # what the buffers are in the layout, and why when they are flops
     synth_cell_um2: float = 0.0  # LibreLane's synthesis, before placement's repairs
+    max_slew_violations: int = 0  # pins over their slew limit, at any corner
+    max_cap_violations: int = 0  # nets over their capacitance limit, at any corner
+    max_fanout_violations: int = 0  # drivers over their fanout limit, at any corner
     # Off-grid pin markers inside the PDK's own macros, left out of drc_errors
     # (``chipleap.verify.drc``): rule, cell, the macros that hold it, count.
     pin_markers: list[dict[str, Any]] = field(default_factory=list)
+    # IHP's antenna deck on the GDS (``chipleap.verify.antenna``), or why it did not run
+    # (``ihp_antenna_skipped``); neither when the flow does not run it.
+    ihp_antenna: DrcResult | None = None
+    ihp_antenna_skipped: str = ""
 
     @property
     def clean(self) -> bool:
         return self.drc_errors == 0 and self.lvs_errors == 0
+
+    @property
+    def checks_clean(self) -> bool:
+        """DRC and LVS clean, antenna clean under OpenROAD's check and IHP's deck, and no
+        pin or net over its slew or capacitance limit at any corner. A driver over its
+        fanout limit does not count: fanout is a constraint for the repairs, and the slew
+        and capacitance limits carry what it costs (a diode the router adds is a load to
+        the count and switches nothing)."""
+        ihp = self.ihp_antenna
+        return (
+            self.clean
+            and self.antenna_nets == 0
+            and (ihp is None or ihp.total == 0)
+            and self.max_slew_violations == 0
+            and self.max_cap_violations == 0
+        )
+
+    def checks(self) -> str:
+        """The checks for a step's summary: DRC, LVS and OpenROAD's antenna counts, IHP's
+        antenna deck's violations with their rules and places, or why it did not run, the
+        slew and capacitance violations, the drivers over their fanout limit (reported
+        only), and the pin markers set apart."""
+        ihp = self.ihp_antenna
+        if self.checks_clean:
+            text = "DRC, LVS and antenna clean"
+            if ihp is not None:
+                text += ", IHP's antenna deck included"
+            text += ", no slew or capacitance violations"
+        else:
+            text = (
+                f"{self.drc_errors} DRC, {self.lvs_errors} LVS and {self.antenna_nets} "
+                f"antenna violations, {self.max_slew_violations} slew and "
+                f"{self.max_cap_violations} capacitance violations"
+            )
+        if ihp is not None and ihp.total:
+            n = ihp.total
+            text += (
+                f"; IHP's antenna deck: {n} violation{'s' if n != 1 else ''}, "
+                f"{antenna.describe(antenna.summary(ihp), ihp.top)}"
+            )
+        elif ihp is None and self.ihp_antenna_skipped:
+            text += f"; IHP's antenna deck not run: {self.ihp_antenna_skipped}"
+        if n := self.max_fanout_violations:
+            text += f"; {n} driver{'s' if n != 1 else ''} over the fanout limit (reported only)"
+        if self.pin_markers:
+            text += f"; {describe_markers(self.pin_markers)}"
+        return text
+
+    def ihp_antenna_data(self) -> dict[str, Any]:
+        """IHP's antenna deck for a step's result (``chipleap.verify.antenna.summary``), or
+        why it did not run; empty when the flow does not run it."""
+        if self.ihp_antenna is not None:
+            return {"ihp_antenna": antenna.summary(self.ihp_antenna)}
+        return (
+            {"ihp_antenna": {"skipped": self.ihp_antenna_skipped}}
+            if self.ihp_antenna_skipped
+            else {}
+        )
 
     def _fmax(self, slack: float) -> float:
         period = 1000.0 / self.clock_mhz - slack
@@ -159,6 +230,19 @@ def _worst(metrics: dict[str, Any], prefix: str) -> float:
     return min(vals) if vals else 0.0
 
 
+def _violations(metrics: dict[str, Any], prefix: str) -> int:
+    """The largest of a violation count overall and at each corner."""
+    vals = [
+        v
+        for k, v in metrics.items()
+        if (k == prefix or k.startswith(prefix + "__corner:"))
+        and isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+    ]
+    return int(max(vals, default=0))
+
+
 def _corner(metrics: dict[str, Any], prefix: str, corner: str) -> float | None:
     for k, v in metrics.items():
         if k.startswith(prefix + "__corner:") and corner in k and isinstance(v, (int, float)):
@@ -192,6 +276,9 @@ def parse(
         power_mw=_num(metrics, "power__total") * 1000,
         gds=gds,
         metrics=metrics,
+        max_slew_violations=_violations(metrics, "design__max_slew_violation__count"),
+        max_cap_violations=_violations(metrics, "design__max_cap_violation__count"),
+        max_fanout_violations=_violations(metrics, "design__max_fanout_violation__count"),
         pin_markers=klayout.markers_data() if klayout else [],
     )
 
@@ -236,6 +323,26 @@ def parse_run(
 ) -> PnrResult:
     """``parse`` with the run's own KLayout DRC report (``klayout_drc``)."""
     return parse(metrics, clock_mhz, gds, klayout_drc(metrics, klayout_report(run), held))
+
+
+ANTENNA_DIR = "antenna"  # beside the run: IHP's antenna deck's report and log
+
+
+def with_ihp_antenna(
+    r: PnrResult, pdk: Path | None, top: str, work: Path, name: str = ANTENNA_DIR
+) -> PnrResult:
+    """``r`` with IHP's antenna deck run on its GDS (``chipleap.verify.antenna``), its
+    report in ``work/name`` (emptied first), or with why it could not run here. A run of
+    the deck that did not finish fails the step."""
+    why = "the run left no GDS" if r.gds is None else antenna.unavailable(pdk)
+    if why or pdk is None or r.gds is None:
+        return replace(r, ihp_antenna_skipped=why)
+    out = builddir.work_dir(work, name, empty=True)
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    try:
+        return replace(r, ihp_antenna=antenna.check(pdk, r.gds, top, out, limit))
+    except antenna.AntennaError as exc:
+        raise PnrError(str(exc)) from None
 
 
 DETAILED_ROUTING = "OpenROAD.DetailedRouting"
@@ -615,6 +722,7 @@ def place_and_route(
     if reason is not None or pdk is None:
         metrics, gds = run_librelane(workdir, config(accel, clock_mhz), late_antenna_repair=True)
         result = parse_run(metrics, clock_mhz, gds, run, {})
+        result = with_ihp_antenna(result, pdk, "chipleap_accel", workdir)
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
     cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
     metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
@@ -626,6 +734,7 @@ def place_and_route(
         (banks.TOP,),
     )
     result = replace(parse_run(metrics, clock_mhz, gds, run, held), synth_cell_um2=synth_area(run))
+    result = with_ihp_antenna(result, pdk, banks.TOP, workdir)
     counts: dict[str, int] = {}
     for _, cell in plan.instances():
         counts[cell] = counts.get(cell, 0) + 1

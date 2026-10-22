@@ -435,6 +435,7 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
         return metrics, None
 
     monkeypatch.setattr(pnr, "run_librelane", run)
+    monkeypatch.setattr(pnr, "with_ihp_antenna", lambda r, *a: r)  # tests/test_antenna.py
     p = load_project(sram_project)
     markers = [("metal1_pin_Offgrid", f"{bldrv}:r0")] * 3 + [("metal1_pin_Offgrid", f"{bldrv}:m90")]
     items[:] = markers
@@ -445,7 +446,8 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
         {"rule": "metal1_pin_Offgrid", "cell": bldrv, "macros": [CELL], "count": 4}
     ]
     assert result.summary.endswith(
-        "DRC, LVS and antenna clean; 4 pin markers off the grid inside the PDK's own macros, "
+        "DRC, LVS and antenna clean, no slew or capacitance violations; 4 pin markers off the "
+        "grid inside the PDK's own macros, "
         f"not counted: 4 metal1_pin_Offgrid in {bldrv}"
     )
     for other in (
@@ -456,7 +458,10 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
         items[:] = [*markers, other]
         result = pnr.pnr(p)
         assert result.status == "fail" and result.data["drc_errors"] == 1, other
-        assert "1 DRC, 0 LVS and 0 antenna violations; 4 pin markers" in result.summary
+        assert (
+            "1 DRC, 0 LVS and 0 antenna violations, 0 slew and 0 capacitance violations; "
+            "4 pin markers" in result.summary
+        )
 
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="Yosys not installed")
