@@ -674,13 +674,27 @@ def _equiv(r: dict[str, Any]) -> tuple[str, str]:
     return "Yosys equivalence", "; ".join(parts)
 
 
+def _ihp_antenna(r: dict[str, Any]) -> int | None:
+    """The violations of IHP's antenna deck in a result, None when it did not run."""
+    ant = r.get("ihp_antenna") or {}
+    return None if "violations" not in ant else int(ant["violations"])
+
+
 def _pnr(r: dict[str, Any]) -> tuple[str, str]:
-    clean = not (r["drc_errors"] or r["lvs_errors"] or r["antenna_nets"])
+    ihp = _ihp_antenna(r)
+    slew = int(r.get("max_slew_violations") or 0) + int(r.get("max_cap_violations") or 0)
+    clean = not (r["drc_errors"] or r["lvs_errors"] or r["antenna_nets"] or ihp or slew)
+    if clean:
+        checks = "DRC, LVS and antenna clean"
+        if ihp is not None:
+            checks += " (IHP's antenna deck too)"
+        checks += ", no slew or capacitance violations"
+    else:
+        checks = "DRC, LVS, antenna, slew or capacitance violations"
     return (
         "LibreLane (OpenROAD, KLayout), signed off at the slow corner",
         f"{r['cells']} cells on a {r['core_um2'] / 1e6:.4f} mm\u00b2 core; {_n(r['clock_mhz'])} "
-        f"MHz met at 125 \u00b0C (about {r['fmax_worst_mhz']:.0f} MHz there); "
-        + ("DRC, LVS and antenna clean" if clean else "DRC, LVS or antenna violations"),
+        f"MHz met at 125 \u00b0C (about {r['fmax_worst_mhz']:.0f} MHz there); {checks}",
     )
 
 
@@ -821,12 +835,15 @@ def chip_rows(
             )
         )
     lvs = "LVS match" if chip["lvs"]["result"] == "pass" else f"LVS {chip['lvs']['result']}"
+    ihp = _ihp_antenna(chip)
     rows.append(
         (
             "Signoff",
-            "IHP's DRC and LVS decks, antenna",
+            "IHP's DRC, LVS and antenna decks, OpenROAD's antenna check"
+            if ihp is not None
+            else "IHP's DRC and LVS decks, antenna",
             f"{chip['drc']['violations']} DRC violations, {lvs}, "
-            f"{chip['antenna_nets']} antenna violations",
+            f"{chip['antenna_nets'] + (ihp or 0)} antenna violations",
         )
     )
     return rows

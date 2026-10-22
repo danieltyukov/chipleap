@@ -78,7 +78,7 @@ These are the steps ChipLeap runs on a project today, with what each reported fo
 | Clock and reset crossings | ChipLeap's structural checker on the netlist Yosys elaborates | the receive line through a two-flop synchronizer, accepted; one warning, the reset released asynchronously |
 | Synthesis | Yosys and ABC on IHP's standard cells | 221 cells, 51 flip-flops, 0.0041 mm², critical path 1.01 ns |
 | Equivalence | Yosys (or EQY): RTL against synthesis, synthesis against the routed netlist | 74 of 75 points proved and the last equal for 40 cycles; all 969 routed points proved |
-| Place and route | LibreLane (OpenROAD, KLayout), signed off at the slow corner | 352 cells on a 0.0105 mm² core, 100 MHz met at 125 C (about 264 MHz), DRC, LVS and antenna clean |
+| Place and route | LibreLane 3.0.14 (OpenROAD, KLayout), signed off at the slow corner, IHP's antenna deck on the result | 352 cells on a 0.0105 mm² core, 100 MHz met at 125 C (about 264 MHz), DRC, LVS and antenna clean |
 | Gate-level simulation | the cocotb tests on the routed netlist with SDF delays, Icarus 13 | 5 of 5 tests pass |
 | Design for test | OpenROAD scan insertion, Fault with Quaigh for ATPG | 3 chains of 17 flip-flops, 99.2 % stuck-at coverage with 39 patterns, which pass through the scan and the routed netlists |
 | Power | OpenROAD with the activity of the project's own tests | 0.345 mW at the typical corner (0.947 mW vectorless) |
@@ -88,7 +88,7 @@ These are the steps ChipLeap runs on a project today, with what each reported fo
 | Macros | `macro/v1` packages, checked and rewritten before use | aispice's StrongARM comparator, 29.1 x 40.8 um, both decisions measured after layout, its transistors in LVS |
 | Chip assembly | LibreLane with IHP's pad ring, then bond pads, seal ring and fill in KLayout | 33 pads on a 1.52 x 1.52 mm die |
 | Timing at the ports | OpenSTA through IHP's IO cells at every corner | +0.968 ns of setup slack at the slow corner (+6.257 ns at the core's side of the pads) |
-| Signoff | IHP's DRC deck on the whole die (density included), its LVS deck down to the macros' transistors, antenna | 0 DRC violations, LVS match, 0 antenna violations |
+| Signoff | IHP's DRC deck on the whole die (density included), its LVS deck down to the macros' transistors, its antenna deck and OpenROAD's antenna check | 0 DRC violations, LVS match, 0 antenna violations |
 
 ```sh
 chipleap verify examples/uart               # lint to equivalence, in about half a minute
@@ -128,7 +128,7 @@ Every tool is optional. `chipleap doctor` lists what it found, and `chipleap ver
 
 <img src="docs/img/layout.jpg" alt="The routed layout of the 1 x 8 GEMV engine on IHP SG13G2, drawn from its GDS: signal wires on four metal layers under the power grid" width="300" align="right">
 
-`chipleap verify out --steps all` adds place and route with LibreLane, the open flow Tiny Tapeout uses for its IHP shuttles. The picture is the GDS it wrote for the SmolLM2 chip's 1 x 8 GEMV engine: a 0.80 mm² core with clean DRC, LVS and antenna checks that meets its 90 MHz clock at the slow corner, with room to spare (about 101 MHz, and 148 MHz at the typical one).
+`chipleap verify out --steps all` adds place and route with LibreLane 3.0.14, the release Tiny Tapeout's GDS action uses for its IHP shuttles, on the IHP-Open-PDK commit of your PDK checkout. The picture is the GDS it wrote for the SmolLM2 chip's 1 x 8 GEMV engine: a 0.80 mm² core with clean DRC, LVS and antenna checks that meets its 90 MHz clock at the slow corner, with room to spare (about 101 MHz, and 148 MHz at the typical one).
 
 The accelerator model is the same tile schedule the RTL runs, so it is checked against it:
 
