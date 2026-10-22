@@ -682,7 +682,8 @@ MACRO_WIRE_UM = 300
 # SmolLM2 accelerator at 100 MHz the repair left hold at +0.20 ns by its estimate, and
 # detailed routing took two macros' A_REN to -0.059 ns at the fast corner. With 0.15 ns
 # hold closed at +0.109 ns with 62 more hold cells (3397), and setup at the slow corner
-# kept +0.155 ns.
+# kept +0.155 ns. With 0.10 the same two pins stayed at -0.058 ns, and 0.20 broke setup
+# (-0.164 ns): a point tuned on that design at 100 MHz, not a general constant.
 MACRO_HOLD_MARGIN_NS = 0.15
 MACRO_REPAIR = {
     "RUN_POST_GRT_DESIGN_REPAIR": True,
