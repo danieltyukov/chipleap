@@ -260,6 +260,55 @@ def test_the_same_name_over_another_layout_is_refused():
         assert merge.gds_names(g.gds("c", cells))["shared"] != a["shared"]
 
 
+def test_two_layouts_whose_parts_run_together_are_told_apart():
+    """Each part of a layout's identity is hashed with its kind and length. Without that,
+    these two cells hash the same bytes: the first's outline has a fifth vertex whose
+    coordinates are the bytes of a property record that the second has after its outline."""
+    import struct
+
+    g = gen()
+    prop = g._rec(0x2C, 0x06, b"abc\n")
+    fifth = struct.unpack(">ii", b"\n" + prop[:-1])
+
+    def boundary(xy: tuple[int, ...], after_xy: bytes = b"") -> bytes:
+        return (
+            g._rec(0x08, 0x00)
+            + g._rec(0x0D, 0x02, g._i16(8))
+            + g._rec(0x0E, 0x02, g._i16(0))
+            + g._rec(0x10, 0x03, g._i32(*xy))
+            + after_xy
+            + g._rec(0x11, 0x00)
+        )
+
+    five = boundary((0, 0, 0, 10, 10, 10, 10, 0, *fifth, 0, 0))
+    four = boundary((0, 0, 0, 10, 10, 10, 10, 0, 0, 0), after_xy=prop)
+
+    def run_together(element: bytes) -> bytes:
+        """The element's parts one after the other, as ChipLeap hashed them before."""
+        out, pos = b"", 0
+        while pos < len(element):
+            r = element[pos : pos + struct.unpack(">H", element[pos : pos + 2])[0]]
+            pos += len(r)
+            out += b"OUTLINE " + merge._outline(r) + b"\n" if r[2] == 0x10 else r
+        return out
+
+    assert five != four and run_together(five) == run_together(four)
+    ids = []
+    for body in (five, four):
+        cell = g.Cell("c")
+        cell.body = body
+        ids.append(merge.gds_names(g.gds("l", [cell]))["c"])
+    assert ids[0] != ids[1]
+
+
+def test_a_record_gdsii_does_not_have_is_refused():
+    g = gen()
+    cell = g.Cell("c").rect(g.METAL1, 0, 0, 1, 1)
+    cell.body += g._rec(0x3C, 0x00)
+    with pytest.raises(MergeError, match="unknown record type 0x3c"):
+        merge.gds_names(g.gds("l", [cell]))
+
+
 def test_a_structure_that_contains_itself_is_an_error():
     g = gen()
     data = g.gds("l", [g.Cell("a").sref("b", 0, 0), g.Cell("b").sref("a", 0, 0)])

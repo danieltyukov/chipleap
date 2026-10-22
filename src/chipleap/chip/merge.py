@@ -86,6 +86,9 @@ def _read(path: Path) -> bytes:
 _UNITS, _ENDLIB, _BGNSTR, _STRNAME, _ENDSTR = 0x03, 0x04, 0x05, 0x06, 0x07
 _BOUNDARY, _XY, _ENDEL, _SNAME, _PRESENTATION = 0x08, 0x10, 0x11, 0x12, 0x17
 _ELEMENTS = frozenset({0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x15, 0x2D})
+# The GDSII stream format numbers its record types from HEADER (0x00) to LIBSECUR (0x3B).
+# A record of any other type is not GDSII: what it holds is unknown, so it is refused.
+_LAST_TYPE = 0x3B
 
 
 @dataclass
@@ -112,6 +115,8 @@ def _structures(data: bytes) -> tuple[bytes | None, dict[bytes, _Structure]]:
         length, rtype = (data[pos] << 8) | data[pos + 1], data[pos + 2]
         if length < 4 or pos + length > n:
             raise MergeError(f"GDS: bad record length {length} at byte {pos}")
+        if rtype > _LAST_TYPE:
+            raise MergeError(f"GDS: unknown record type 0x{rtype:02x} at byte {pos}")
         record = data[pos : pos + length]
         pos += length
         if rtype == _ENDLIB:
@@ -163,11 +168,18 @@ def _outline(record: bytes) -> bytes:
     return struct.pack(f">{2 * len(best)}i", *(c for v in best for c in v))
 
 
+def _item(tag: bytes, payload: bytes) -> bytes:
+    """One item of what a layout's identity is computed from: a tag of one byte for its
+    kind and its length before its bytes, so that two different sequences of items are
+    never the same bytes, whatever the items hold."""
+    return tag + struct.pack(">Q", len(payload)) + payload
+
+
 def _element(records: list[bytes], ids: Mapping[bytes, str]) -> bytes:
     """The digest of one element: its records, with the structure it places by that
     structure's identity, not its name, its outline in one vertex order when it is a
     BOUNDARY, and without its text's PRESENTATION (font and justification, which no
-    check reads)."""
+    check reads). Each is an item of its own kind (``_item``)."""
     h = hashlib.sha256()
     boundary = records[0][2] == _BOUNDARY
     for r in records:
@@ -176,11 +188,11 @@ def _element(records: list[bytes], ids: Mapping[bytes, str]) -> bytes:
         if r[2] == _SNAME:
             placed = r[4:].rstrip(b"\0")
             ref = ids.get(placed)
-            h.update(b"SNAME " + (ref.encode() if ref else b"undefined " + placed) + b"\n")
+            h.update(_item(b"S", ref.encode()) if ref else _item(b"N", placed))
         elif r[2] == _XY and boundary:
-            h.update(b"OUTLINE " + _outline(r) + b"\n")
+            h.update(_item(b"O", _outline(r)))
         else:
-            h.update(r)
+            h.update(_item(b"R", r))
     return h.digest()
 
 
@@ -189,10 +201,12 @@ def gds_names(data: bytes) -> dict[str, str]:
     record, the structure's records outside its elements (not the dates in BGNSTR, but
     STRCLASS and its properties), and the digests of its elements in any order, each
     with the structure it places by that structure's identity, so the whole hierarchy
-    under a structure counts and the names of the structures in it do not. In a file
-    whose UNITS record is not its only one, before its first structure, every identity
-    is "", which matches nothing. A name that is not plain is an error, and so are a
-    structure that contains itself and one defined twice, differently, in one file."""
+    under a structure counts and the names of the structures in it do not. Every part is
+    an item with its kind and length (``_item``), so two different layouts never hash the
+    same bytes. In a file whose UNITS record is not its only one, before its first
+    structure, every identity is "", which matches nothing. A name that is not plain is an
+    error, and so are a record type GDSII does not have, a structure that contains itself
+    and one defined twice, differently, in one file."""
     units, structures = _structures(data)
     for raw in structures:
         if not GDS_NAME.fullmatch(raw):
@@ -209,9 +223,11 @@ def gds_names(data: bytes) -> dict[str, str]:
                 continue
             s = structures[name]
             if ready:
-                h = hashlib.sha256(units + b"".join(s.head))
+                h = hashlib.sha256(_item(b"U", units))
+                for r in s.head:
+                    h.update(_item(b"H", r))
                 for d in sorted(_element(el, ids) for el in s.elements):
-                    h.update(d)
+                    h.update(_item(b"E", d))
                 ids[name] = h.hexdigest()
                 continue
             if name in open_:
