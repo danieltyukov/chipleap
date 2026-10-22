@@ -475,9 +475,11 @@ def with_def_to_odb(cfg: dict[str, Any]) -> dict[str, Any]:
 # island at a cumulative ratio of 312.72 against 200, out of reach of the router's diodes,
 # which joined only through Metal3. So every layout ChipLeap routes with LibreLane but the
 # SoC's (``run_librelane``) repairs antennas once more after the timing repair: in that
-# layout the second repair found 35 nets over the ratios and fixed them with 40 jumpers and
-# 17 diodes, the routed design was clean under OpenROAD's antenna check and IHP's rule
-# deck, and its slack at the slow corner moved by +0.004 ns. It puts no diode on a clock
+# layout the second repair found 35 nets over the ratios and put 17 diodes on them, the
+# routed design was clean under OpenROAD's antenna check and IHP's rule deck, and its slack
+# at the slow corner moved by +0.004 ns. Only a repair's diodes last: LibreLane's step
+# routes globally again after repair_antennas, over the jumpers it inserted (40 there),
+# and the detailed router follows that route. The second repair put no diode on a clock
 # net there; the detailed router's own repair put 10 on one (see docs/verification.md).
 TIMING_REPAIR = "OpenROAD.ResizerTimingPostGRT"
 ANTENNA_REPAIR = "OpenROAD.RepairAntennas"
