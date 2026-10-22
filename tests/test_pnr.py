@@ -100,7 +100,8 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     work = tmp_path / "pnr"
     seen = {}
 
-    def run(workdir, cfg, tag="chipleap"):
+    def run(workdir, cfg, tag="chipleap", *, late_antenna_repair=False):
+        assert late_antenna_repair  # every layout but the SoC's repairs antennas twice
         seen["cfg"] = cfg
         metrics = {
             "design__instance__area__stdcell": 250000.0,

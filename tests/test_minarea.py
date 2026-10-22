@@ -594,7 +594,9 @@ def test_antennas_are_repaired_again_after_the_timing_repair():
 def test_run_librelane_repairs_antennas_after_the_timing_repair(tmp_path, monkeypatch):
     calls = []
     _fake_librelane(tmp_path, monkeypatch, _finishes({"timing__setup__ws": 0.5}), calls)
-    pnr.run_librelane(tmp_path / "pnr", {"RUN_POST_GRT_RESIZER_TIMING": True})
+    pnr.run_librelane(
+        tmp_path / "pnr", {"RUN_POST_GRT_RESIZER_TIMING": True}, late_antenna_repair=True
+    )
     cfg = json.loads((tmp_path / "pnr" / "config.json").read_text())
     assert cfg["meta"]["substituting_steps"] == LATE
     # The rest of the flow, from the patched layout, keeps it beside its own step.
@@ -603,6 +605,10 @@ def test_run_librelane_repairs_antennas_after_the_timing_repair(tmp_path, monkey
         **LATE,
         "+OpenROAD.DetailedRouting": "OpenROAD.DEFtoODB",
     }
+    # Only when asked: the SoC step does not ask yet.
+    (tmp_path / "soc").mkdir()
+    pnr.run_librelane(tmp_path / "soc", {"RUN_POST_GRT_RESIZER_TIMING": True})
+    assert "meta" not in json.loads((tmp_path / "soc" / "config.json").read_text())
 
 
 @pytest.mark.parametrize("finishes", [True, False])
