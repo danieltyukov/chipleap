@@ -110,6 +110,20 @@ Both terms are measured on the SmolLM2 SoC (CV32E20, the one-to-many bus, one 32
 
 The first estimate of this limit, 17.64 ns (56.7 MHz), was the slowest bank read after the repair that follows global routing, in a layout at 90 MHz, without the derate. That is no basis for a clock. The repairs work against the global router's estimate of each wire, and on the SoC's long wires the extraction after detailed routing puts 14 to 20 % more capacitance on them: at 50 MHz an SRAM output net repaired to 0.0576 pF came out 0.0657 pF, a clock net's slew went from 0.607 to 0.728 ns, and the slow corner's worst setup slack went from +0.54 ns after global routing to -3.63 ns after routing, a period of 23.63 ns. The SoC's step now keeps margins for that (docs/verification.md), and the model's limit is what the routed layout needs.
 
+## The accelerator's own clock
+
+`accel_mhz` in a design puts the accelerator on a clock of its own, behind clock domain crossings at its bus interface ([verification.md](verification.md#the-accelerator-on-its-own-clock)). The CPU, its bus and its DMA stay on the SoC's clock above, and the accelerator's operators are timed at `accel_mhz`. The accelerator's clock limit (`chipleap.hw.tech.Technology.clock_limit_mhz`) then applies to `accel_mhz`, not to the design's clock.
+
+Every word still crosses at the bus's rate, so the rates the bus gives, in bytes per bus cycle, become rates per accelerator cycle divided by `k`, the accelerator's cycles per bus cycle. They are capped at a word per read port, and one for stores, per accelerator cycle. A request and its response each pass two synchronizer flip-flops of the clock they enter, so a response that comes `L` bus cycles after its grant reaches the accelerator after
+
+    ceil(k (L + CDC_BUS_CYCLES) + CDC_ACCEL_CYCLES)
+
+of its cycles (`chipleap.model.accel.crossed`). Both terms are fitted to 1,040 jobs simulated in Verilator without stalls: five accelerators, sixteen pairs of clocks with `k` from 0.39 to 4, each at a random phase. With CDC_BUS_CYCLES = 1.25 and CDC_ACCEL_CYCLES = 3, every simulated count is within 5.4 % of the model's, 0.1 % on average. The CPU's 80 cycles to program and start a job (JOB_SETUP_CYCLES) are counted at the SoC's clock.
+
+The crossings add ACCEL_CDC_KGE = 8.43 kGE (the register handshake, the write port's FIFOs, the reset and interrupt synchronizers) and ACCEL_CDC_PORT_KGE = 6.76 kGE per read port (its two FIFOs of eight 32-bit words) to the accelerator's logic. They are measured with Yosys on IHP SG13G2: 15.53 kGE with one port, 21.46 with two and 35.64 with four, and the line through them is within 2.3 % of each.
+
+On the SmolLM2 example at the SoC's 42.3 MHz, an accelerator at 90 MHz gives 1.36 token/s against 1.33 on the SoC's clock. The crossings add 0.158 mm2. The gain is small because the accelerator's weights reach it over X-HEEP's bus at the SoC's clock: the faster clock shortens its compute and its fixed cycles, not the stream that bounds it.
+
 ## Placement and feasibility
 
 On-chip SRAM holds, in order: firmware (32 KiB unless the spec says otherwise), activations, the KV cache, weights. Anything left over goes to external memory, and a design is infeasible when:

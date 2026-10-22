@@ -11,7 +11,7 @@ synth   PASS     logic cell area ... mm2 on IHP SG13G2 (model ... mm2), critical
 xheep   PASS     X-HEEP validated the configuration (... banks, ... interleaved) and rendered 27 templates
 ```
 
-Results go to `DIR/verify/verify.json` and `DIR/verify/VERIFY.md`. Choose steps with `--steps consistency,lint,sim,synth,xheep`; place and route (`pnr`) takes many minutes, so it runs only when named, or with `--steps all`.
+Results go to `DIR/verify/verify.json` and `DIR/verify/VERIFY.md`. Choose steps with `--steps consistency,lint,sim,cdc,synth,xheep`; place and route (`pnr`) takes many minutes, so it runs only when named, or with `--steps all`.
 
 A bundle may come from someone else, so ChipLeap never writes through a symlink in it. `DIR` itself (like the directory you give `explore` and `generate` with `-o`) may not be a symlink, and neither may `verify/` or a step's directory in it (`verify/synth`, `verify/pnr`, `verify/genus` and so on): the run stops with an error that names it. A symlink further inside a step's directory is removed before the step writes there, and nothing it points at is touched. On Windows a directory junction, or any other reparse point, counts as a symlink. A directory that `-o` creates gets a `.chipleap` file that says ChipLeap made it, and ChipLeap never empties an output directory without one.
 
@@ -24,7 +24,8 @@ A bundle gets edited by hand once it leaves ChipLeap. This step re-derives every
 - the RTL wrappers' parameters (`chipleap_accel_top.sv`, `chipleap_accel_xheep.sv`),
 - the driver's build constants and register offsets (`sw/chipleap_driver.h`),
 - the register decode in `rtl/chipleap_accel.sv` and the reggen description `rtl/chipleap_accel.hjson`,
-- the CPU, bus and banks in the X-HEEP configuration.
+- the CPU, bus and banks in the X-HEEP configuration;
+- for an accelerator on its own clock (`accel_mhz` in `design.yaml`), that both wrappers put it behind its crossings (`chipleap_accel_cdc`) and that `rtl/chipleap_accel_cdc.sv` is there, and for one on X-HEEP's clock that they do not.
 
 ## Lint
 
@@ -45,6 +46,19 @@ For each case, `simulate_job` in `chipleap.model.accel` predicts the cycle count
 The closed form the explorer uses (`job_timing`) is within 0.1 % on average of `simulate_job` over random jobs; jobs of up to 256 tiles use `simulate_job` directly. Together this ties the explorer's numbers to the RTL.
 
 Verilator models are cached by parameter hash in `~/.cache/chipleap` (`CHIPLEAP_CACHE` moves it), so re-running costs seconds.
+
+### The accelerator on its own clock
+
+A design with `accel_mhz` runs the accelerator on a clock of its own, `accel_clk_i`, behind `chipleap_accel_cdc` (`rtl/chipleap_accel_cdc.sv`), whose other side has the accelerator's ports on X-HEEP's clock. Each signal crosses through one standard structure:
+
+- the register interface through a two-phase request and acknowledge handshake: the bus side holds the request in registers and toggles a request bit, which reaches the accelerator through two flip-flops; the accelerator side captures the request when that bit changes, performs it, holds the response and toggles an acknowledge bit back the same way, and the bus sees `ready` once the response is captured on its side;
+- each read port and the write port through two asynchronous FIFOs of eight words, one for the requests and one for the responses, their pointers gray coded through two flip-flops. The accelerator side grants a request only while fewer than eight are in flight, so the response FIFO always has room for what the bus returns (an OBI response cannot be held back), and the accelerator keeps as many reads outstanding per port;
+- the interrupt registered in the accelerator's clock and then through two flip-flops;
+- `rst_ni` asserted at once in both domains and released in each through its own reset synchronizer.
+
+The simulation step then runs `tb/tb_chipleap_cdc.cpp` with two clocks: the register interface and the memory model on X-HEEP's side at the SoC's clock (the design's, or what X-HEEP's SoC meets after routing), the accelerator at `accel_mhz`, its first edge a third of its period after the bus clock's. Every job must be bit-exact. When a request crosses depends on where the two clocks' edges fall, so no count is cycle exact across clocks; the model's crossing term (`chipleap.model.accel.crossed`, [model.md](model.md#the-accelerators-own-clock)) is held to the simulation instead. The test suite runs four accelerators at five pairs of clocks (35 and 90 MHz either way round, 100 and 100 MHz half a period apart, 42.3 and 100, and an odd ratio). Without stalls every count is within 5.5 % of the model's, and with random stalls within 10 %. In the cases simulated with the accelerator's clock the slower, the counts matched the model's cycle for cycle.
+
+The `cdc` step writes the same top as an RTL project, with the design's parameters and both clocks, under `DIR/verify/cdc/`, and runs ChipLeap's CDC and RDC checker on it ([projects.md](projects.md)). It must find every crossing synchronized. For the SmolLM2 example's GEMV 1 x 8 it accepts 18: the handshake's two toggles and the interrupt through synchronizers, the eight gray-coded FIFO pointers, the five fields the handshake carries, the response FIFO's word written straight into the activation and weight buffers, and the two reset synchronizers. The test suite also breaks the crossings on purpose, with the interrupt taken from the accelerator's gate unregistered and with a FIFO's empty flag compared with an unsynchronized pointer, and the checker must report each. On a design without `accel_mhz` the step is skipped: nothing crosses.
 
 ## Synthesis
 

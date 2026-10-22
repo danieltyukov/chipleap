@@ -16,6 +16,8 @@ from chipleap.hw.cpu import CPUModel, get_cpu
 from chipleap.hw.design import Accel, Design
 from chipleap.hw.memory import MEMORIES, ExternalMemory, get_memory
 from chipleap.hw.tech import (
+    ACCEL_CDC_KGE,
+    ACCEL_CDC_PORT_KGE,
     AXI_ADAPTER_KGE,
     Technology,
     accel_bank_kge,
@@ -23,7 +25,7 @@ from chipleap.hw.tech import (
     get_tech,
     soc_signoff_mhz,
 )
-from chipleap.model.accel import Bandwidth, TilingError, job_timing
+from chipleap.model.accel import Bandwidth, TilingError, crossed, job_timing
 from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workload
 
 # X-HEEP's logic outside the CPU, its bus, the memories and the accelerator, as ChipLeap
@@ -97,6 +99,9 @@ class Evaluation:
     clock_mhz: float = 0.0
     soc_limit_mhz: float | None = None  # what X-HEEP's SoC meets, where it was measured
     accel_limit_mhz: float | None = None  # what the accelerator meets on its own
+    # The accelerator's own clock (Design.accel_mhz), behind its crossings; 0 when it runs
+    # on the SoC's.
+    accel_clock_mhz: float = 0.0
 
     @property
     def soc_mhz(self) -> float:
@@ -159,13 +164,19 @@ class _Ctx:
     tech: Technology
     cpu: CPUModel
     mem: ExternalMemory | None
-    f: float  # Hz
+    f: float  # Hz, the SoC's: the CPU, its bus and its DMA
     bw: Bandwidth  # per accelerator cycle
     cpu_dma_ext: float  # bytes per second the X-HEEP DMA moves from external memory
     ext_limit: str  # what caps the accelerator's external stream: memory or its own ports
     frac_on: dict[str, float]
     sram_pj: float
     e_cpu_cycle: float
+    f_acc: float = 0.0  # Hz, the accelerator's own clock; 0 runs it at f
+
+    @property
+    def fa(self) -> float:
+        """The accelerator's clock in Hz."""
+        return self.f_acc or self.f
 
 
 def _bandwidth(
@@ -303,9 +314,11 @@ def _accel_matmul(op: MatMul, c: _Ctx) -> OpResult | None:
     w_ext_bytes = (t.w_bytes + scale_bytes) * (1 - frac)
     act_ext_bytes = (t.x_bytes + t.y_bytes) * (1 - act_on)
     extra_ext_cycles = scale_bytes * (1 - frac) / c.bw.w_ext
-    setup = JOB_SETUP_CYCLES
+    # The CPU programs the job at its own clock: its cycles, in the accelerator's.
+    cpu_per_acc = c.f / c.fa
+    setup = JOB_SETUP_CYCLES / cpu_per_acc
     cycles = t.total + extra_ext_cycles + setup
-    time = cycles * op.count / c.f
+    time = cycles * op.count / c.fa
     tech = c.tech
 
     # The generated PEs multiply 8 x 8 whatever the weight format.
@@ -318,12 +331,12 @@ def _accel_matmul(op: MatMul, c: _Ctx) -> OpResult | None:
         + (t.x_bytes + t.w_bytes + t.buffer_reads) * buf_e
         + onchip * c.sram_pj
         + ext_bytes * 8 * (c.mem.pj_per_bit if c.mem else 0.0)
-        + setup * c.e_cpu_cycle
-        + (t.total - setup) * c.e_cpu_cycle * CPU_IDLE_FRACTION
+        + setup * cpu_per_acc * c.e_cpu_cycle
+        + (t.total - setup) * cpu_per_acc * c.e_cpu_cycle * CPU_IDLE_FRACTION
     ) * op.count
 
     def secs(x: float) -> float:
-        return x * op.count / c.f
+        return x * op.count / c.fa
 
     act_io = t.load_x + t.store
     parts = {
@@ -506,7 +519,8 @@ def area_breakdown(
     area["sram"] = d.banks * bank_mm2(d.bank_kib, tech) + d.il_banks * bank_mm2(d.il_bank_kib, tech)
     if d.accel:
         a = d.accel
-        area["accelerator logic"] = tech.logic_mm2(accel_kge(a, tech))
+        cdc = ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * a.ports if d.accel_mhz else 0.0
+        area["accelerator logic"] = tech.logic_mm2(accel_kge(a, tech) + cdc)
         area["accelerator buffers"] = buffer_mm2(a, tech)
         if d.platform == "standalone":
             area["axi adapter"] = tech.logic_mm2(AXI_ADAPTER_KGE)
@@ -550,16 +564,19 @@ def evaluate(
             "after routing, at the slow corner"
         )
     accel_limit = None
+    # The accelerator's clock: its own (behind its crossings), or the design's, which the
+    # accelerator's paths are timed at even where the SoC runs slower.
+    accel_mhz = design.accel_mhz or design.freq_mhz
 
-    if design.freq_mhz > tech.max_freq_mhz:
+    if max(design.freq_mhz, accel_mhz) > tech.max_freq_mhz:
         violations.add(
-            f"{design.freq_mhz:g} MHz is above the {tech.max_freq_mhz:g} MHz practical at "
-            f"{tech.name}"
+            f"{max(design.freq_mhz, accel_mhz):g} MHz is above the {tech.max_freq_mhz:g} MHz "
+            f"practical at {tech.name}"
         )
     elif design.accel and tech.accel_timing:
         a = design.accel
         limit = accel_limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows)
-        if design.freq_mhz > limit + 1e-9:
+        if accel_mhz > limit + 1e-9:
             violations.add(
                 f"the {a.dataflow} {a.rows}x{a.cols} accelerator with {a.ports} port"
                 f"{'s' if a.ports > 1 else ''} closes timing at about {limit:.0f} MHz on "
@@ -584,6 +601,11 @@ def evaluate(
 
     frac_on, used = _place(workload, design, mem, firmware_kib, violations)
     bw, cpu_dma, ext_limit = _bandwidth(design, mem, f, tech.max_io_mts)
+    f_acc = design.accel_mhz * 1e6
+    if f_acc and design.accel:
+        # On its own clock the accelerator sees the bus's rates and latencies through its
+        # crossings (chipleap.model.accel.crossed).
+        bw = crossed(bw, f_acc / f, design.accel.ports)
     e_cpu = cpu.kge * tech.cpu_pj_per_kge_cycle
     ctx = _Ctx(
         design,
@@ -597,6 +619,7 @@ def evaluate(
         frac_on,
         tech.bank_energy_per_byte(design.bank_kib),
         e_cpu,
+        f_acc,
     )
 
     results: list[OpResult] = []
@@ -652,9 +675,10 @@ def evaluate(
             "interleaved banks: on-chip reads cannot use every port"
         )
 
+    fa = f_acc or f
     bandwidth = {
-        "on-chip": bw.x * f,
-        "external": bw.w_ext * f if mem else 0.0,
+        "on-chip": bw.x * fa,
+        "external": bw.w_ext * fa if mem else 0.0,
     }
     return Evaluation(
         design=design,
@@ -675,4 +699,5 @@ def evaluate(
         clock_mhz=clock,
         soc_limit_mhz=soc_limit,
         accel_limit_mhz=accel_limit,
+        accel_clock_mhz=design.accel_mhz,
     )
