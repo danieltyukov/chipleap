@@ -159,7 +159,8 @@ def test_the_two_clock_constraints_bound_the_crossings_without_clock_groups():
         )
         assert f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]" in sdc
     # Clock groups would take the bound away: OpenSTA reports such a path unconstrained.
-    assert "set_clock_groups" not in sdc and "-datapath_only" not in sdc
+    commands = [ln for ln in sdc.splitlines() if not ln.startswith("#")]
+    assert not any("set_clock_groups" in ln or "-datapath_only" in ln for ln in commands)
     # The ports on X-HEEP's side, timed against its clock; neither clock is a data input.
     assert "set_input_delay $io_delay -clock [get_clocks clk_i] $data_inputs" in sdc
     assert "set clock_inputs [list [get_ports clk_i] [get_ports accel_clk_i]]" in sdc
