@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from chipleap.chip import assemble
+from chipleap.chip import assemble, io
 from chipleap.verify import antenna, drc
 from chipleap.verify import pnr as P
 
@@ -123,6 +123,59 @@ def test_a_deck_run_must_finish_and_agree_with_its_report(
     _runner(monkeypatch, code, items, {})
     with pytest.raises(antenna.AntennaError, match=match):
         antenna.check(_deck(tmp_path), tmp_path / "top.gds", "top", tmp_path / "out", 60.0)
+
+
+def _gate_gds(top: str, poly_um: int) -> bytes:
+    """A 0.13 x 1 um gate whose GatPoly runs on for ``poly_um`` over the field; IHP's Ant.a
+    allows 200 times the gate's area, 260 um of it."""
+    import struct
+
+    def rec(rtype: int, dtype: int, body: bytes = b"") -> bytes:
+        return struct.pack(">HBB", 4 + len(body), rtype, dtype) + body
+
+    def box(layer: int, x0: int, y0: int, x1: int, y1: int) -> bytes:  # nm
+        xy = struct.pack(">10i", x0, y0, x1, y0, x1, y1, x0, y1, x0, y0)
+        return (
+            rec(0x08, 0)
+            + rec(0x0D, 2, struct.pack(">h", layer))
+            + rec(0x0E, 2, struct.pack(">h", 0))
+            + rec(0x10, 3, xy)
+            + rec(0x11, 0)
+        )
+
+    units = bytes([0x3E, 0x41, 0x89, 0x37, 0x4B, 0xC6, 0xA7, 0xF0])  # 1e-3 um
+    meters = bytes([0x39, 0x44, 0xB8, 0x2F, 0xA0, 0x9B, 0x5A, 0x54])  # 1e-9 m
+    name = top.encode() + b"\0" * (len(top) % 2)
+    return (
+        rec(0x00, 2, struct.pack(">h", 600))
+        + rec(0x01, 2, b"\0" * 24)
+        + rec(0x02, 6, b"lib\0")
+        + rec(0x03, 5, units + meters)
+        + rec(0x05, 2, b"\0" * 24)
+        + rec(0x06, 6, name)
+        + box(1, 0, 0, 1000, 1000)  # Activ
+        + box(5, 435, 0, 565, 1000 + 1000 * poly_um)  # GatPoly
+        + rec(0x07, 0)
+        + rec(0x04, 0)
+    )
+
+
+@pytest.mark.skipif(
+    antenna.unavailable(io.pdk_dir()) != "", reason="needs IHP-Open-PDK and KLayout's Python"
+)
+def test_ihps_deck_flags_a_gate_on_a_long_poly_and_says_where(tmp_path):
+    # IHP's own deck, run as signoff runs it: the parts above with no stand-ins.
+    pdk = io.pdk_dir()
+    assert pdk is not None
+    gds = tmp_path / "ant.gds"
+    gds.write_bytes(_gate_gds("ant", 1000))
+    r = antenna.check(pdk, gds, "ant", tmp_path / "out", 600.0)
+    assert r.violations == {"Ant.a": 1}
+    # The marker is the poly over the field, from 1 um to 1001 um.
+    assert r.places["Ant.a"] == [("ant", 0.5, 501.0)]
+    assert antenna.describe(antenna.summary(r), "ant") == "Ant.a at (0.50, 501.00) um"
+    gds.write_bytes(_gate_gds("ant", 100))
+    assert antenna.check(pdk, gds, "ant", tmp_path / "out2", 600.0).total == 0
 
 
 def test_what_the_deck_needs(tmp_path, monkeypatch):
