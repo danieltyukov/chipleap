@@ -740,9 +740,10 @@ def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None
     LibreLane's base SDC would (``chipleap.rtl.pnr.io_lines``), and the two clocks
     asynchronous with each crossing's path bounded.
 
-    In OpenSTA, as LibreLane runs it, ``set_clock_groups -asynchronous`` between the clocks
-    also removes a ``set_max_delay`` on the paths between them (they are reported
-    unconstrained), and ``-datapath_only`` is not a flag. So every path from one clock to
+    In OpenSTA as LibreLane runs it (2.7.0, in both 3.0.0.dev44 and 3.0.14, tried on a
+    two-flop crossing), ``set_clock_groups -asynchronous`` between the clocks also removes
+    a ``set_max_delay`` on the paths between them (they are reported unconstrained), and
+    ``-datapath_only`` is not a flag. So every path from one clock to
     the other gets ``set_max_delay -ignore_clock_latency`` (OpenSTA's datapath-only bound:
     the data path alone, without either clock tree), at the faster clock's period, which
     keeps the bits of a gray-coded pointer within a cycle of each other where they are
@@ -768,7 +769,7 @@ def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None
         *io_lines("clk_i", bus),
         "# The clocks are asynchronous. Each path between them is a crossing the CDC step",
         "# checked; its data path is bounded by the faster clock's period, and it has no hold",
-        "# check.",
+        "# check. Not set_clock_groups: in OpenSTA it drops these bounds.",
         *(
             f"set_max_delay -ignore_clock_latency {bound:g} -from [get_clocks {a}] -to [get_clocks {b}]"
             for a, b in (("clk_i", "accel_clk_i"), ("accel_clk_i", "clk_i"))
