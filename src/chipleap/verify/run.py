@@ -28,7 +28,6 @@ from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.model.evaluate import buffer_mm2, soc_limit_mhz
 from chipleap.rtl import builddir
 from chipleap.verify import backends, crossings, pnr, sim, synth, xheep
-from chipleap.verify.drc import describe_markers
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import clean_env, verilator
@@ -228,8 +227,10 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         "drc_errors": r.drc_errors,
         "lvs_errors": r.lvs_errors,
         "antenna_nets": r.antenna_nets,
+        **r.ihp_antenna_data(),
         "max_slew_violations": r.max_slew_violations,
         "max_cap_violations": r.max_cap_violations,
+        "max_fanout_violations": r.max_fanout_violations,
         **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
         "power_mw": round(r.power_mw, 3),
         "model_cell_um2": round(model_cell),
@@ -261,8 +262,11 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         }
     # Signed off where the model's clock limit for the node is measured: setup at the slow
     # corner (1.08 V, 125 C), hold at every corner. The typical corner is reported beside it.
+    # Antenna violations fail the step, as they do a project's and a chip's, and so do slew
+    # and capacitance violations at any corner, as they do a project's; fanout is reported.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
-    checks, signed = _checks(r)
+    clean = r.checks_clean
+    checks = r.checks()
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
@@ -284,24 +288,7 @@ def place_route(design: Design, workdir: Path) -> StepResult:
             )
     elif r.buffers:
         msg += f"; {r.buffers}"
-    return StepResult("pnr", "pass" if met and signed else "fail", msg, data)
-
-
-def _checks(r: pnr.PnrResult) -> tuple[str, bool]:
-    """The layout's checks for a summary, and whether they sign it off: DRC and LVS, and
-    the slew and capacitance limits STA checks at every corner. Antenna violations are
-    reported."""
-    text = "DRC and LVS clean" if r.clean else f"{r.drc_errors} DRC and {r.lvs_errors} LVS errors"
-    if r.antenna_nets:
-        text += f", {r.antenna_nets} antenna violations"
-    drv = r.max_slew_violations + r.max_cap_violations
-    if drv:
-        text += f", {r.max_slew_violations} slew and {r.max_cap_violations} capacitance violations"
-    else:
-        text += ", no slew or capacitance violations"
-    if r.pin_markers:
-        text += f"; {describe_markers(r.pin_markers)}"
-    return text, r.clean and drv == 0
+    return StepResult("pnr", "pass" if met and clean else "fail", msg, data)
 
 
 def corner_slacks(metrics: dict[str, Any]) -> dict[str, dict[str, float]]:
@@ -394,8 +381,10 @@ def soc_step_result(design: Design, s: SocResult, runtime_s: float) -> StepResul
         "drc_errors": r.drc_errors,
         "lvs_errors": r.lvs_errors,
         "antenna_nets": r.antenna_nets,
+        **r.ihp_antenna_data(),
         "max_slew_violations": r.max_slew_violations,
         "max_cap_violations": r.max_cap_violations,
+        "max_fanout_violations": r.max_fanout_violations,
         **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
         "power_mw": round(r.power_mw, 3),
         "macros": [{"instance": i, "cell": c} for i, c in s.macros],
@@ -408,7 +397,7 @@ def soc_step_result(design: Design, s: SocResult, runtime_s: float) -> StepResul
         "gds": str(r.gds) if r.gds else None,
     }
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
-    checks, signed = _checks(r)
+    checks = r.checks()
     msg = (
         f"X-HEEP with the accelerator, placed and routed on IHP SG13G2: "
         f"{r.core_um2 / 1e6:.3f} mm2 core at {r.utilisation * 100:.0f}% utilisation, "
@@ -428,7 +417,7 @@ def soc_step_result(design: Design, s: SocResult, runtime_s: float) -> StepResul
             f"place and route adds {(r.cell_um2 / r.synth_cell_um2 - 1) * 100:.0f}% "
             f"({r.cell_um2 / 1e6:.3f} mm2)"
         )
-    return StepResult("soc", "pass" if met and signed else "fail", msg, data)
+    return StepResult("soc", "pass" if met and r.checks_clean else "fail", msg, data)
 
 
 def _count(n: object, noun: str) -> str:
@@ -568,13 +557,12 @@ def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | No
     # Setup is signed off at the slowest corner given (the slow liberty, when there is one),
     # as in the LibreLane step; hold at every corner.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
+    clean = r.clean and r.antenna_nets == 0
     checks = (
-        "DRC and connectivity clean"
-        if r.clean
-        else f"{r.drc_errors} DRC and {r.lvs_errors} connectivity violations"
+        "DRC, connectivity and antenna clean"
+        if clean
+        else f"{r.drc_errors} DRC, {r.lvs_errors} connectivity and {r.antenna_nets} antenna violations"
     )
-    if r.antenna_nets:
-        checks += f", {r.antenna_nets} antenna violations"
     corner = (
         f"at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz "
         "at the typical one)"
@@ -586,7 +574,7 @@ def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | No
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
         f"{'met' if met else 'missed'} {corner}; {checks}"
     )
-    return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)
+    return StepResult("pnr", "pass" if met and clean else "fail", msg, data)
 
 
 def verify_bundle(

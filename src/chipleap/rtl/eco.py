@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chipleap.chip import io
 from chipleap.rtl import builddir, macros
 from chipleap.rtl import quote as q
 from chipleap.rtl.openroad import (
@@ -51,11 +52,10 @@ from chipleap.rtl.openroad import (
     routed_views,
     run_dir,
 )
-from chipleap.rtl.pnr import SDC_NAME, margins, pnr_data
+from chipleap.rtl.pnr import PNR_SDC_NAME, SDC_NAME, margins, pnr_data
 from chipleap.rtl.project import CORNERS, EcoChange, Project
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.verify import launch
-from chipleap.verify.drc import describe_markers
 from chipleap.verify.pnr import (
     DEF_TO_ODB,
     DETAILED_ROUTING,
@@ -69,6 +69,8 @@ from chipleap.verify.pnr import (
     patch_min_area,
     second_part_result,
     step_state,
+    with_ihp_antenna,
+    with_late_antenna_repair,
 )
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import (
@@ -84,6 +86,10 @@ RESUME_AT = "OpenROAD.DetailedRouting"
 # global routing for the nets that changed.
 PREFIX = ("OpenROAD.DEFtoODB", "OpenROAD.DetailedPlacement", "OpenROAD.GlobalRouting")
 REPAIR = "OpenROAD.ResizerTimingPostGRT"
+# The flow a routed run's configuration names: LibreLane's Classic flow with antennas
+# repaired again after the timing repair (chipleap.verify.pnr.run_librelane). An ECO writes
+# its own step list instead.
+ROUTED_META = with_late_antenna_repair({"RUN_POST_GRT_RESIZER_TIMING": True})["meta"]
 STEP_ID_RE = re.compile(r"[A-Z][A-Za-z]*\.[A-Z][A-Za-z0-9]*")
 # The LibreLane variables ChipLeap's place and route writes (chipleap.rtl.pnr.config and
 # chipleap.verify.pnr.signoff), by the kind of value each takes. An ECO resumes LibreLane
@@ -406,9 +412,18 @@ def _plain_text(key: str, value: Any) -> str:
 def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str, Any]:
     """The routed run's configuration as an ECO passes it on: only ``TEMPLATE_KEYS`` and
     the project's own numeric or boolean ``pnr.librelane`` settings, each with a plain
-    value, and every file it names one the run recorded beside it, unchanged."""
+    value, and every file it names one the run recorded beside it, unchanged. Its flow
+    (``ROUTED_META``, the only one accepted) is left out for the ECO's own."""
     out = dict(cfg)
     for key, value in cfg.items():
+        if key == "meta":
+            if value != ROUTED_META:
+                raise EcoError(
+                    f"the routed run's configuration sets meta to {value!r}, not the flow "
+                    "ChipLeap's place and route writes; run the pnr step again"
+                )
+            del out[key]
+            continue
         kind = TEMPLATE_KEYS.get(key)
         if kind == "macros":
             _macros(value, sealed)
@@ -513,7 +528,7 @@ def _recorded(key: str, item: Any, kind: str, sealed: Sealed) -> None:
         not item.startswith("dir::")
         or rel.is_absolute()
         or ".." in rel.parts
-        or not (rel.parts[:1] == ("src",) or text == SDC_NAME)
+        or not (rel.parts[:1] == ("src",) or text in (SDC_NAME, PNR_SDC_NAME))
     ):
         raise EcoError(
             f"the routed run's configuration sets {key} to {item!r}, not a file ChipLeap "
@@ -529,7 +544,8 @@ def eco_config(
     project: Project, changes: list[EcoChange], steps: list[str], sealed: Sealed
 ) -> dict[str, Any]:
     """The configuration the ECO resumes LibreLane with: the routed run's recorded one,
-    through ``_settings``, with the step list and, for a repair, the margins it asks for."""
+    through ``_settings``, with the step list and, for a repair, the margins it asks for
+    and antennas repaired after it, as in place and route."""
     cfg = _settings(project, _read(sealed, sealed.root / "config.json"), sealed)
     flow = list(PREFIX)
     repairs = [c for c in changes if c.kind == "repair"]
@@ -553,7 +569,7 @@ def eco_config(
             raise EcoError(f"the routed run names a step ChipLeap does not know: {step!r}")
     flow += steps
     cfg["meta"] = {"version": 2, "flow": flow}
-    return cfg
+    return with_late_antenna_repair(cfg)
 
 
 def _run_librelane(
@@ -676,6 +692,7 @@ def apply_eco(project: Project, changes: list[EcoChange]) -> EcoResult:
             klayout_drc(sealed_metrics, report and _check(sealed, report, "DRC report"), held),
         )
         after = parse_run(metrics, mhz, gds, run_dir_of(work), held)
+        after = with_ihp_antenna(after, io.pdk_dir(), project.top, edit_dir)
     except PnrError as exc:
         raise EcoError(str(exc)) from None
     record = []
@@ -709,15 +726,9 @@ def eco_data(project: Project, r: EcoResult) -> dict[str, Any]:
 def summarize(project: Project, r: EcoResult) -> tuple[str, str]:
     a, b = r.after, r.before
     met = a.setup_slack_ns >= 0 and a.hold_slack_ns >= 0
-    clean = a.clean and a.antenna_nets == 0
+    clean = a.checks_clean
     n = len(r.changes)
-    checks = (
-        "DRC, LVS and antenna clean"
-        if clean
-        else f"{a.drc_errors} DRC, {a.lvs_errors} LVS and {a.antenna_nets} antenna violations"
-    )
-    if a.pin_markers:
-        checks += f"; {describe_markers(a.pin_markers)}"
+    checks = a.checks()
     msg = (
         f"{n} change{'s' if n != 1 else ''} applied and signed off again: setup slack at the "
         f"slow corner {b.setup_slack_ns:+.3f} to {a.setup_slack_ns:+.3f} ns, hold "

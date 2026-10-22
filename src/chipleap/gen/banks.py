@@ -18,6 +18,8 @@ from dataclasses import dataclass
 
 from chipleap.gen.rtl import rtl_params
 from chipleap.hw.design import Accel
+from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
+from chipleap.macro import place
 from chipleap.macro.sram import Bank, Sram, choose, ports
 
 TOP = "chipleap_accel_sram"
@@ -100,6 +102,54 @@ def plan(accel: Accel, srams: Iterable[Sram]) -> Banks:
         _bits(a_words),
         _bits(w_words),
     )
+
+
+def cell_um2(accel: Accel, banked: bool = True) -> float:
+    """The model's standard-cell area for ``accel``'s logic on SG13G2; ``banked`` for a
+    macro-backed build, whose logic also has its banks' interface."""
+    kge = accel_logic_kge(accel.dataflow, accel.rows, accel.cols, accel.ports)
+    if banked:
+        kge += accel_bank_kge(accel.rows, accel.cols, accel.double_buffer)
+    return kge * 1000 * get_tech("ihp-sg13g2").ge_um2
+
+
+def floorplan(accel: Accel, srams: Iterable[Sram]) -> place.Floorplan:
+    """ChipLeap's floorplan of ``accel``'s macros from ``srams`` (``chipleap.macro.place``):
+    two rows, the band between them sized for the macro build's logic."""
+    b = plan(accel, srams)
+    dims = {m.cell: (m.width_um, m.height_um) for m in b.cells()}
+    return place.rows(
+        [place.Macro(inst, *dims[cell]) for inst, cell in b.instances()], cell_um2(accel)
+    )
+
+
+# The flattest macro floorplan that routed: the GEMV 2 x 8 build's two rows of three 784 um
+# macros, a core of 2444 x 658 um (3.7 to 1). The GEMV 1 x 16's two rows of four (two
+# 64 x 64 macros for each 16-byte bank word) made a core of 3249 x 438 um (7.4 to 1): at
+# 45 % utilisation its global routing overflowed, and at 35 % repair after placement
+# buffered 10,000 long wires and detailed placement failed.
+MAX_ASPECT = 4.0
+
+
+def too_flat(accel: Accel, srams: Iterable[Sram]) -> str | None:
+    """Why ChipLeap's floorplan of ``accel``'s macros does not route, or None when it does."""
+    fp = floorplan(accel, srams)
+    x0, y0, x1, y1 = fp.core
+    w, h = x1 - x0, y1 - y0
+    if w / h <= MAX_ASPECT:
+        return None
+    return (
+        f"its {len(fp.macros)} macros, in two rows, leave a core of {w:.0f} x {h:.0f} um "
+        f"({w / h:.1f} to 1), too flat to route (at most {MAX_ASPECT:g} to 1)"
+    )
+
+
+def layout_reason(accel: Accel, srams: Iterable[Sram]) -> str | None:
+    """Why a layout of ``accel`` cannot hold its buffers in macros of ``srams``: the build
+    cannot take them (``unsupported``) or their floorplan does not route (``too_flat``).
+    None when it can. Place and route (``chipleap.verify.pnr``) and the model
+    (``chipleap.model.evaluate``) both decide by it."""
+    return unsupported(accel) or too_flat(accel, srams)
 
 
 def bank_macros(
