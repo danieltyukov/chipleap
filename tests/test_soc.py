@@ -368,7 +368,11 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     # A buffer beside each of the accelerator's four macros drives its clock pin.
     accel = {i for i, _ in prep.instances if i.startswith(f"{soc.ACCEL_INST}.")}
     assert len(accel) == 4
-    assert {e["target"] for e in full["INSERT_ECO_BUFFERS"]} == {f"{i}/A_CLK" for i in accel}
+    clock = {e["target"] for e in full["INSERT_ECO_BUFFERS"] if e["target"].endswith("/A_CLK")}
+    assert clock == {f"{i}/A_CLK" for i in accel}
+    # And one after each of the 32 output bits of the eight bank macros.
+    outs = [e for e in full["INSERT_ECO_BUFFERS"] if "/A_DOUT[" in e["target"]]
+    assert len(outs) == 256 and {e["buffer"] for e in outs} == {"sg13g2_buf_2"}
     # More standard cells, a larger core.
     _, small = soc_step.with_floorplan(cfg, prep, 1.0e6, work)
     assert small.core_um2 < fp.core_um2
@@ -676,3 +680,43 @@ def test_the_layout_stops_after_the_clock_tree_to_buffer_the_gates(tmp_path, mon
     calls.clear()
     with pytest.raises(soc_step.SocError, match="names no DEF in its run"):
         soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [], "_outside": True})
+
+
+def test_each_bank_output_gets_a_buffer_beside_its_pin():
+    """X-HEEP's bank macros' A_DOUT bits each get a buffer just past the halo beside the
+    pin (below a macro of the top row, above one of the bottom row); the accelerator's
+    macros get none; a bank macro without A_DOUT pins stops the step."""
+    from chipleap.macro import place
+    from chipleap.macro.layer import MacroPin, MacroView
+
+    p = Path("x")
+    pins = (
+        MacroPin("A_DOUT[0]", "output", "signal", (("Metal2", (10.62, 0.0, 10.88, 0.26)),)),
+        MacroPin("A_DOUT[31]", "output", "signal", (("Metal2", (405.76, 0.0, 406.02, 0.26)),)),
+        MacroPin("A_CLK", "input", "signal", (("Metal2", (200.0, 0.0, 200.26, 0.26)),)),
+    )
+    bank = MacroView("RM_B", "pdk", 416.64, 336.46, pins, p, p, p, p, ("RM_B",), ("RM_B",))
+    top, bottom = f"{soc.MCU_INST}.bank_m6", f"{soc.MCU_INST}.bank_m7"
+    fp = place.Floorplan(
+        (3426.72, 2192.4),
+        (20.16, 22.68, 3406.56, 2169.72),
+        (
+            place.Placed(top, 2543.04, 1823.26, "N"),
+            place.Placed(bottom, 2979.84, 32.68, "FS"),
+            place.Placed(f"{soc.ACCEL_INST}.abuf_s0_m0", 60.48, 2040.94, "N"),
+        ),
+    )
+    eco = soc_step.bank_output_buffers(fp, {m.instance: bank for m in fp.macros})
+    off = place.HALO_UM + soc_step.CLOCK_PIN_GAP_UM
+    assert [e["target"] for e in eco] == [
+        f"{top}/A_DOUT[0]",
+        f"{top}/A_DOUT[31]",
+        f"{bottom}/A_DOUT[0]",
+        f"{bottom}/A_DOUT[31]",
+    ]
+    assert eco[0]["placement"] == [2553.79, round(1823.26 - off, 3)]
+    assert eco[3]["placement"] == [3385.73, round(32.68 + 336.46 + off, 3)]
+    assert {e["buffer"] for e in eco} == {"sg13g2_buf_2"}
+    bare = MacroView("RM_C", "pdk", 10.0, 10.0, pins[2:], p, p, p, p, ("RM_C",), ("RM_C",))
+    with pytest.raises(soc_step.SocError, match="have no A_DOUT"):
+        soc_step.bank_output_buffers(fp, {m.instance: bare for m in fp.macros})

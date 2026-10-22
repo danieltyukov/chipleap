@@ -614,16 +614,59 @@ def clock_pin_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> li
         at = _pin_at(p, view, SRAM_CLOCK_PIN)
         if at is None:
             raise SocError(f"{view.cell} has no {SRAM_CLOCK_PIN} pin")
-        x, y = at
-        off = place.HALO_UM + CLOCK_PIN_GAP_UM
-        y = p.y - off if y - p.y < view.height / 2 else p.y + view.height + off
-        out.append(
-            {
-                "target": f"{p.instance}/{SRAM_CLOCK_PIN}",
-                "buffer": CLOCK_PIN_BUFFER,
-                "placement": [round(x, 3), round(y, 3)],
-            }
-        )
+        out.append(_beside(p, view, SRAM_CLOCK_PIN, at, CLOCK_PIN_BUFFER))
+    return out
+
+
+def _beside(
+    p: place.Placed, view: MacroView, pin: str, at: tuple[float, float], buffer: str
+) -> dict[str, Any]:
+    """An ``INSERT_ECO_BUFFERS`` entry for ``buffer`` at ``pin`` of the placed macro ``p``
+    (the pin at ``at``), just past the halo off the macro's edge where the pin is."""
+    x, y = at
+    off = place.HALO_UM + CLOCK_PIN_GAP_UM
+    y = p.y - off if y - p.y < view.height / 2 else p.y + view.height + off
+    return {
+        "target": f"{p.instance}/{pin}",
+        "buffer": buffer,
+        "placement": [round(x, 3), round(y, 3)],
+    }
+
+
+# What drives a bank's output wire from beside the macro (0.6 pF limit, about ten times
+# the most a routed bank output carried).
+BANK_OUTPUT_BUFFER = "sg13g2_buf_2"
+BANK_OUTPUT_PIN = "A_DOUT["
+
+
+def bank_output_buffers(
+    fp: place.Floorplan, views: Mapping[str, MacroView]
+) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer after each output bit of X-HEEP's bank
+    macros (``views`` by instance), placed just off the macro's edge beside the pin.
+
+    A bank's 32 output bits run side by side on Metal3 for about 230 um, and the global
+    router's estimate, which the repairs work against, has the layers' capacitance from
+    the LEF without the coupling between neighbours: on the SmolLM2 SoC routed at 36 MHz,
+    the 256 bank outputs carried a median 1.19 times and at most 2.39 times their
+    estimate, over the same length of wire (bank_m6's A_DOUT[4]: 0.0288 pF estimated,
+    0.0687 pF routed, against the macro's 0.064 pF). A design-wide limit would buffer
+    every heavy net of X-HEEP, and OpenSTA does not apply a limit set on the macros' pins
+    to them. With a buffer beside the pin, the macro drives a few um and the buffer the
+    wire."""
+    out: list[dict[str, Any]] = []
+    for p in fp.macros:
+        if not p.instance.startswith(f"{soc.MCU_INST}."):
+            continue
+        view = views[p.instance]
+        for mp in view.pins:
+            if not mp.name.startswith(BANK_OUTPUT_PIN):
+                continue
+            at = _pin_at(p, view, mp.name)
+            if at is not None:
+                out.append(_beside(p, view, mp.name, at, BANK_OUTPUT_BUFFER))
+    if any(p.instance.startswith(f"{soc.MCU_INST}.") for p in fp.macros) and not out:
+        raise SocError(f"X-HEEP's bank macros have no {BANK_OUTPUT_PIN}...] pins")
     return out
 
 
@@ -631,10 +674,12 @@ def with_floorplan(
     cfg: dict[str, Any], prep: Prepared, cell_um2: float, work: Path
 ) -> tuple[dict[str, Any], place.Floorplan]:
     """``cfg`` with a floorplan for ``cell_um2`` of standard cells: the die, the macros
-    where ChipLeap puts them, their power grid (``pdn.tcl``) and the buffers at the
-    accelerator's macros' clock pins (``clock_pin_buffers``)."""
+    where ChipLeap puts them, their power grid (``pdn.tcl``) and the buffers beside the
+    accelerator's macros' clock pins and X-HEEP's banks' outputs (``clock_pin_buffers``,
+    ``bank_output_buffers``)."""
     fp = floorplan(prep.instances, prep.views, cell_um2)
     by_inst = dict(prep.instances)
+    by_instance = {i: prep.views[c].view for i, c in prep.instances}
     placements = [
         grid.Placement(p.instance, prep.views[by_inst[p.instance]].view, p.x, p.y, p.orient)
         for p in fp.macros
@@ -651,9 +696,10 @@ def with_floorplan(
         "DIE_AREA": [0, 0, *fp.die],
         "CORE_AREA": list(fp.core),
         "MACROS": macros,
-        "INSERT_ECO_BUFFERS": clock_pin_buffers(
-            fp, {i: prep.views[c].view for i, c in prep.instances}
-        ),
+        "INSERT_ECO_BUFFERS": [
+            *clock_pin_buffers(fp, by_instance),
+            *bank_output_buffers(fp, by_instance),
+        ],
     }
     netlists = sorted((work / "runs" / "chipleap").glob("*-yosys-synthesis/*.nl.v"))
     if netlists:
