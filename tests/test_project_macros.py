@@ -417,7 +417,8 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
     monkeypatch.setattr(pnr, "check_merged", lambda *a: {})
     items: list[tuple[str, str]] = []
 
-    def run(workdir, cfg, tag="chipleap"):
+    def run(workdir, cfg, tag="chipleap", *, late_antenna_repair=False):
+        assert late_antenna_repair  # every layout but the SoC's repairs antennas twice
         (workdir / "config.json").write_text("{}")
         reports = workdir / "runs" / tag / "66-klayout-drc" / "reports"
         reports.mkdir(parents=True, exist_ok=True)

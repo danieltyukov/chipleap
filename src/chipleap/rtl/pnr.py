@@ -373,7 +373,7 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     if (why := macros.unsupported(project, "dft")) and project.dft and project.dft.insert:
         raise PnrError(f"scan insertion (dft.insert): {why}")
     cfg = config(project, work)
-    metrics, gds = run_librelane(work, cfg, RUN_TAG)
+    metrics, gds = run_librelane(work, cfg, RUN_TAG, late_antenna_repair=True)
     if project.macros:
         check_merged(work / "runs" / RUN_TAG, work, project.top)
     seal_routed(work, bool(project.macros))

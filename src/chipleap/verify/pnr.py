@@ -324,17 +324,26 @@ def second_part_result(
 
 
 def run_librelane(
-    workdir: Path, cfg: dict[str, Any], tag: str = "chipleap"
+    workdir: Path,
+    cfg: dict[str, Any],
+    tag: str = "chipleap",
+    *,
+    late_antenna_repair: bool = False,
 ) -> tuple[dict[str, Any], Path | None]:
-    """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``,
-    with antennas repaired again after the timing repair (``with_late_antenna_repair``).
+    """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
     Returns the final metrics and the GDS.
 
     LibreLane runs in two parts, in one run directory: up to detailed routing, then the
     rest. Between them, routed shapes under a layer's minimum area get a patch
     (``chipleap.verify.minarea``): the router leaves one now and then, and it would fail
     signoff. The patched layout goes back into LibreLane's database through
-    ``OpenROAD.DEFtoODB`` and the rest of the flow runs on it, signoff included."""
+    ``OpenROAD.DEFtoODB`` and the rest of the flow runs on it, signoff included.
+
+    With ``late_antenna_repair``, antennas are repaired again after the timing repair
+    (``with_late_antenna_repair``). The accelerator, an RTL project and a chip ask for it
+    (an ECO adds it to its own step list). The SoC step does not yet: the runs its
+    results stand on were routed without it, and it turns it on once a SoC run with it
+    has been checked."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
@@ -343,7 +352,8 @@ def run_librelane(
         env = librelane_env()
     except ValueError as exc:
         raise PnrError(str(exc)) from None
-    cfg = with_late_antenna_repair(cfg)
+    if late_antenna_repair:
+        cfg = with_late_antenna_repair(cfg)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
     base = [tool.path, *pdk_args, "--run-tag", tag]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
@@ -463,11 +473,12 @@ def with_def_to_odb(cfg: dict[str, Any]) -> dict[str, Any]:
 # routed again; nothing checks those nets until the detailed router's own repair. In the
 # SmolLM2 accelerator's layout a hold buffer's input (a dlygate4sd3_1) was left on a Metal2
 # island at a cumulative ratio of 312.72 against 200, out of reach of the router's diodes,
-# which joined only through Metal3. So every layout ChipLeap routes with LibreLane repairs
-# antennas once more after the timing repair: in that layout the second repair found 35
-# nets over the ratios and fixed them with 40 jumpers and 17 diodes, the routed design was
-# clean under OpenROAD's antenna check and IHP's rule deck, and its slack at the slow
-# corner moved by +0.004 ns.
+# which joined only through Metal3. So every layout ChipLeap routes with LibreLane but the
+# SoC's (``run_librelane``) repairs antennas once more after the timing repair: in that
+# layout the second repair found 35 nets over the ratios and fixed them with 40 jumpers and
+# 17 diodes, the routed design was clean under OpenROAD's antenna check and IHP's rule
+# deck, and its slack at the slow corner moved by +0.004 ns. It puts no diode on a clock
+# net there; the detailed router's own repair put 10 on one (see docs/verification.md).
 TIMING_REPAIR = "OpenROAD.ResizerTimingPostGRT"
 ANTENNA_REPAIR = "OpenROAD.RepairAntennas"
 
@@ -600,11 +611,11 @@ def place_and_route(
     reason = sram_reason(accel, pdk)
     run = workdir / "runs" / "chipleap"
     if reason is not None or pdk is None:
-        metrics, gds = run_librelane(workdir, config(accel, clock_mhz))
+        metrics, gds = run_librelane(workdir, config(accel, clock_mhz), late_antenna_repair=True)
         result = parse_run(metrics, clock_mhz, gds, run, {})
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
     cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
-    metrics, gds = run_librelane(workdir, cfg)
+    metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
     from chipleap.rtl.pnr import check_merged
 
     check_merged(run, workdir, banks.TOP)
