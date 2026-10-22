@@ -215,13 +215,15 @@ def _flagged(tmp_path) -> drc.DrcResult:
 def test_place_and_route_fails_on_the_decks_violations_and_says_where(tmp_path):
     clean = replace(ROUTED, ihp_antenna=drc.DrcResult(top="top"))
     assert clean.checks_clean
-    assert clean.checks() == "DRC, LVS and antenna clean, IHP's antenna deck included"
+    assert clean.checks() == (
+        "DRC, LVS and antenna clean, IHP's antenna deck included, no slew or capacitance violations"
+    )
     assert clean.ihp_antenna_data() == {"ihp_antenna": {"violations": 0, "rules": {}, "places": {}}}
     flagged = replace(ROUTED, ihp_antenna=_flagged(tmp_path))
     assert not flagged.checks_clean
     assert flagged.checks() == (
-        "0 DRC, 0 LVS and 0 antenna violations; IHP's antenna deck: 1 violation, "
-        "Ant.b_Metal5 at (953.23, 168.96) um"
+        "0 DRC, 0 LVS and 0 antenna violations, 0 slew and 0 capacitance violations; "
+        "IHP's antenna deck: 1 violation, Ant.b_Metal5 at (953.23, 168.96) um"
     )
     assert flagged.ihp_antenna_data()["ihp_antenna"]["places"] == {
         "Ant.b_Metal5": [{"cell": "top", "x_um": 953.23, "y_um": 168.955}]
@@ -229,13 +231,15 @@ def test_place_and_route_fails_on_the_decks_violations_and_says_where(tmp_path):
     skipped = replace(ROUTED, ihp_antenna_skipped="no IHP PDK (CHIPLEAP_IHP_PDK)")
     assert skipped.checks_clean
     assert skipped.checks() == (
-        "DRC, LVS and antenna clean; IHP's antenna deck not run: no IHP PDK (CHIPLEAP_IHP_PDK)"
+        "DRC, LVS and antenna clean, no slew or capacitance violations; "
+        "IHP's antenna deck not run: no IHP PDK (CHIPLEAP_IHP_PDK)"
     )
     assert skipped.ihp_antenna_data() == {
         "ihp_antenna": {"skipped": "no IHP PDK (CHIPLEAP_IHP_PDK)"}
     }
     # A flow that does not run it (Innovus) says nothing about it.
-    assert ROUTED.checks() == "DRC, LVS and antenna clean" and ROUTED.ihp_antenna_data() == {}
+    assert ROUTED.checks() == "DRC, LVS and antenna clean, no slew or capacitance violations"
+    assert ROUTED.ihp_antenna_data() == {}
 
 
 def test_place_and_route_runs_the_deck_on_its_gds(tmp_path, monkeypatch):

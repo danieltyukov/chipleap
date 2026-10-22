@@ -200,6 +200,9 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         "lvs_errors": r.lvs_errors,
         "antenna_nets": r.antenna_nets,
         **r.ihp_antenna_data(),
+        "max_slew_violations": r.max_slew_violations,
+        "max_cap_violations": r.max_cap_violations,
+        "max_fanout_violations": r.max_fanout_violations,
         **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
         "power_mw": round(r.power_mw, 3),
         "model_cell_um2": round(model_cell),
@@ -231,7 +234,8 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         }
     # Signed off where the model's clock limit for the node is measured: setup at the slow
     # corner (1.08 V, 125 C), hold at every corner. The typical corner is reported beside it.
-    # Antenna violations fail the step, as they do a project's and a chip's.
+    # Antenna violations fail the step, as they do a project's and a chip's, and so do slew
+    # and capacitance violations at any corner, as they do a project's; fanout is reported.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     clean = r.checks_clean
     checks = r.checks()

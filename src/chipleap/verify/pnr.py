@@ -72,6 +72,9 @@ class PnrResult:
     macro_um2: float = 0.0
     buffers: str = ""  # what the buffers are in the layout, and why when they are flops
     synth_cell_um2: float = 0.0  # LibreLane's synthesis, before placement's repairs
+    max_slew_violations: int = 0  # pins over their slew limit, at any corner
+    max_cap_violations: int = 0  # nets over their capacitance limit, at any corner
+    max_fanout_violations: int = 0  # drivers over their fanout limit, at any corner
     # Off-grid pin markers inside the PDK's own macros, left out of drc_errors
     # (``chipleap.verify.drc``): rule, cell, the macros that hold it, count.
     pin_markers: list[dict[str, Any]] = field(default_factory=list)
@@ -86,23 +89,36 @@ class PnrResult:
 
     @property
     def checks_clean(self) -> bool:
-        """DRC and LVS clean, and antenna clean under OpenROAD's check and IHP's deck."""
+        """DRC and LVS clean, antenna clean under OpenROAD's check and IHP's deck, and no
+        pin or net over its slew or capacitance limit at any corner. A driver over its
+        fanout limit does not count: fanout is a constraint for the repairs, and the slew
+        and capacitance limits carry what it costs (a diode the router adds is a load to
+        the count and switches nothing)."""
         ihp = self.ihp_antenna
-        return self.clean and self.antenna_nets == 0 and (ihp is None or ihp.total == 0)
+        return (
+            self.clean
+            and self.antenna_nets == 0
+            and (ihp is None or ihp.total == 0)
+            and self.max_slew_violations == 0
+            and self.max_cap_violations == 0
+        )
 
     def checks(self) -> str:
         """The checks for a step's summary: DRC, LVS and OpenROAD's antenna counts, IHP's
-        antenna deck's violations with their rules and places, or why it did not run, and
-        the pin markers set apart."""
+        antenna deck's violations with their rules and places, or why it did not run, the
+        slew and capacitance violations, the drivers over their fanout limit (reported
+        only), and the pin markers set apart."""
         ihp = self.ihp_antenna
         if self.checks_clean:
             text = "DRC, LVS and antenna clean"
             if ihp is not None:
                 text += ", IHP's antenna deck included"
+            text += ", no slew or capacitance violations"
         else:
             text = (
                 f"{self.drc_errors} DRC, {self.lvs_errors} LVS and {self.antenna_nets} "
-                "antenna violations"
+                f"antenna violations, {self.max_slew_violations} slew and "
+                f"{self.max_cap_violations} capacitance violations"
             )
         if ihp is not None and ihp.total:
             n = ihp.total
@@ -112,6 +128,8 @@ class PnrResult:
             )
         elif ihp is None and self.ihp_antenna_skipped:
             text += f"; IHP's antenna deck not run: {self.ihp_antenna_skipped}"
+        if n := self.max_fanout_violations:
+            text += f"; {n} driver{'s' if n != 1 else ''} over the fanout limit (reported only)"
         if self.pin_markers:
             text += f"; {describe_markers(self.pin_markers)}"
         return text
@@ -212,6 +230,19 @@ def _worst(metrics: dict[str, Any], prefix: str) -> float:
     return min(vals) if vals else 0.0
 
 
+def _violations(metrics: dict[str, Any], prefix: str) -> int:
+    """The largest of a violation count overall and at each corner."""
+    vals = [
+        v
+        for k, v in metrics.items()
+        if (k == prefix or k.startswith(prefix + "__corner:"))
+        and isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+    ]
+    return int(max(vals, default=0))
+
+
 def _corner(metrics: dict[str, Any], prefix: str, corner: str) -> float | None:
     for k, v in metrics.items():
         if k.startswith(prefix + "__corner:") and corner in k and isinstance(v, (int, float)):
@@ -245,6 +276,9 @@ def parse(
         power_mw=_num(metrics, "power__total") * 1000,
         gds=gds,
         metrics=metrics,
+        max_slew_violations=_violations(metrics, "design__max_slew_violation__count"),
+        max_cap_violations=_violations(metrics, "design__max_cap_violation__count"),
+        max_fanout_violations=_violations(metrics, "design__max_fanout_violation__count"),
         pin_markers=klayout.markers_data() if klayout else [],
     )
 

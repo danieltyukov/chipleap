@@ -421,12 +421,6 @@ def seal_routed(work: Path, with_macros: bool = False) -> Sealed:
 
 
 def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
-    m = r.metrics
-
-    def count(key: str) -> int:
-        v = m.get(key)
-        return int(v) if isinstance(v, (int, float)) else 0
-
     return {
         "tool": "LibreLane",
         "technology": project.tech,
@@ -446,8 +440,9 @@ def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
         "antenna_nets": r.antenna_nets,
         **r.ihp_antenna_data(),
         **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
-        "max_slew_violations": count("design__max_slew_violation__count"),
-        "max_cap_violations": count("design__max_cap_violation__count"),
+        "max_slew_violations": r.max_slew_violations,
+        "max_cap_violations": r.max_cap_violations,
+        "max_fanout_violations": r.max_fanout_violations,
         "power_mw": round(r.power_mw, 4),
         "gds": project.rel(r.gds) if r.gds else None,
         **(
@@ -464,7 +459,8 @@ def pnr_data(project: Project, r: PnrResult) -> dict[str, Any]:
 @runs_tools
 def pnr(project: Project) -> StepResult:
     """The place-and-route step: passes when setup is met at the slow corner, hold at every
-    corner, and DRC, LVS and antenna checks are clean."""
+    corner, DRC, LVS and antenna checks are clean, and no pin or net is over its slew or
+    capacitance limit at any corner."""
     try:
         r = place_route(project)
     except PnrError as exc:

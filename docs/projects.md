@@ -166,7 +166,7 @@ The `macros` section lists the hard macros the RTL instantiates by their cell na
 | `formal` | SymbiYosys on the design's own assertions, assumptions and covers | every assertion holds and every cover is reached |
 | `cdc` | ChipLeap's clock and reset domain crossing checker on a Yosys netlist | no error that is not waived |
 | `synth` | Yosys on the technology's standard cells | the design maps |
-| `pnr` | LibreLane on IHP SG13G2, then IHP's antenna deck on the GDS | setup met at the slow corner, hold at every corner, DRC, LVS and antenna clean (OpenROAD's check and IHP's deck) |
+| `pnr` | LibreLane on IHP SG13G2, then IHP's antenna deck on the GDS | setup met at the slow corner, hold at every corner, DRC, LVS and antenna clean (OpenROAD's check and IHP's deck), no slew or capacitance violations at any corner; fanout reported |
 | `equiv` | Yosys's equivalence passes (or EQY) on the RTL and the synthesized netlist, and on LibreLane's synthesized and routed netlists | every pair equal |
 | `gls` | the cocotb tests on the routed netlist with SDF delays, on Icarus 13 | every test passes |
 | `eco` | OpenROAD on the routed DEF, then LibreLane from detailed routing on | the changes apply and the result meets `pnr`'s criteria |
