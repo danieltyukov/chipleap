@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -80,10 +81,24 @@ def axi_sv() -> str:
     return _source("rtl", "chipleap_accel_axi.sv")
 
 
-def cdc_sv() -> str:
+def cdc_sv(inner: str = "chipleap_accel") -> str:
     """The accelerator in a clock domain of its own, with its crossings
-    (``chipleap_accel_cdc``)."""
-    return _source("rtl", "chipleap_accel_cdc.sv")
+    (``chipleap_accel_cdc``). ``inner`` names another module with chipleap_accel's ports
+    and its parameters fixed, such as ``chipleap.gen.banks.TOP`` (the accelerator with its
+    buffers in SRAM macros), to put behind the crossings instead."""
+    text = _source("rtl", "chipleap_accel_cdc.sv")
+    if inner == "chipleap_accel":
+        return text
+    if not re.fullmatch(r"[A-Za-z_]\w*", inner):
+        raise ValueError(f"{inner!r} is not a module name")
+    found = _INNER_RE.subn(f"  {inner} u_accel (", text)
+    if found[1] != 1:
+        raise ValueError("chipleap_accel_cdc.sv has no instance of chipleap_accel to replace")
+    return found[0]
+
+
+# The accelerator's instance in chipleap_accel_cdc.sv, from its parameters to its ports.
+_INNER_RE = re.compile(r"  chipleap_accel #\(\n.*?\n  \) u_accel \(", re.DOTALL)
 
 
 def testbench_cpp() -> str:

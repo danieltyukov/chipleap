@@ -142,3 +142,114 @@ def test_the_accelerators_clock_limit_applies_to_its_own_clock():
     assert any(
         "closes timing" in v for v in _evaluate(big.with_(freq_mhz=95.0, accel_mhz=0.0)).violations
     )
+
+
+def test_the_two_clock_constraints_bound_the_crossings_without_clock_groups():
+    from chipleap.verify.pnr import two_clock_sdc
+
+    sdc = two_clock_sdc(42.3, 90.0)
+    assert "create_clock [get_ports clk_i] -name clk_i -period 23.641" in sdc
+    assert "create_clock [get_ports accel_clk_i] -name accel_clk_i -period 11.111" in sdc
+    # Every path between the clocks is bounded by the faster clock's period, datapath only
+    # (OpenSTA's -ignore_clock_latency), with no hold check between them.
+    for a, b in (("clk_i", "accel_clk_i"), ("accel_clk_i", "clk_i")):
+        assert (
+            f"set_max_delay -ignore_clock_latency 11.111 -from [get_clocks {a}] "
+            f"-to [get_clocks {b}]" in sdc
+        )
+        assert f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]" in sdc
+    # Clock groups would take the bound away: OpenSTA reports such a path unconstrained.
+    assert "set_clock_groups" not in sdc and "-datapath_only" not in sdc
+    # The ports on X-HEEP's side, timed against its clock; neither clock is a data input.
+    assert "set_input_delay $io_delay -clock [get_clocks clk_i] $data_inputs" in sdc
+    assert "set clock_inputs [list [get_ports clk_i] [get_ports accel_clk_i]]" in sdc
+    assert "set_max_transition 0.3" not in sdc
+    assert "set_max_transition 0.3 [current_design]" in two_clock_sdc(42.3, 90.0, 0.3)
+    assert "-ignore_clock_latency 23.641" in two_clock_sdc(42.3, 30.0)  # the bus the faster
+
+
+def test_a_macro_build_on_its_own_clock_puts_its_macros_inside_the_crossings(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from chipleap.verify import pnr
+    from test_pnr import stand_in_pdk
+
+    pdk = stand_in_pdk(tmp_path)
+    seen = {}
+
+    def run(workdir, cfg, tag="chipleap", *, late_antenna_repair=False):
+        seen["cfg"] = cfg
+        return {"timing__setup__ws": 1.0, "timing__hold__ws": 0.1}, None
+
+    monkeypatch.setattr(pnr, "librelane", lambda: SimpleNamespace(found=True, path="ll"))
+    monkeypatch.setattr(pnr, "_sv2v", lambda a, b: b.write_text(a.read_text()))
+    monkeypatch.setattr(pnr, "run_librelane", run)
+    monkeypatch.setattr("chipleap.rtl.pnr.check_merged", lambda *a: {})
+    work = tmp_path / "pnr"
+    r = pnr.place_and_route(SMOLLM2.accel, 42.3, work, pdk=pdk, accel_mhz=90.0)
+    cfg = seen["cfg"]
+    assert cfg["DESIGN_NAME"] == "chipleap_accel_cdc"
+    assert cfg["CLOCK_PORT"] == ["clk_i", "accel_clk_i"] and cfg["CLOCK_PERIOD"] == 11.111
+    assert cfg["VERILOG_FILES"] == [
+        "dir::src/chipleap_accel_cdc.v",
+        "dir::src/chipleap_accel_sram.v",
+    ]
+    (cell,) = cfg["MACROS"]
+    assert set(cfg["MACROS"][cell]["instances"]) == {
+        "u_accel.abuf_s0_m0",
+        "u_accel.abuf_s1_m0",
+        "u_accel.wbuf_s0_l0_m0",
+        "u_accel.wbuf_s1_l0_m0",
+    }
+    pnr_sdc, signoff_sdc = ((work / n).read_text() for n in ("pnr.sdc", "signoff.sdc"))
+    assert "set_max_delay -ignore_clock_latency 11.111" in pnr_sdc
+    assert "set_max_transition 0.3 [current_design]" in pnr_sdc
+    assert "set_max_transition 0.3" not in signoff_sdc and "base.sdc" not in signoff_sdc
+    src = (work / "src" / "chipleap_accel_cdc.v").read_text()
+    assert "chipleap_accel_sram u_accel (" in src and "module chipleap_accel_cdc" in src
+    assert ".MAX_OUTSTANDING(8)," in (work / "src" / "chipleap_accel_sram.v").read_text()
+    assert r.clocks == {"clk_i": 23.641, "accel_clk_i": 11.111}
+    # The band between the macro rows holds the crossings too.
+    assert pnr.model_cell_um2(SMOLLM2.accel, banked=True, crossings=True) > pnr.model_cell_um2(
+        SMOLLM2.accel, banked=True
+    )
+
+
+def test_each_path_groups_worst_slack_is_read_from_the_signoff_reports(tmp_path):
+    from chipleap.verify.pnr import group_slacks
+
+    def path(group, slack):
+        return (
+            f"Startpoint: a (rising edge-triggered flip-flop)\nEndpoint: b\n"
+            f"Path Group: {group}\nPath Type: max\n\n   1.0   data arrival time\n"
+            f"                                              {slack}   slack "
+            f"({'MET' if slack >= 0 else 'VIOLATED'})\n\n"
+        )
+
+    run = tmp_path / "run"
+    for n in (30, 58):  # an earlier timing step, then the signoff one
+        for corner in ("nom_slow_1p08V_125C", "nom_fast_1p32V_m40C"):
+            d = run / f"{n}-openroad-stapostpnr" / corner
+            d.mkdir(parents=True)
+            late = n == 58
+            (d / "max.rpt").write_text(
+                "report_checks -path_delay max\n"
+                + path("accel_clk_i", 0.5 if late else -9.0)
+                + path("accel_clk_i", 0.9)
+                + path("clk_i", 12.25)
+                + path("path delay", 7.5)
+            )
+            (d / "min.rpt").write_text(path("accel_clk_i", 0.12) + path("clk_i", 0.2))
+    got = group_slacks(run)
+    assert got["setup"]["nom_slow_1p08V_125C"] == {
+        "accel_clk_i": 0.5,
+        "clk_i": 12.25,
+        "path delay": 7.5,
+    }
+    assert got["hold"]["nom_fast_1p32V_m40C"] == {"accel_clk_i": 0.12, "clk_i": 0.2}
+    from chipleap.verify.run import group_note
+
+    assert group_note(got) == (
+        "setup accel_clk_i +0.500 ns, setup clk_i +12.250 ns, setup crossings +7.500 ns, "
+        "hold accel_clk_i +0.120 ns, hold clk_i +0.200 ns"
+    )

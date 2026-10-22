@@ -24,7 +24,13 @@ from typing import TYPE_CHECKING, Any
 from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
-from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
+from chipleap.hw.tech import (
+    ACCEL_CDC_KGE,
+    ACCEL_CDC_PORT_KGE,
+    accel_bank_kge,
+    accel_logic_kge,
+    get_tech,
+)
 from chipleap.model.evaluate import buffer_mm2, soc_limit_mhz
 from chipleap.rtl import builddir
 from chipleap.verify import backends, crossings, pnr, sim, synth, xheep
@@ -198,8 +204,17 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         return StepResult("pnr", "skipped", "no accelerator in this design")
     ihp = get_tech("ihp-sg13g2")
     clock = min(design.freq_mhz, ihp.max_freq_mhz) if design.tech == ihp.key else ihp.max_freq_mhz
+    # On its own clock the accelerator is laid out with its crossings, X-HEEP's side at
+    # the SoC's clock (the design's, or what the routed SoC meets).
+    clocks = sim_clocks(design)
+    bus = 1e6 / clocks.bus_ps if clocks else 0.0
     try:
-        r = pnr.place_and_route(design.accel, clock, workdir)
+        if clocks is not None:
+            accel = min(design.accel_mhz, ihp.max_freq_mhz)
+            r = pnr.place_and_route(design.accel, bus, workdir, accel_mhz=accel)
+            clock = accel
+        else:
+            r = pnr.place_and_route(design.accel, clock, workdir)
     except pnr.PnrError as exc:
         msg = str(exc).splitlines()[0]
         return StepResult(
@@ -210,6 +225,8 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     if r.macros:
         # The layout's buffers are macros, and its logic has their interface.
         kge += accel_bank_kge(a.rows, a.cols, a.double_buffer)
+    if clocks is not None:
+        kge += ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * a.ports
     model_cell = kge * 1000 * ihp.ge_um2
     model_buffers = buffer_mm2(a, ihp) * 1e6
     data = {
@@ -237,6 +254,11 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         "buffers": r.buffers,
         "buffer_words": rtl_params(a).abuf_words if r.macros else pnr.PNR_WORDS,
         "gds": str(r.gds) if r.gds else None,
+        **(
+            {"bus_clock_mhz": round(bus, 3), "clock_periods_ns": r.clocks, "path_groups": r.groups}
+            if clocks is not None
+            else {}
+        ),
     }
     # The block as it is in silicon, standard cells and macros, against the model's logic
     # and buffers.
@@ -267,11 +289,19 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     clean = r.checks_clean
     checks = r.checks()
+    if clocks is not None:
+        timing = (
+            f"the accelerator at {clock:g} MHz and X-HEEP's side at {bus:.4g} MHz "
+            f"{'met' if met else 'missed'} at the slow corner ({group_note(r.groups)})"
+        )
+    else:
+        timing = (
+            f"{clock:g} MHz {'met' if met else 'missed'} at the slow corner (about "
+            f"{r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the typical one)"
+        )
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "
-        f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
-        f"{'met' if met else 'missed'} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
-        f"and about {r.fmax_mhz:.0f} MHz at the typical one); {checks}"
+        f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {timing}; {checks}"
     )
     if r.macros:
         msg += (
@@ -289,6 +319,23 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     elif r.buffers:
         msg += f"; {r.buffers}"
     return StepResult("pnr", "pass" if met and clean else "fail", msg, data)
+
+
+SLOW = "nom_slow_1p08V_125C"
+
+
+def group_note(groups: dict[str, dict[str, dict[str, float]]]) -> str:
+    """Each path group's worst setup slack at the slow corner and the worst hold slack of
+    all corners, for a summary: each clock's paths, and the crossings' ("path delay")."""
+    setup = groups.get("setup", {}).get(SLOW, {})
+    hold: dict[str, float] = {}
+    for per in groups.get("hold", {}).values():
+        for g, v in per.items():
+            hold[g] = min(hold.get(g, v), v)
+    names = {"path delay": "crossings"}
+    parts = [f"setup {names.get(g, g)} {v:+.3f} ns" for g, v in sorted(setup.items())]
+    parts += [f"hold {names.get(g, g)} {v:+.3f} ns" for g, v in sorted(hold.items())]
+    return ", ".join(parts) if parts else "no path groups reported"
 
 
 def corner_slacks(metrics: dict[str, Any]) -> dict[str, dict[str, float]]:

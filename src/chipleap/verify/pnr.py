@@ -29,7 +29,7 @@ from typing import Any
 
 from chipleap.chip import io
 from chipleap.gen import banks
-from chipleap.gen.rtl import accel_sv, rtl_params
+from chipleap.gen.rtl import accel_sv, cdc_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
@@ -82,6 +82,11 @@ class PnrResult:
     # (``ihp_antenna_skipped``); neither when the flow does not run it.
     ihp_antenna: DrcResult | None = None
     ihp_antenna_skipped: str = ""
+    # With two clocks: each clock's period, and the worst slack of each path group (each
+    # clock, and "path delay" for the crossings) at each corner, for setup and for hold
+    # (``group_slacks``).
+    clocks: dict[str, float] = field(default_factory=dict)
+    groups: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
 
     @property
     def clean(self) -> bool:
@@ -724,10 +729,128 @@ def sram_config(
     }
 
 
-def model_cell_um2(accel: Accel, banked: bool = False) -> float:
+CDC_TOP = "chipleap_accel_cdc"  # the accelerator behind its clock crossings
+CDC_INSTANCE = "u_accel"  # the accelerator in it
+CDC_DEPTH = 8  # words of each crossing FIFO (CDC_AW = 3), and reads in flight per port
+
+
+def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None) -> str:
+    """Constraints for the accelerator behind its crossings: X-HEEP's clock (``clk_i``)
+    and the accelerator's (``accel_clk_i``), the ports timed against the first, as
+    LibreLane's base SDC would (``chipleap.rtl.pnr.io_lines``), and the two clocks
+    asynchronous with each crossing's path bounded.
+
+    In OpenSTA, as LibreLane runs it, ``set_clock_groups -asynchronous`` between the clocks
+    also removes a ``set_max_delay`` on the paths between them (they are reported
+    unconstrained), and ``-datapath_only`` is not a flag. So every path from one clock to
+    the other gets ``set_max_delay -ignore_clock_latency`` (OpenSTA's datapath-only bound:
+    the data path alone, without either clock tree), at the faster clock's period, which
+    keeps the bits of a gray-coded pointer within a cycle of each other where they are
+    sampled, and ``set_false_path -hold``, since a hold check between unrelated clocks
+    times nothing. ``slew_ns`` adds a design-wide slew target (``MACRO_PNR_SLEW_NS`` for a
+    macro build's placement and routing)."""
+    from chipleap.rtl.pnr import io_lines
+
+    bus = round(1000.0 / bus_mhz, 3)
+    acc = round(1000.0 / accel_mhz, 3)
+    bound = min(bus, acc)
+    lines = [
+        "# ChipLeap: the accelerator on its own clock behind its crossings (chipleap_accel_cdc).",
+        "# Inputs and outputs are on X-HEEP's side and timed against its clock.",
+        f"create_clock [get_ports clk_i] -name clk_i -period {bus:g}",
+        f"create_clock [get_ports accel_clk_i] -name accel_clk_i -period {acc:g}",
+        "set clock_inputs [list [get_ports clk_i] [get_ports accel_clk_i]]",
+        "set data_inputs [all_inputs]",
+        "foreach port $clock_inputs {",
+        "    set i [lsearch $data_inputs $port]",
+        "    if { $i >= 0 } { set data_inputs [lreplace $data_inputs $i $i] }",
+        "}",
+        *io_lines("clk_i", bus),
+        "# The clocks are asynchronous. Each path between them is a crossing the CDC step",
+        "# checked; its data path is bounded by the faster clock's period, and it has no hold",
+        "# check.",
+        *(
+            f"set_max_delay -ignore_clock_latency {bound:g} -from [get_clocks {a}] -to [get_clocks {b}]"
+            for a, b in (("clk_i", "accel_clk_i"), ("accel_clk_i", "clk_i"))
+        ),
+        *(
+            f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]"
+            for a, b in (("clk_i", "accel_clk_i"), ("accel_clk_i", "clk_i"))
+        ),
+    ]
+    if slew_ns is not None:
+        lines += [
+            "# A slew target for repair under the SRAM macros' input limit.",
+            f"set_max_transition {slew_ns} [current_design]",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def model_cell_um2(accel: Accel, banked: bool = False, crossings: bool = False) -> float:
     """The model's standard-cell area for the accelerator's logic on SG13G2; ``banked``
-    for a macro-backed build, whose logic also has its banks' interface."""
-    return banks.cell_um2(accel, banked)
+    for a macro-backed build, whose logic also has its banks' interface, ``crossings``
+    for one on its own clock behind its crossings."""
+    um2 = banks.cell_um2(accel, banked)
+    if crossings:
+        from chipleap.hw.tech import ACCEL_CDC_KGE, ACCEL_CDC_PORT_KGE, get_tech
+
+        kge = ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * accel.ports
+        um2 += kge * 1000 * get_tech("ihp-sg13g2").ge_um2
+    return um2
+
+
+def with_crossings(
+    cfg: dict[str, Any], workdir: Path, bus_mhz: float, accel_mhz: float
+) -> dict[str, Any]:
+    """``cfg`` for the accelerator behind its crossings (``CDC_TOP``): that top, from
+    ``src/chipleap_accel_cdc.v`` in place of ``src/chipleap_accel.v``, both clocks, and
+    ``two_clock_sdc`` for placement, routing and signoff, written into ``workdir`` (with
+    the macros' slew target for placement and routing when ``cfg`` has macros)."""
+    files = [
+        "dir::src/chipleap_accel_cdc.v" if f == "dir::src/chipleap_accel.v" else f
+        for f in cfg["VERILOG_FILES"]
+    ]
+    slew = MACRO_PNR_SLEW_NS if cfg.get("MACROS") else None
+    (workdir / PNR_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz, slew))
+    (workdir / SIGNOFF_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz))
+    return {
+        **cfg,
+        "DESIGN_NAME": CDC_TOP,
+        "VERILOG_FILES": files,
+        "CLOCK_PORT": ["clk_i", "accel_clk_i"],
+        # LibreLane reads one period; the faster clock's, the accelerator's for its paths.
+        "CLOCK_PERIOD": round(1000.0 / max(bus_mhz, accel_mhz), 3),
+        "PNR_SDC_FILE": f"dir::{PNR_SDC}",
+        "SIGNOFF_SDC_FILE": f"dir::{SIGNOFF_SDC}",
+    }
+
+
+_GROUP_RE = re.compile(r"^Path Group: (.+)$", re.MULTILINE)
+_SLACK_LINE_RE = re.compile(
+    r"^\s*(-?\d+(?:\.\d+)?(?:e-?\d+)?)\s+slack \((?:MET|VIOLATED)\)", re.MULTILINE
+)
+
+
+def group_slacks(run: Path) -> dict[str, dict[str, dict[str, float]]]:
+    """The worst slack of each path group at each corner, for setup and hold, from the
+    paths LibreLane's signoff timing reports (the last ``OpenROAD.STAPostPNR``'s
+    ``max.rpt`` and ``min.rpt``, which list the worst paths of every group)."""
+    steps = sorted(run.glob("*-openroad-stapostpnr"), key=lambda p: int(p.name.split("-")[0]))
+    out: dict[str, dict[str, dict[str, float]]] = {}
+    if not steps:
+        return out
+    for kind, name in (("setup", "max.rpt"), ("hold", "min.rpt")):
+        for rpt in sorted(steps[-1].glob(f"*/{name}")):
+            corner = rpt.parent.name
+            text = rpt.read_text(errors="replace")
+            for block in text.split("Startpoint: ")[1:]:
+                g, s = _GROUP_RE.search(block), _SLACK_LINE_RE.search(block)
+                if g is None or s is None:
+                    continue
+                worst = out.setdefault(kind, {}).setdefault(corner, {})
+                group = g.group(1).strip()
+                worst[group] = min(worst.get(group, math.inf), float(s.group(1)))
+    return out
 
 
 def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
@@ -745,8 +868,15 @@ def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
 
 
 def place_and_route(
-    accel: Accel, clock_mhz: float, workdir: Path, pdk: Path | None = None
+    accel: Accel,
+    clock_mhz: float,
+    workdir: Path,
+    pdk: Path | None = None,
+    accel_mhz: float = 0.0,
 ) -> PnrResult:
+    """The accelerator through LibreLane at ``clock_mhz``. With ``accel_mhz``, the
+    accelerator runs on its own clock behind its crossings (``CDC_TOP``), and
+    ``clock_mhz`` is X-HEEP's side's."""
     if not librelane().found:
         raise PnrError("LibreLane is not installed")
     workdir.mkdir(parents=True, exist_ok=True)
@@ -757,22 +887,47 @@ def place_and_route(
     pdk = pdk or io.pdk_dir()
     reason = sram_reason(accel, pdk)
     run = workdir / "runs" / "chipleap"
-    if reason is not None or pdk is None:
-        metrics, gds = run_librelane(workdir, config(accel, clock_mhz), late_antenna_repair=True)
-        result = parse_run(metrics, clock_mhz, gds, run, {})
-        result = with_ihp_antenna(result, pdk, "chipleap_accel", workdir)
+    flops = reason is not None or pdk is None
+    if accel_mhz:
+        # The core and its crossings in one file, converted together.
+        inner = "chipleap_accel" if flops else banks.TOP
+        (src / "chipleap_accel_cdc.sv").write_text(accel_sv() + "\n" + cdc_sv(inner))
+        _sv2v(src / "chipleap_accel_cdc.sv", src / "chipleap_accel_cdc.v")
+    clock = accel_mhz or clock_mhz  # the accelerator's, for its paths' Fmax
+
+    def timed(r: PnrResult) -> PnrResult:
+        if not accel_mhz:
+            return r
+        return replace(
+            r,
+            clocks={
+                "clk_i": round(1000.0 / clock_mhz, 3),
+                "accel_clk_i": round(1000.0 / accel_mhz, 3),
+            },
+            groups=group_slacks(run),
+        )
+
+    if flops:
+        cfg = config(accel, clock_mhz)
+        if accel_mhz:
+            cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz)
+        metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
+        result = timed(parse_run(metrics, clock, gds, run, {}))
+        result = with_ihp_antenna(result, pdk, cfg["DESIGN_NAME"], workdir)
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
-    cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
+    assert pdk is not None
+    cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk, accel_mhz)
+    top = cfg["DESIGN_NAME"]
     metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
     from chipleap.rtl.pnr import check_merged
 
-    check_merged(run, workdir, banks.TOP)
+    check_merged(run, workdir, top)
     held = pdk_cells(
         ((s.cell, layer.pdk_macro_cells(pdk, s.cell, sram.LIBRARY)) for s in plan.cells()),
-        (banks.TOP,),
+        (top,),
     )
-    result = replace(parse_run(metrics, clock_mhz, gds, run, held), synth_cell_um2=synth_area(run))
-    result = with_ihp_antenna(result, pdk, banks.TOP, workdir)
+    result = replace(parse_run(metrics, clock, gds, run, held), synth_cell_um2=synth_area(run))
+    result = with_ihp_antenna(timed(result), pdk, top, workdir)
     counts: dict[str, int] = {}
     for _, cell in plan.instances():
         counts[cell] = counts.get(cell, 0) + 1
@@ -785,21 +940,27 @@ def place_and_route(
 
 
 def sram_flow(
-    accel: Accel, clock_mhz: float, workdir: Path, pdk: Path
+    accel: Accel, clock_mhz: float, workdir: Path, pdk: Path, accel_mhz: float = 0.0
 ) -> tuple[dict[str, Any], banks.Banks]:
     """The files of a macro-backed run in ``workdir`` (the generated top, the macros'
-    views, the power grid) and its LibreLane configuration; the RTL is in ``src``."""
+    views, the power grid) and its LibreLane configuration; the RTL is in ``src``. With
+    ``accel_mhz`` the macro build sits behind the crossings (``with_crossings``), its
+    macros inside ``CDC_INSTANCE`` and the floorplan sized for the crossings too."""
     plan = banks.plan(accel, sram.catalog(pdk))
     views = {s.cell: sram.views(pdk, s.cell, workdir) for s in plan.cells()}
-    cells = dict(plan.instances())
+    prefix = f"{CDC_INSTANCE}." if accel_mhz else ""
+    cells = {prefix + inst: cell for inst, cell in plan.instances()}
     fp = place.rows(
         [
-            place.Macro(inst, views[cell].view.width, views[cell].view.height)
+            place.Macro(prefix + inst, views[cell].view.width, views[cell].view.height)
             for inst, cell in plan.instances()
         ],
-        model_cell_um2(accel, banked=True),
+        model_cell_um2(accel, banked=True, crossings=bool(accel_mhz)),
     )
-    (workdir / "src" / f"{banks.TOP}.v").write_text(banks.top_sv(plan))
+    # Behind the crossings the core keeps as many reads in flight per port as they hold.
+    (workdir / "src" / f"{banks.TOP}.v").write_text(
+        banks.top_sv(plan, CDC_DEPTH if accel_mhz else None)
+    )
     placements = [
         grid.Placement(p.instance, views[cells[p.instance]].view, p.x, p.y, p.orient)
         for p in fp.macros
@@ -810,7 +971,10 @@ def sram_flow(
     macros, _ = sram.librelane_macros(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )
-    return sram_config(accel, clock_mhz, fp, macros), plan
+    cfg = sram_config(accel, clock_mhz, fp, macros)
+    if accel_mhz:
+        cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz)
+    return cfg, plan
 
 
 def synth_area(run: Path) -> float:

@@ -225,3 +225,14 @@ def test_own_clock_top_lints_clean(tmp_path, params):
         text=True,
     )
     assert out.returncode == 0 and "%" not in out.stdout + out.stderr, out.stderr
+
+
+@pytest.mark.parametrize(("accel", "srams"), SRAM_ACCELS[:2], ids=["sram-1x8", "sram-4x4"])
+def test_own_clock_with_sram_banks_is_the_flop_build_cycle_for_cycle(accel, srams):
+    # The macro build behind the crossings, as it is laid out: the same counts as the flop
+    # buffers behind them, every job bit-exact.
+    cases = sim.default_cases(accel, seed=21)
+    clocks = CDC_CLOCKS[3]  # X-HEEP's side at 42.3 MHz, the accelerator at 100
+    banked = sim.run(accel, cases, srams=srams, clocks=clocks)
+    assert all(r.ok for r in banked)
+    assert [r.cycles for r in banked] == [r.cycles for r in sim.run(accel, cases, clocks=clocks)]

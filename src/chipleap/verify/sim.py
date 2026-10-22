@@ -43,6 +43,9 @@ class SimError(RuntimeError):
     pass
 
 
+CDC_DEPTH = 8  # words of each crossing FIFO in chipleap_accel_cdc (CDC_AW = 3)
+
+
 @dataclass(frozen=True)
 class Clocks:
     """The bus clock and the accelerator's, in picoseconds: their periods and the time of
@@ -113,10 +116,8 @@ def build(
         raise SimError("Verilator is not installed; see docs/verification.md")
     p = rtl_params(accel)
     axi = platform == "standalone"
-    if cdc and (axi or srams is not None):
-        raise SimError(
-            "the accelerator's own clock is simulated with flop buffers on X-HEEP's interfaces"
-        )
+    if cdc and axi:
+        raise SimError("the accelerator's own clock is simulated on X-HEEP's interfaces")
     top = "chipleap_accel_axi" if axi else "chipleap_accel_cdc" if cdc else "chipleap_accel"
     params = p.verilator_args()
     macro_rtl: dict[str, str] = {}
@@ -124,10 +125,12 @@ def build(
         if axi:
             raise SimError("SRAM banks are simulated on X-HEEP's interfaces only")
         plan = banks.plan(accel, srams)
-        macro_rtl[f"{banks.TOP}.v"] = banks.top_sv(plan)
+        # Behind the crossings the core keeps as many reads in flight as they hold.
+        macro_rtl[f"{banks.TOP}.v"] = banks.top_sv(plan, CDC_DEPTH if cdc else None)
         macro_rtl |= {f"{s.cell}.v": model(s) for s in plan.cells()}
-        # The generated top fixes the parameters; the class keeps the test bench's name.
-        top, params = banks.TOP, ["--prefix", "Vchipleap_accel"]
+        if not cdc:
+            # The generated top fixes the parameters; the class keeps the test bench's name.
+            top, params = banks.TOP, ["--prefix", "Vchipleap_accel"]
     tb_name, tb_text = (
         ("tb_chipleap_axi.cpp", testbench_axi_cpp())
         if axi
@@ -140,12 +143,12 @@ def build(
     if axi:
         rtl["chipleap_accel_axi.sv"] = axi_sv()
     if cdc:
-        rtl["chipleap_accel_cdc.sv"] = cdc_sv()
+        rtl["chipleap_accel_cdc.sv"] = cdc_sv(banks.TOP if srams is not None else "chipleap_accel")
     rtl |= macro_rtl
     sources = "".join(rtl.values()) + tb_text + header + " ".join(params)
     digest = hashlib.sha256(sources.encode()).hexdigest()[:16]
     root = workdir or (cache_dir() / f"sim-{digest}")
-    binary = root / "obj_dir" / ("Vchipleap_accel" if macro_rtl else f"V{top}")
+    binary = root / "obj_dir" / ("Vchipleap_accel" if macro_rtl and not cdc else f"V{top}")
     if binary.exists():
         return binary
     root.mkdir(parents=True, exist_ok=True)
