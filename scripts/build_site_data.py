@@ -1052,7 +1052,9 @@ def chip_html(chip: dict[str, Any], marks: list[tuple[str, str, float, float, in
         "before fill.</figcaption>"
         f'</figure><div class="chip-facts"><dl>{dl}</dl>{timing}'
         "<p>Every check is IHP's own: the DRC deck on the whole die with its density rules, the "
-        "LVS deck down to the macros' transistors. "
+        "LVS deck down to the macros' transistors"
+        + (", the antenna deck" if _ihp_antenna(chip) is not None else "")
+        + ". "
         '<a href="https://github.com/danieltyukov/chipleap/blob/main/docs/chips.md">How a chip '
         "is built and checked</a>.</p></div></div>"
     )
