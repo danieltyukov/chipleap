@@ -675,10 +675,20 @@ def with_late_antenna_repair(cfg: dict[str, Any]) -> dict[str, Any]:
 # at the slow corner and changed nothing: resizing a driver cannot fix a wire, and the
 # length LibreLane derives (about 5 mm) never splits it.
 MACRO_WIRE_UM = 300
+# The repair after global routing fixes hold to MACRO_HOLD_MARGIN_NS instead of LibreLane's
+# 0.05 ns. IHP's SRAMs ask for up to 0.20 ns of hold time at their inputs at the fast
+# corner, on top of the 0.25 ns clock uncertainty, and LibreLane 3.0.14 applies the PDK's
+# 5 % derate to the accelerator's constraints (3.0.0.dev44's divided it to 0). On the
+# SmolLM2 accelerator at 100 MHz the repair left hold at +0.20 ns by its estimate, and
+# detailed routing took two macros' A_REN to -0.059 ns at the fast corner. With 0.15 ns
+# hold closed at +0.109 ns with 62 more hold cells (3397), and setup at the slow corner
+# kept +0.155 ns.
+MACRO_HOLD_MARGIN_NS = 0.15
 MACRO_REPAIR = {
     "RUN_POST_GRT_DESIGN_REPAIR": True,
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
+    "GRT_RESIZER_HOLD_SLACK_MARGIN": MACRO_HOLD_MARGIN_NS,
 }
 # IHP's SRAMs allow a slew of 0.595 ns at their inputs at the slow corner, a quarter of the
 # standard cells' 2.5 ns, and OpenROAD's repair_design holds a net to its driver's limit

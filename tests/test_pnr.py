@@ -127,8 +127,10 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     # Placed and routed against a slew limit under the macros' own, signed off against
     # LibreLane's constraints and every cell's own limit.
     assert cfg["PNR_SDC_FILE"] == "dir::pnr.sdc" and cfg["SIGNOFF_SDC_FILE"] == "dir::signoff.sdc"
-    # The legaliser reaches the band past the macro rows (test_the_legaliser_reaches_...).
+    # The legaliser reaches the band past the macro rows (test_the_legaliser_reaches_...),
+    # and hold is repaired with room for detailed routing at the macros' inputs.
     assert cfg["PL_MAX_DISPLACEMENT_Y"] > 100
+    assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == pnr.MACRO_HOLD_MARGIN_NS == 0.15
     pnr_sdc, signoff_sdc = ((work / n).read_text() for n in ("pnr.sdc", "signoff.sdc"))
     assert "source $::env(SCRIPTS_DIR)/base.sdc" in pnr_sdc and "base.sdc" in signoff_sdc
     assert "set_max_transition 0.3 [current_design]" in pnr_sdc
