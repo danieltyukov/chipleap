@@ -43,7 +43,14 @@ from chipleap.gen.rtl import (
 )
 from chipleap.hw.design import Accel
 from chipleap.macro.sram import Sram, model
-from chipleap.model.accel import Bandwidth, crossed, k_align, plan_tiles, simulate_job
+from chipleap.model.accel import (
+    DIRECT_OUTSTANDING,
+    Bandwidth,
+    crossed,
+    k_align,
+    plan_tiles,
+    simulate_job,
+)
 from chipleap.verify.tools import clean_env, verilator
 
 
@@ -358,14 +365,47 @@ class DirectResult:
         return (self.predicted - self.cycles) / self.cycles if self.cycles else 0.0
 
 
-def direct_top_sv(accel: Accel, inner: str, cdc: bool, nx: int = XHEEP_PORTS) -> str:
+def direct_cases(accel: Accel, ext_latency: int = 9, seed: int = 0) -> list[DirectCase]:
+    """Jobs for the direct path, for each weight format: weights in external memory in a
+    decode-like GEMV and in a job tiled along K, the first again with X-HEEP's ports busy
+    beside it and the second with stalls as well; then once with the weights on chip and
+    once with the activations in external memory too."""
+    rng = random.Random(seed)
+    fmts = tuple(f for f in (8, 4, 2) if f <= accel.w_bits)
+    cases = []
+    for fmt in fmts:
+        al = k_align(accel, fmt)
+        for m, k, n in ((1, al * 8, accel.rows * 3), (2, al * 64, 5)):
+            cases.append(DirectCase(m, k, n, fmt, rng.randrange(1 << 30), ext_latency=ext_latency))
+        cases.append(replace(cases[-2], seed=rng.randrange(1 << 30), x_pct=30))
+        cases.append(replace(cases[-2], seed=rng.randrange(1 << 30), stall_pct=30, x_pct=20))
+    al = k_align(accel, fmts[0])
+    shape = (accel.rows + 1, al * 2, accel.cols + 3)
+    for place in (0, 3):
+        cases.append(
+            DirectCase(
+                *shape, fmts[0], rng.randrange(1 << 30), ext_latency=ext_latency, place=place
+            )
+        )
+    return cases
+
+
+def direct_top_sv(
+    accel: Accel,
+    inner: str,
+    cdc: bool,
+    nx: int = XHEEP_PORTS,
+    outstanding: int = DIRECT_OUTSTANDING,
+) -> str:
     """``chipleap_accel_mem``: ``inner`` (``chipleap_accel``, ``chipleap_accel_cdc`` or the
     macro build ``chipleap.gen.banks.TOP``) with its direct ports on ``chipleap_mem``, and
     the ports of both, for the testbench."""
-    p = rtl_params(accel, direct=True)
+    p = rtl_params(accel, direct=True, outstanding=outstanding)
     n = p.ports
     params = (
-        f" #(\n{p.sv_overrides()}\n  )" if inner != banks.TOP else " #(\n    .EXT_DIRECT(1)\n  )"
+        f" #(\n{p.sv_overrides()}\n  )"
+        if inner != banks.TOP
+        else f" #(\n    .EXT_DIRECT(1),\n    .EXT_OUTSTANDING({outstanding})\n  )"
     )
     clock = "      .accel_clk_i,\n" if inner == "chipleap_accel_cdc" else ""
     return f"""// Written by ChipLeap's simulation: the accelerator and its memory path, for a test bench.
@@ -445,7 +485,8 @@ module {DIRECT_TOP} (
   chipleap_mem #(
       .PORTS({n}),
       .NX({nx}),
-      .CDC({int(cdc)})
+      .CDC({int(cdc)}),
+      .DEPTH({2 * outstanding})
   ) u_mem (
       .clk_i,
       .rst_ni,
@@ -483,11 +524,12 @@ def build_direct(
     srams: Sequence[Sram] | None = None,
     cdc: bool = False,
     nx: int = XHEEP_PORTS,
+    outstanding: int = DIRECT_OUTSTANDING,
 ) -> Path:
     """Build the Verilator model of the direct path's testbench for ``accel`` (cached by
     its sources) and return the binary. ``srams`` and ``cdc`` as for ``build``: the
     buffers in SRAM macros, the accelerator on its own clock (and the memory ports on it,
-    X-HEEP's side crossing)."""
+    X-HEEP's side crossing); ``outstanding`` reads in flight per direct port."""
     tool = verilator()
     if not tool.found:
         raise SimError("Verilator is not installed; see docs/verification.md")
@@ -502,7 +544,7 @@ def build_direct(
         rtl["chipleap_accel_cdc.sv"] = cdc_sv(inner)
         inner = "chipleap_accel_cdc"
     rtl["chipleap_mem.sv"] = mem_sv()
-    rtl[f"{DIRECT_TOP}.sv"] = direct_top_sv(accel, inner, cdc, nx)
+    rtl[f"{DIRECT_TOP}.sv"] = direct_top_sv(accel, inner, cdc, nx, outstanding)
     tb_name, tb_text = "tb_chipleap_mem.cpp", testbench_mem_cpp()
     header = driver_header(accel, "sim")
     defines = [f"-DCHIPLEAP_MEM_NX={nx}", f"-DCHIPLEAP_EXT_BASE={EXT_WINDOW[0]:#x}u"]
@@ -587,10 +629,13 @@ def run_direct(
     srams: Sequence[Sram] | None = None,
     clocks: Clocks | None = None,
     nx: int = XHEEP_PORTS,
+    outstanding: int = DIRECT_OUTSTANDING,
 ) -> list[DirectResult]:
     """Run ``cases`` on the direct path's testbench. Without ``clocks`` everything runs on
     one clock of 10 ns."""
-    exe = binary or build_direct(accel, srams=srams, cdc=clocks is not None, nx=nx)
+    exe = binary or build_direct(
+        accel, srams=srams, cdc=clocks is not None, nx=nx, outstanding=outstanding
+    )
     clk = clocks or Clocks(10000, 10000, 0)
     try:
         out = subprocess.run(

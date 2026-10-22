@@ -9,7 +9,7 @@ from pathlib import Path
 
 from chipleap.gen.xheep import EXT_DEFAULT
 from chipleap.hw.design import Accel
-from chipleap.model.accel import ACC_ROWS
+from chipleap.model.accel import ACC_ROWS, DIRECT_OUTSTANDING
 from chipleap.rtl import builddir
 
 DATAFLOW_ID = {"gemv": 0, "ws": 1, "os": 2}
@@ -20,9 +20,6 @@ DEFAULT_REG_BASE = 0x20070000
 # (EXT_BASE, EXT_SIZE): X-HEEP's default, 1 GiB at 0xC0000000, unless the design keeps more
 # than that in external memory (chipleap.gen.xheep.ext_window).
 EXT_WINDOW = EXT_DEFAULT
-# Reads in flight per port on the direct path: enough to cover external memory's latency
-# (60 ns plus the controller's cycles, about 10 cycles at 100 MHz) at a word per cycle.
-EXT_OUTSTANDING = 16
 
 
 @dataclass(frozen=True)
@@ -41,6 +38,7 @@ class RtlParams:
     ext_direct: int = 0
     ext_base: int = EXT_WINDOW[0]
     ext_size: int = EXT_WINDOW[1]
+    ext_outstanding: int = DIRECT_OUTSTANDING
 
     def verilator_args(self) -> list[str]:
         args = [
@@ -59,6 +57,7 @@ class RtlParams:
                 "-GEXT_DIRECT=1",
                 f"-GEXT_BASE=32'h{self.ext_base:08X}",
                 f"-GEXT_SIZE=32'h{self.ext_size:08X}",
+                f"-GEXT_OUTSTANDING={self.ext_outstanding}",
             ]
         return args
 
@@ -78,19 +77,26 @@ class RtlParams:
             text += (
                 ",\n    .EXT_DIRECT(1),\n"
                 f"    .EXT_BASE(32'h{self.ext_base:08X}),\n"
-                f"    .EXT_SIZE(32'h{self.ext_size:08X})"
+                f"    .EXT_SIZE(32'h{self.ext_size:08X}),\n"
+                f"    .EXT_OUTSTANDING({self.ext_outstanding})"
             )
         return text
 
 
 def rtl_params(
-    accel: Accel, direct: bool = False, window: tuple[int, int] = EXT_WINDOW
+    accel: Accel,
+    direct: bool = False,
+    window: tuple[int, int] = EXT_WINDOW,
+    outstanding: int = DIRECT_OUTSTANDING,
 ) -> RtlParams:
     """The RTL parameters of ``accel``; with ``direct``, its direct read path to external
-    memory for the window (base, size) of X-HEEP's external slave."""
+    memory for the window (base, size) of X-HEEP's external slave, with ``outstanding``
+    reads in flight per port (``chipleap.model.accel.direct_outstanding``)."""
     base, size = window
     if size & (size - 1) or base % size:
         raise ValueError(f"the external window {base:#x}+{size:#x} is not aligned to its size")
+    if outstanding < 2 or outstanding & (outstanding - 1):
+        raise ValueError(f"{outstanding} reads in flight is not a power of two")
     return RtlParams(
         dataflow=DATAFLOW_ID[accel.dataflow],
         rows=accel.rows,
@@ -103,6 +109,7 @@ def rtl_params(
         ext_direct=1 if direct else 0,
         ext_base=base,
         ext_size=size,
+        ext_outstanding=outstanding,
     )
 
 
@@ -128,7 +135,7 @@ def cdc_sv(inner: str = "chipleap_accel") -> str:
     """The accelerator in a clock domain of its own, with its crossings
     (``chipleap_accel_cdc``). ``inner`` names another module with chipleap_accel's ports
     and its parameters fixed but for the direct path's (``EXT_DIRECT``, ``EXT_BASE``,
-    ``EXT_SIZE``), such as ``chipleap.gen.banks.TOP`` (the accelerator with its buffers in
+    ``EXT_SIZE``, ``EXT_OUTSTANDING``), such as ``chipleap.gen.banks.TOP`` (the accelerator with its buffers in
     SRAM macros), to put behind the crossings instead."""
     text = _source("rtl", "chipleap_accel_cdc.sv")
     if inner == "chipleap_accel":
@@ -139,7 +146,8 @@ def cdc_sv(inner: str = "chipleap_accel") -> str:
         f"  {inner} #(\n"
         "      .EXT_DIRECT(EXT_DIRECT),\n"
         "      .EXT_BASE(EXT_BASE),\n"
-        "      .EXT_SIZE(EXT_SIZE)\n"
+        "      .EXT_SIZE(EXT_SIZE),\n"
+        "      .EXT_OUTSTANDING(EXT_OUTSTANDING)\n"
         "  ) u_accel (",
         text,
     )
@@ -209,6 +217,7 @@ def write_rtl(
     own_clock: bool = False,
     direct: bool = False,
     window: tuple[int, int] = EXT_WINDOW,
+    outstanding: int = DIRECT_OUTSTANDING,
 ) -> list[Path]:
     """Write the accelerator, its wrappers, driver and testbench into ``out``.
 
@@ -223,7 +232,7 @@ def write_rtl(
     """
     if (own_clock or direct) and platform == "standalone":
         raise ValueError("the accelerator's own clock and direct path are offered on X-HEEP only")
-    p = rtl_params(accel, direct, window)
+    p = rtl_params(accel, direct, window, outstanding)
     files: dict[Path, str] = {out / "rtl" / "chipleap_accel.sv": accel_sv()}
     if platform == "standalone":
         files |= {

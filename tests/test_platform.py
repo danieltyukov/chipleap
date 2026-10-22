@@ -120,8 +120,15 @@ def test_standalone_area_separates_the_ip_from_the_host():
     assert "axi adapter" not in xh.area_mm2 and sa.area_mm2["axi adapter"] > 0
     ip = sa.area_mm2["accelerator logic"] + sa.area_mm2["accelerator buffers"]
     assert sa.ip_area == pytest.approx(ip + sa.area_mm2["axi adapter"])
-    assert xh.ip_area == pytest.approx(ip)
-    assert sa.total_area == pytest.approx(xh.total_area + sa.area_mm2["axi adapter"])
+    # On X-HEEP the IP also has its direct path to external memory (chipleap_mem); the
+    # standalone IP's AXI4 masters reach memory through the host's interconnect.
+    from chipleap.hw.tech import get_tech
+    from chipleap.model.evaluate import direct_kge
+
+    direct = get_tech(XHEEP.tech).logic_mm2(direct_kge(XHEEP))
+    assert direct > 0 and direct_kge(STANDALONE) == 0
+    assert xh.ip_area == pytest.approx(ip + direct)
+    assert sa.total_area == pytest.approx(xh.total_area - direct + sa.area_mm2["axi adapter"])
     assert sa.metrics()["ip_area_mm2"] == pytest.approx(sa.ip_area)
     # X-HEEP's SoC closes timing below 100 MHz on IHP SG13G2; the standalone IP's host is
     # not modelled, so its accelerator runs at the design's clock. Below the SoC's limit

@@ -15,7 +15,7 @@ from chipleap.gen.xheep import code_section_bytes, ext_window
 from chipleap.hw.design import DATAFLOW_NAMES, Design
 from chipleap.hw.memory import get_memory
 from chipleap.hw.tech import get_tech
-from chipleap.model.accel import ACC_ROWS
+from chipleap.model.accel import ACC_ROWS, direct_outstanding
 
 
 @dataclass(frozen=True)
@@ -212,7 +212,8 @@ def datasheet(
         ]
     if d.accel:
         a = d.accel
-        p = rtl_params(a)
+        direct = d.direct_memory
+        p = rtl_params(a, direct, (ext_start, ext_len), direct_outstanding(d))
         tn = a.rows if a.dataflow == "gemv" else a.cols
         lines += [
             "",
@@ -239,6 +240,15 @@ def datasheet(
                     f"| OBI read masters | {a.ports} x 32 bit | Activations and weights, one "
                     "word per port per cycle |",
                     "| OBI write master | 32 bit | Results |",
+                    *(
+                        [
+                            f"| Direct read masters (`ext_*`) | {a.ports} x 32 bit | Weights "
+                            "and KV in external memory, one word per port per cycle, up to "
+                            f"{p.ext_outstanding} reads in flight per port |"
+                        ]
+                        if direct
+                        else []
+                    ),
                 ]
             ),
             "| irq_o | 1 bit | Job done, when IRQ_EN is set |",
@@ -299,4 +309,16 @@ def datasheet(
                 "to `ext_xbar_master_req_i`/`ext_xbar_master_resp_o`, and `irq_o` to a free fast",
                 "interrupt. Generate the MCU with `make mcu-gen X_HEEP_CFG=xheep/<design>.py`.",
             ]
+            if direct:
+                lines += [
+                    "",
+                    "X-HEEP's bus does not let an external master reach its external slave",
+                    "window, so the accelerator reads external memory over direct ports of its",
+                    "own (`ext_req_o`/`ext_resp_i`). Instantiate `chipleap_mem` from",
+                    "`rtl/chipleap_mem.sv` beside them: X-HEEP's external slave ports (the CPU's",
+                    "data port and the DMA's read and write ports) and the accelerator's direct",
+                    "ports go in, and one memory port per accelerator read port goes to the",
+                    "memory controller, which must accept requests while earlier ones are in",
+                    "flight and answer them in order (docs/xheep.md has the contract).",
+                ]
     return "\n".join(lines) + "\n"

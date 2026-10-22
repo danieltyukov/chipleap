@@ -124,9 +124,12 @@ module chipleap_mem #(
     parameter int unsigned PORTS = 1,  // the accelerator's direct read ports
     parameter int unsigned NX = 3,  // X-HEEP's external slave ports
     parameter int unsigned CDC = 0,  // 1: memory ports on accel_clk_i, X-HEEP's side crosses
-    parameter int unsigned DEPTH = 32,  // requests in flight on memory port 0
+    // requests in flight on memory port 0: the accelerator's port 0's and X-HEEP's
+    parameter int unsigned DEPTH = 32,
     parameter int unsigned XDEPTH = 4,  // requests in flight from X-HEEP's side
+    /* verilator lint_off UNUSEDPARAM */  // used only with CDC
     parameter int unsigned XCDC_AW = 1  // X-HEEP's crossing holds 2^XCDC_AW requests
+    /* verilator lint_on UNUSEDPARAM */
 ) (
     input logic clk_i,  // X-HEEP's clock
     input logic rst_ni,
@@ -160,7 +163,10 @@ module chipleap_mem #(
     input  logic [PORTS-1:0][31:0] mem_rdata_i
 );
   /* verilator lint_on DECLFILENAME */
-  logic m_clk, m_rst_n, x_rst_n;
+  logic m_clk, m_rst_n;
+  /* verilator lint_off UNUSEDSIGNAL */  // unused with one X-HEEP port and one clock
+  logic x_rst_n;
+  /* verilator lint_on UNUSEDSIGNAL */
 
   // X-HEEP's ports to one, on clk_i.
   logic xm_req, xm_gnt, xm_we, xm_rvalid;

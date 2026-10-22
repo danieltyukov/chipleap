@@ -21,6 +21,7 @@ from chipleap.hw.design import Accel
 from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.macro import place
 from chipleap.macro.sram import Bank, Sram, choose, ports
+from chipleap.model.accel import DIRECT_OUTSTANDING
 
 TOP = "chipleap_accel_sram"
 
@@ -231,7 +232,8 @@ def top_sv(banks: Banks, max_outstanding: int | None = None, direct: bool = Fals
         f"module {TOP} #(",
         f"    parameter EXT_DIRECT = {int(direct)},",
         f"    parameter [31:0] EXT_BASE = 32'h{EXT_WINDOW[0]:08X},",
-        f"    parameter [31:0] EXT_SIZE = 32'h{EXT_WINDOW[1]:08X}",
+        f"    parameter [31:0] EXT_SIZE = 32'h{EXT_WINDOW[1]:08X},",
+        f"    parameter EXT_OUTSTANDING = {DIRECT_OUTSTANDING}",
         ") (",
         "    input wire clk_i,",
         "    input wire rst_ni,",
@@ -287,6 +289,7 @@ def top_sv(banks: Banks, max_outstanding: int | None = None, direct: bool = Fals
         "    .EXT_DIRECT(EXT_DIRECT),",
         "    .EXT_BASE(EXT_BASE),",
         "    .EXT_SIZE(EXT_SIZE),",
+        "    .EXT_OUTSTANDING(EXT_OUTSTANDING),",
         "    .SRAM_BUF(1)",
         "  ) u_core (",
         *(

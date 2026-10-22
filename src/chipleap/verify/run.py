@@ -2,10 +2,14 @@
 
 Every step is optional and skipped with a reason when its tool is missing:
 
-* lint:  Verilator --lint-only -Wall on the generated accelerator
+* lint:  Verilator --lint-only -Wall on the generated accelerator (and, with external
+  memory on X-HEEP, on chipleap_mem, the arbiter of its direct path)
 * sim:   randomized matrix multiplies against a golden model, cycles against the model
-  (with the accelerator on its own clock, X-HEEP's side on the SoC's)
+  (with the accelerator on its own clock, X-HEEP's side on the SoC's); with external
+  memory on X-HEEP also over the direct path, weights in external memory and X-HEEP's
+  external slave ports busy beside it
 * cdc:   with the accelerator on its own clock, ChipLeap's CDC checker on its crossings
+  (with external memory, and on the crossing of X-HEEP's side into the memory ports)
 * synth: Yosys on IHP SG13G2, logic area against the model's estimate, fmax estimate
 * xheep: X-HEEP's own generator loads, validates and renders the configuration
 """
@@ -27,11 +31,13 @@ from chipleap.hw.design import Design
 from chipleap.hw.tech import (
     ACCEL_CDC_KGE,
     ACCEL_CDC_PORT_KGE,
+    MEM_ARB_KGE,
     accel_bank_kge,
     accel_logic_kge,
     get_tech,
 )
-from chipleap.model.evaluate import buffer_mm2, soc_limit_mhz
+from chipleap.model.accel import direct_outstanding, ext_latency
+from chipleap.model.evaluate import buffer_mm2, direct_kge, soc_limit_mhz
 from chipleap.rtl import builddir
 from chipleap.verify import backends, crossings, pnr, sim, synth, xheep
 from chipleap.verify.remote import Remote
@@ -75,19 +81,43 @@ def lint(design: Design, bundle: Path) -> StepResult:
     files = [rtl / "chipleap_accel.sv"] + ([rtl / "chipleap_accel_axi.sv"] if axi else [])
     files += [rtl / "chipleap_accel_cdc.sv"] if own else []
     top = "chipleap_accel_axi" if axi else crossings.TOP if own else "chipleap_accel"
-    cmd = [
-        str(tool.path),
-        "--lint-only",
-        "-Wall",
-        "--top-module",
-        top,
-        *rtl_params(design.accel).verilator_args(),
-        *(str(f) for f in files),
-    ]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=False, env=clean_env())
-    msgs = [ln for ln in (out.stdout + out.stderr).splitlines() if ln.startswith("%")]
-    if out.returncode == 0 and not msgs:
-        return StepResult("lint", "pass", "Verilator -Wall reports no warnings", {"warnings": 0})
+    direct = design.direct_memory
+    p = rtl_params(design.accel, direct, outstanding=direct_outstanding(design))
+    runs = [(top, p.verilator_args(), files)]
+    if direct:
+        # The direct path's arbiter, with X-HEEP's three external slave ports, and on the
+        # accelerator's clock the crossing of X-HEEP's side (from chipleap_accel_cdc.sv).
+        runs.append(
+            (
+                "chipleap_mem",
+                [
+                    f"-GPORTS={design.accel.ports}",
+                    f"-GNX={sim.XHEEP_PORTS}",
+                    f"-GCDC={int(own)}",
+                ],
+                [*files, rtl / "chipleap_mem.sv"],
+            )
+        )
+    msgs: list[str] = []
+    ok = True
+    for name, args, sources in runs:
+        cmd = [
+            str(tool.path),
+            "--lint-only",
+            "-Wall",
+            "--top-module",
+            name,
+            *args,
+            *(str(f) for f in sources),
+        ]
+        out = subprocess.run(cmd, capture_output=True, text=True, check=False, env=clean_env())
+        msgs += [ln for ln in (out.stdout + out.stderr).splitlines() if ln.startswith("%")]
+        ok = ok and out.returncode == 0
+    if ok and not msgs:
+        what = " on the accelerator and its memory path" if direct else ""
+        return StepResult(
+            "lint", "pass", f"Verilator -Wall reports no warnings{what}", {"warnings": 0}
+        )
     return StepResult("lint", "fail", f"{len(msgs)} lint messages", {"messages": msgs[:40]})
 
 
@@ -114,6 +144,15 @@ def simulate(design: Design, cases: int = 0, seed: int = 0) -> StepResult:
         if cases:
             todo = todo[:cases]
         results = sim.run(design.accel, todo, platform=design.platform, clocks=clocks)
+        direct = None
+        if design.direct_memory:
+            dtodo = sim.direct_cases(design.accel, ext_latency=direct_latency(design), seed=seed)
+            direct = sim.run_direct(
+                design.accel,
+                dtodo[:cases] if cases else dtodo,
+                clocks=clocks,
+                outstanding=direct_outstanding(design),
+            )
     except sim.SimError as exc:
         return StepResult("sim", "fail", str(exc).splitlines()[0], {"error": str(exc)})
     via = " through the AXI4 wrapper" if design.platform == "standalone" else ""
@@ -122,7 +161,67 @@ def simulate(design: Design, cases: int = 0, seed: int = 0) -> StepResult:
             f" on its own clock ({1e6 / clocks.accel_ps:.4g} MHz) through its crossings, "
             f"X-HEEP's side at {1e6 / clocks.bus_ps:.4g} MHz"
         )
-    return sim_step(results, via=via)
+    step = sim_step(results, via=via)
+    return step if direct is None else direct_step(step, direct)
+
+
+def direct_latency(design: Design) -> int:
+    """External memory's latency at the memory ports, in cycles of their clock (the
+    accelerator's): the model's 60 ns plus 4 cycles, at least 8."""
+    return ext_latency((design.accel_mhz or design.freq_mhz) * 1e6)
+
+
+def direct_step(step: StepResult, results: list[sim.DirectResult]) -> StepResult:
+    """The simulation step with the direct path's cases added: each must be bit-exact,
+    X-HEEP's reads right and its writes kept, and every memory port's request held until
+    its grant."""
+    fails = [r for r in results if not r.ok]
+    # The model's count holds with X-HEEP idle, no stalls and the activations on chip, as
+    # the model keeps them.
+    quiet = [
+        abs(r.error)
+        for r in results
+        if not r.case.stall_pct and not r.case.x_pct and not r.case.place & 2
+    ]
+    data = {
+        **step.data,
+        "direct": {
+            "cases": len(results),
+            "failures": len(fails),
+            "cycle_error_quiet_max": max(quiet) if quiet else None,
+            "max_inflight": max(r.max_inflight for r in results),
+            "xheep_requests": sum(r.x_requests for r in results),
+            "xheep_bad": sum(r.x_bad for r in results),
+            "obi_violations": sum(r.obi_bad for r in results),
+            "xheep_max_latency": max(r.x_max_latency for r in results),
+        },
+    }
+    if fails:
+        bad = fails[0]
+        what = (
+            f"{bad.mismatches} wrong results"
+            if bad.mismatches
+            else f"{bad.x_bad} wrong X-HEEP accesses"
+            if bad.x_bad
+            else f"{bad.obi_bad} requests dropped or changed before their grant"
+        )
+        return StepResult(
+            "sim",
+            "fail",
+            f"direct path to external memory: {len(fails)} of {len(results)} cases wrong "
+            f"({what} in {bad.case.line()})",
+            data,
+        )
+    if step.status != "pass":
+        return StepResult(step.name, step.status, step.summary, data)
+    d = data["direct"]
+    msg = (
+        f"{step.summary}; over the direct path to external memory {len(results)} jobs "
+        f"bit-exact, up to {d['max_inflight']} reads in flight, cycle model error "
+        f"{(d['cycle_error_quiet_max'] or 0) * 100:.1f}% max with X-HEEP idle, and "
+        f"{d['xheep_requests']} X-HEEP accesses beside them all correct"
+    )
+    return StepResult("sim", "pass", msg, data)
 
 
 def sim_step(results: list[sim.CaseResult], simulator: str = "", via: str = "") -> StepResult:
@@ -169,7 +268,11 @@ def synthesize(design: Design, workdir: Path | None = None) -> StepResult:
     if design.accel is None:
         return StepResult("synth", "skipped", "no accelerator in this design")
     try:
-        r = synth.synthesize(design.accel, workdir=workdir)
+        r = synth.synthesize(
+            design.accel,
+            workdir=workdir,
+            direct=direct_outstanding(design) if design.direct_memory else 0,
+        )
     except synth.SynthError as exc:
         msg = str(exc).splitlines()[0]
         status = "skipped" if "not installed" in msg or "not found" in msg else "fail"
@@ -178,7 +281,11 @@ def synthesize(design: Design, workdir: Path | None = None) -> StepResult:
     # placement utilisation, which synthesis does not see.
     ihp = get_tech("ihp-sg13g2")
     a = design.accel
-    model = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports) * 1000 * ihp.ge_um2 / 1e6
+    # The accelerator with its direct path's longer queues, without chipleap_mem's arbiters.
+    kge = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports)
+    if design.direct_memory:
+        kge += direct_kge(design.with_(accel_mhz=0.0)) - MEM_ARB_KGE
+    model = kge * 1000 * ihp.ge_um2 / 1e6
     err = (model - r.logic_mm2) / r.logic_mm2 if r.logic_mm2 else 0.0
     data = {
         "liberty": r.liberty,

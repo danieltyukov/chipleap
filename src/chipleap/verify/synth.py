@@ -147,8 +147,11 @@ def _run(
 
 
 def synthesize(
-    accel: Accel, liberty: Path | None = None, workdir: Path | None = None
+    accel: Accel, liberty: Path | None = None, workdir: Path | None = None, direct: int = 0
 ) -> SynthResult:
+    """``accel``'s logic on IHP SG13G2 (with ``direct``, with its direct read path to
+    external memory, that many reads in flight per port): the cell area extrapolated to
+    no buffers, cells, flops and the critical path."""
     tool = yosys()
     if not tool.found or tool.path is None:
         raise SynthError("Yosys is not installed")
@@ -175,6 +178,7 @@ def synthesize(
         "PORTS": p.ports,
         "DOUBLE_BUF": p.double_buf,
         "ACC_ROWS": p.acc_rows,
+        **({"EXT_DIRECT": 1, "EXT_OUTSTANDING": direct} if direct else {}),
     }
     runs = []
     cells = flops = 0

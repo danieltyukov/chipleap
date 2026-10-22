@@ -122,8 +122,14 @@ def test_the_model_times_the_accelerator_at_its_own_clock_and_prices_its_crossin
     assert unit(fast, "cpu") == pytest.approx(unit(shared, "cpu"))
     assert unit(same, "accel") > unit(shared, "accel") > unit(fast, "accel")
     tech = get_tech("ihp-sg13g2")
+    from chipleap.model.evaluate import direct_kge
+
     added = fast.area_mm2["accelerator logic"] - shared.area_mm2["accelerator logic"]
-    assert added == pytest.approx(tech.logic_mm2(ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE))
+    # The crossings, and the direct path's on the accelerator's clock (X-HEEP's side
+    # crossing, the ports' queues sized for sixteen reads in flight from eight).
+    direct = direct_kge(fast.design) - direct_kge(shared.design)
+    assert direct > 0
+    assert added == pytest.approx(tech.logic_mm2(ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE + direct))
     from chipleap.report.text import clock_note
 
     assert "the accelerator runs on its own clock at 90" in clock_note(fast)

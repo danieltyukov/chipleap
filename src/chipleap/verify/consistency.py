@@ -16,6 +16,7 @@ from pathlib import Path
 from chipleap.gen.datasheet import REGISTERS
 from chipleap.gen.rtl import EXT_WINDOW, rtl_params
 from chipleap.hw.design import Design
+from chipleap.model.accel import direct_outstanding
 
 _WINDOW_RE = re.compile(r'"ext_slaves", start_address=(0x[0-9a-fA-F]+), length=(0x[0-9a-fA-F]+)')
 
@@ -112,6 +113,7 @@ def check(bundle: Path, design: Design) -> list[str]:
             "EXT_DIRECT": "1" if direct else None,
             "EXT_BASE": f"32'h{window[0]:08X}" if direct else None,
             "EXT_SIZE": f"32'h{window[1]:08X}" if direct else None,
+            "EXT_OUTSTANDING": str(direct_outstanding(design)) if direct else None,
         }
         for name, ext_value in ext.items():
             m = re.search(rf"\.{name}\(([^)]*)\)", text)
