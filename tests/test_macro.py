@@ -40,7 +40,7 @@ EXPECTED = json.loads((FIXTURES / "expected.json").read_text())
 # The contract both repositories share. aispice pins the same hashes in
 # crates/aispice-core/tests/macro_contract.rs; change both together (CONTRIBUTING.md).
 CONTRACT = {
-    "docs/macro-package.md": "a6e93e8bc36471af1e913e9b0d04a82dbbd030837732db125fb40f39b8449b04",
+    "docs/macro-package.md": "256a3cab336c8d629538ca2cc43023b08681335ce1bcadc2ce56497e0aaef24b",
     "src/chipleap/macro/macro-v1.schema.json": "01fadd5205677b27ef3dcc5a00c086aaf00f2dba63d398d17fc046dd67254327",
     "tests/fixtures/macro/SHA256SUMS": "3170942c1f149c7e5781d5ee0571b9d86debd09ce7c19f647600481c9fc660ae",
 }
