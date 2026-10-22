@@ -166,20 +166,23 @@ def test_the_uart_example_has_one_clock_and_no_crossing(tmp_path):
     assert r.data["domains"] == {"clk_i": r.data["flops"]}
 
 
-def _accelerator(tmp_path: Path, cdc_rtl: str | None = None):
+def _accelerator(tmp_path: Path, cdc_rtl: str | None = None, direct: bool = False):
     """ChipLeap's accelerator on a clock of its own, as the bundle's cdc step checks it:
-    the SmolLM2 example's GEMV 1 x 8, the bus at 35 MHz and the accelerator at 90."""
+    the SmolLM2 example's GEMV 1 x 8, the bus at 35 MHz and the accelerator at 90. With
+    ``direct``, with its direct path to external memory and the memory block, whose
+    memory ports run on the accelerator's clock and X-HEEP's side crosses into it."""
     from chipleap.hw import Accel
     from chipleap.verify import crossings
 
     accel = Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2)
     (tmp_path / "accel").mkdir()
-    root = crossings.write_project(accel, tmp_path / "accel", 35.0, 90.0, cdc_rtl)
+    root = crossings.write_project(accel, tmp_path / "accel", 35.0, 90.0, cdc_rtl, direct)
     return cdc.cdc(load_project(root))
 
 
-def test_the_accelerators_own_clock_crosses_only_through_synchronizers(tmp_path):
-    r = _accelerator(tmp_path)
+@pytest.mark.parametrize("direct", [False, True], ids=["alone", "with-memory-block"])
+def test_the_accelerators_own_clock_crosses_only_through_synchronizers(tmp_path, direct):
+    r = _accelerator(tmp_path, direct=direct)
     assert r.status == "pass", r.summary
     assert set(r.data["domains"]) == {"clk_i", "accel_clk_i"}
     rules_seen = {a["rule"] for a in r.data["accepted"]}
@@ -191,9 +194,18 @@ def test_the_accelerators_own_clock_crosses_only_through_synchronizers(tmp_path)
         "reset_synchronizer",
     }
     # The register interface's request and acknowledge, and the interrupt.
+    at = "u_accel." if direct else ""
     sync = {a["from"] for a in r.data["accepted"] if a["rule"] == "synchronizer"}
-    assert sync == {"u_reg.b_req_q", "u_reg.a_ack_q", "a_irq_q"}
-    assert ("fifo_memory", "g_rd[0].u_rd.u_rsp.mem", "u_accel.u_core.wbuf") in accepted(r)
+    assert sync == {f"{at}u_reg.b_req_q", f"{at}u_reg.a_ack_q", f"{at}a_irq_q"}
+    wbuf = f"{at}u_accel.u_core.wbuf"
+    assert ("fifo_memory", f"{at}g_rd[0].u_rd.u_rsp.mem", wbuf) in accepted(r)
+    # X-HEEP's side into the memory ports: its two FIFOs' gray pointers, and a reset
+    # synchronizer on each side.
+    gray = {a["from"] for a in r.data["accepted"] if a["rule"] == "gray_synchronizer"}
+    xside = {g for g in gray if g.startswith("u_mem.g_cdc.u_xcdc.")}
+    assert len(xside) == (4 if direct else 0)
+    resets = {a["to"] for a in r.data["accepted"] if a["rule"] == "reset_synchronizer"}
+    assert {"u_mem.m_rst_n", "u_mem.x_rst_n"} <= resets if direct else len(resets) == 2
     assert r.data["warnings"] == 0
 
 
@@ -206,11 +218,12 @@ def test_the_accelerators_own_clock_crosses_only_through_synchronizers(tmp_path)
         ("assign empty_o = rptr == wptr_r;", "assign empty_o = rptr == wptr;", "unsynchronized"),
     ],
 )
-def test_a_broken_crossing_in_the_accelerators_is_found(tmp_path, old, new, rule):
+@pytest.mark.parametrize("direct", [False, True], ids=["alone", "with-memory-block"])
+def test_a_broken_crossing_in_the_accelerators_is_found(tmp_path, old, new, rule, direct):
     from chipleap.gen.rtl import cdc_sv
 
     text = cdc_sv()
     assert text.count(old) == 1
-    r = _accelerator(tmp_path, text.replace(old, new))
+    r = _accelerator(tmp_path, text.replace(old, new), direct)
     assert r.status == "fail"
     assert rule in {f["rule"] for f in r.data["findings"] if f["severity"] == "error"}
