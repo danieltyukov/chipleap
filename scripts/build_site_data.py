@@ -53,6 +53,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 # Before chipleap is imported: its technology table loads the user's own technologies.
 os.environ["CHIPLEAP_TECH_DIR"] = ""
 
@@ -556,12 +558,42 @@ def callouts_html(pos: dict[str, list[float]], design: dict[str, Any]) -> tuple[
     return "\n".join(out), key_html
 
 
-def layout_html(rows: list[dict[str, Any]]) -> str:
+DATAFLOWS = {
+    "gemv": "GEMV engine",
+    "ws": "weight-stationary array",
+    "os": "output-stationary array",
+}
+
+
+def accel_label(bundle: Path) -> str:
+    """The bundle's accelerator in words, as the layout band names it: "1 x 8 GEMV engine"."""
+    d = yaml.safe_load((bundle / "design.yaml").read_text())
+    a = (d.get("design") or d)["accel"]
+    return f"{a['rows']} x {a['cols']} {DATAFLOWS.get(a['dataflow'], a['dataflow'] + ' array')}"
+
+
+def layout_html(rows: list[dict[str, Any]], label: str) -> str:
     """The routed layout beside the numbers LibreLane reported for it."""
     pr = next((r for r in rows if r["step"] == "pnr"), None)
     if pr is None or pr["status"] != "pass":
         return ""
-    checks = "DRC and LVS clean" if not pr["drc_errors"] and not pr["lvs_errors"] else "see report"
+    clean = not (
+        pr["drc_errors"]
+        or pr["lvs_errors"]
+        or pr.get("antenna_nets")
+        or _ihp_antenna(pr)
+        or pr.get("max_slew_violations")
+        or pr.get("max_cap_violations")
+    )
+    checks = "DRC, LVS and antenna clean" if clean else "see report"
+    if pr.get("macros"):
+        n = len(pr["macros"])
+        buffers = f"Its buffers are {n} of IHP's SRAM macros, in rows above and below the logic."
+    else:
+        buffers = (
+            "Its buffers are SRAM macros in silicon, cut to "
+            f"{pr.get('buffer_words', 16)} words here."
+        )
     facts = [
         ("Standard cells", f"{pr['cells']:,}", ""),
         ("Core area", f"{pr['core_um2'] / 1e6:.2f}", "mm²"),
@@ -575,12 +607,12 @@ def layout_html(rows: list[dict[str, Any]]) -> str:
     return (
         '<div class="layout"><picture><source type="image/webp" srcset="img/layout-1200.webp">'
         '<img src="img/layout-1200.jpg" width="1000" height="1000" loading="lazy" '
-        'alt="The routed layout of the 1 x 8 GEMV engine on IHP SG13G2: signal wires on four '
-        'metal layers under the power grid"></picture>'
+        f'alt="The routed layout of the {html.escape(label)} on IHP SG13G2: signal wires on '
+        'four metal layers under the power grid"></picture>'
         "<div><h3>And then it is placed and routed</h3>"
         "<p>The same accelerator, through LibreLane on IHP SG13G2: placement, clock tree, "
         f"routing, timing at every corner, {checks}. This is the GDS it wrote, drawn in the "
-        "PDK's layer colours. Its buffers are SRAM macros in silicon, cut to 16 words here."
+        f"PDK's layer colours. {buffers}"
         f"</p><dl>{dl}</dl></div></div>"
     )
 
@@ -1259,7 +1291,7 @@ def main() -> None:
         if args.layout:
             layout_images(Path(args.layout))
         if (SITE / "img" / "layout-1200.jpg").exists():
-            inject(page, "layout", layout_html(rows))
+            inject(page, "layout", layout_html(rows, accel_label(Path(args.verify))))
         sim = next((r for r in rows if r["step"] == "sim"), None)
         if all(r["status"] == "pass" for r in rows) and sim:
             verify_line = (
