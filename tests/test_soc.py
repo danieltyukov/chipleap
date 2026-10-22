@@ -541,3 +541,49 @@ def test_the_soc_fails_on_ihps_antenna_deck():
     failed = soc_step_result(design, replace(s, pnr=replace(routed, ihp_antenna=bad)), 1.0)
     assert failed.status == "fail" and "Ant.e_Metal5" in failed.summary
     assert failed.data["ihp_antenna"]["violations"] == 1
+
+
+def _report_path(start: str, end: str, slack: float, group: str = "clk", edge: str = "rise") -> str:
+    capture = 27.778 if edge == "rise" else 13.889
+    return (
+        f"Startpoint: {start} (rising edge-triggered flip-flop clocked by {group})\n"
+        f"Endpoint: {end} (rising edge-triggered flip-flop clocked by {group})\n"
+        f"Path Group: {group}\nPath Type: max\n\n"
+        f"                                  0.000000    0.000000   clock {group} (rise edge)\n"
+        f"                                 {capture:.6f}   {capture:.6f}   clock {group} ({edge} edge)\n"
+        f"                                            {slack:.6f}   slack (MET)\n\n"
+    )
+
+
+def test_the_socs_clock_terms_are_measured_from_its_routed_paths(monkeypatch):
+    """scripts/fit_soc_clock.py: the slowest path from a bank, less that macro's read time,
+    and the slowest other path of clk, leaving out the accelerator's own paths, the other
+    clocks and the half-cycle paths."""
+    import importlib.util
+    import sys
+
+    from chipleap.macro.sram import IHP_1P_READ_NS
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "fit_soc_clock.py"
+    spec = importlib.util.spec_from_file_location("fit_soc_clock", path)
+    assert spec is not None and spec.loader is not None
+    fit = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "fit_soc_clock", fit)  # dataclasses look it up there
+    spec.loader.exec_module(fit)
+    bank = f"{soc.MCU_INST}.memory_subsystem_i.ram0_i.g_8192x32.bank_m1"
+    report = "header\n" + "".join(
+        [
+            _report_path("_cpu_", "_dma_", -0.219),
+            _report_path(f"{soc.ACCEL_INST}._a_", f"{soc.ACCEL_INST}._b_", -2.0),
+            _report_path(bank, "_cpu_", 1.526),
+            _report_path("_jtag_", "_jtag2_", -5.0, group="jtag_tck"),
+            _report_path("_i2s_", "_ws_", -3.0, edge="fall"),
+        ]
+    )
+    found = fit.paths(report)
+    assert [p.start for p in found] == ["_cpu_", f"{soc.ACCEL_INST}._a_", bank]
+    read, bus = fit.terms(found, {bank: "RM_IHPSG13_1P_1024x32_c2_bm_bist"})
+    assert read is not None and bus is not None
+    cq = IHP_1P_READ_NS["RM_IHPSG13_1P_1024x32_c2_bm_bist"]
+    assert read[0] == pytest.approx(27.778 - 1.526 - cq)
+    assert bus.start == "_cpu_" and bus.needed_ns == pytest.approx(27.997)
