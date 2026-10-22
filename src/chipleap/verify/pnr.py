@@ -345,6 +345,83 @@ def with_ihp_antenna(
         raise PnrError(str(exc)) from None
 
 
+DRC_DIR = "drc"  # beside the run: IHP's DRC deck's reports and logs, when ChipLeap runs it
+
+
+def ihp_drc(
+    pdk: Path, gds: Path, top: str, out: Path, held: Mapping[str, tuple[str, ...]]
+) -> DrcResult:
+    """IHP's DRC deck (IHP-Open-PDK's ``run_drc.py``) on ``gds``, in up to four of its
+    tables at once with the run's threads shared among them, as the chip step runs it
+    (``chipleap.chip.assemble.drc``), and with density off and recommended rules on, as
+    LibreLane checks a block. ``held`` names the cells of the PDK's own macros, whose
+    off-grid pin markers are set apart. A run that did not finish, or whose exit code
+    disagrees with its report, is an error."""
+    from chipleap.chip.run import ToolError, ihp_runner, klayout_threads
+
+    threads = klayout_threads()
+    workers = max(1, min(4, threads // 4))
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    try:
+        code, log = ihp_runner(
+            pdk,
+            "drc",
+            out,
+            {"layout.gds": gds},
+            lambda d: [
+                "--path=layout.gds",
+                f"--topcell={top}",
+                f"--run_dir={d}",
+                f"--mp={workers}",
+                f"--density_thr={max(1, threads // workers)}",
+                "--run_mode=deep",
+                "--no_density",
+            ],
+            (),
+            limit,
+        )
+    except ToolError as exc:
+        raise PnrError(f"IHP's DRC: {exc}") from None
+    report = out / f"layout_{top}_full.lyrdb"
+    if code not in (0, 1) or not report.is_file():
+        last = next((ln for ln in reversed(log.splitlines()) if ln.strip()), "")
+        raise PnrError(f"IHP's DRC did not finish (exit {code}): {last}")
+    result = DrcResult(top=top)
+    try:
+        read_lyrdb(report, result, held)
+    except (DrcReportError, OSError) as exc:
+        raise PnrError(f"IHP's DRC report: {exc}") from None
+    if (code == 1) != (result.total + result.markers > 0):
+        raise PnrError(f"IHP's DRC exited {code} with {result.total} violations in its report")
+    return result
+
+
+def with_ihp_drc(
+    r: PnrResult,
+    pdk: Path | None,
+    top: str,
+    work: Path,
+    held: Mapping[str, tuple[str, ...]],
+    name: str = DRC_DIR,
+) -> PnrResult:
+    """``r``, from a run with LibreLane's KLayout DRC off, with IHP's DRC deck run on its
+    GDS (``ihp_drc``, its reports in ``work/name``): its violations added to the DRC count
+    and the PDK macros' off-grid pin markers set apart. Signoff needs it, so a deck that
+    cannot run here is an error, not a skipped check."""
+    if r.gds is None:
+        raise PnrError("the run left no GDS for IHP's DRC")
+    why = antenna.unavailable(pdk)
+    if why or pdk is None:
+        raise PnrError(f"IHP's DRC cannot run: {why}")
+    out = builddir.work_dir(work, name, empty=True)
+    result = ihp_drc(pdk, r.gds, top, out, held)
+    return replace(
+        r,
+        drc_errors=r.drc_errors + result.total,
+        pin_markers=[*r.pin_markers, *result.markers_data()],
+    )
+
+
 DETAILED_ROUTING = "OpenROAD.DetailedRouting"
 AFTER_ROUTING = "Odb.RemoveRoutingObstructions"  # the Classic flow's next step
 DEF_TO_ODB = "OpenROAD.DEFtoODB"
