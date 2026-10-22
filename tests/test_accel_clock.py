@@ -207,7 +207,9 @@ def test_a_macro_build_on_its_own_clock_puts_its_macros_inside_the_crossings(tmp
     assert "set_max_transition 0.3 [current_design]" in pnr_sdc
     assert "set_max_transition 0.3" not in signoff_sdc and "base.sdc" not in signoff_sdc
     src = (work / "src" / "chipleap_accel_cdc.v").read_text()
-    assert "chipleap_accel_sram u_accel (" in src and "module chipleap_accel_cdc" in src
+    # The macro build behind the crossings takes only the direct path's parameters.
+    assert "chipleap_accel_sram #(\n      .EXT_DIRECT(EXT_DIRECT)," in src
+    assert "module chipleap_accel_cdc" in src
     assert ".MAX_OUTSTANDING(8)," in (work / "src" / "chipleap_accel_sram.v").read_text()
     assert r.clocks == {"clk_i": 23.641, "accel_clk_i": 11.111}
     # The band between the macro rows holds the crossings too.

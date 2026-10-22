@@ -34,9 +34,8 @@ import yaml
 
 from chipleap.chip import merge
 from chipleap.gen import banks, soc
-from chipleap.gen.rtl import accel_sv
+from chipleap.gen.rtl import accel_sv, mem_sv
 from chipleap.hw.design import Design
-from chipleap.hw.memory import NONE_KEY
 from chipleap.hw.tech import get_tech
 from chipleap.macro import grid, layer, place, sram
 from chipleap.macro.layer import MacroView
@@ -295,20 +294,22 @@ def generate(
     plans = tuple(soc.plan_banks(depths, srams))
     accel_banks = banks.plan(design.accel, srams)
     src = builddir.work_dir(work, "src", empty=True)
+    # With external memory the accelerator reads it over its direct path, which shares the
+    # memory ports with X-HEEP's external slave ports (chipleap_mem).
+    direct = design.direct_memory
     out = {
         "chipleap_clock_cells.sv": soc.clock_cells_sv(),
         "sram_wrapper.sv": soc.sram_wrapper_sv(plans),
         "chipleap_accel.sv": accel_sv(),
         f"{banks.TOP}.v": banks.top_sv(accel_banks),
-        f"{soc.TOP}.sv": soc.top_sv(
-            ports, design.accel.ports, ext_memory=design.ext_mem != NONE_KEY
-        ),
+        **({"chipleap_mem.sv": mem_sv()} if direct else {}),
+        f"{soc.TOP}.sv": soc.top_sv(ports, design.accel.ports, ext_memory=direct),
     }
     for name, text in out.items():
         builddir.write_text(src, name, text)
     wrappers = [f"x-heep/{w}" for w in CLOCK_WRAPPERS]
     order = ["chipleap_clock_cells.sv"]
-    tail = ["sram_wrapper.sv", "chipleap_accel.sv", f"{banks.TOP}.v", f"{soc.TOP}.sv"]
+    tail = [n for n in out if n != order[0]]
     return (
         [f"src/{order[0]}", *wrappers, *(f"src/{n}" for n in tail)],
         plans,

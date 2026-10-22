@@ -72,13 +72,12 @@ def test_a_port_the_reader_cannot_read_stops_it():
 def test_the_top_wires_the_accelerator_and_brings_the_rest_out():
     top = soc.top_sv(soc.mcu_ports(MCU), accel_ports=1)
     head = top[: top.index(");")]
-    # Pads, exit value and the external memory's OBI ports, with X-HEEP's types.
+    # Pads, exit value and the memory controller's port, with X-HEEP's types.
     assert "input logic uart_rx_i" in head and "output logic [31:0] exit_value_o" in head
     assert "output xheep_reg_pkg::xheep_reg_req_t pad_req_o" in head
-    assert (
-        "output xheep_obi_pkg::xheep_obi_req_t [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0]"
-        " ext_dma_read_req_o" in head
-    )
+    assert "output xheep_obi_pkg::xheep_obi_req_t [0:0] mem_req_o" in head
+    assert "input xheep_obi_pkg::xheep_obi_rsp_t [0:0] mem_resp_i" in head
+    assert "ext_dma_read" not in head
     # Tied, open, the interface and the accelerator's connections are not ports, nor are
     # the external slave ports nothing uses: the instruction port and the DMA's address port.
     for name in (
@@ -108,7 +107,34 @@ def test_the_top_wires_the_accelerator_and_brings_the_rest_out():
     assert ".cpu_subsystem_powergate_switch_ack_ni(cpu_subsystem_powergate_switch_n)" in top
     # The write port is the master after the read ports.
     assert "assign acc_obi_req[1].we = 1'b1;" in top
-    assert f"{banks.TOP} {soc.ACCEL_INST} (" in top
+    assert f"{banks.TOP} #(\n      .EXT_DIRECT(1)," in top and f") {soc.ACCEL_INST} (" in top
+
+
+def test_x_heeps_external_slave_ports_share_the_memory_port_with_the_accelerator():
+    mcu = MCU.replace(
+        "    output obi_req_t ext_core_instr_req_o,",
+        "    output obi_req_t ext_core_data_req_o,\n"
+        "    input  obi_rsp_t ext_core_data_resp_i,\n"
+        "    output obi_req_t  [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0] ext_dma_write_req_o,\n"
+        "    input  obi_rsp_t  [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0] ext_dma_write_resp_i,\n"
+        "    output obi_req_t ext_core_instr_req_o,",
+    )
+    top = soc.top_sv(soc.mcu_ports(mcu), accel_ports=2)
+    head = top[: top.index(");")]
+    assert "ext_core_data" not in head and "ext_dma_write" not in head
+    # In chipleap_mem's order: the CPU's data port, then the DMA's read and write ports.
+    d = "core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS"
+    assert ".ext_core_data_req_o(xs_req[0])" in top
+    assert f".ext_dma_read_req_o(xs_req[1 + {d} - 1:1])" in top
+    assert f".ext_dma_write_resp_i(xs_rsp[1 + {d} + {d} - 1:1 + {d}])" in top
+    assert f"localparam int unsigned NX = 1 + {d} + {d};" in top
+    assert "output xheep_obi_pkg::xheep_obi_req_t [1:0] mem_req_o" in head
+    # The accelerator reads X-HEEP's own external window over its direct ports.
+    assert ".EXT_SIZE(core_v_mini_mcu_pkg::EXT_SLAVE_SIZE)" in top
+    assert ".ext_req_o(ext_req)" in top and ".a_req_i(ext_req)" in top
+    assert "chipleap_mem #(\n      .PORTS(2),\n      .NX(NX),\n      .CDC(0)" in top
+    # Everything the top uses is declared before the MCU's instance uses it.
+    assert top.index("xs_req;") < top.index(f"{soc.MCU_INST} (")
 
 
 def test_without_external_memory_every_external_slave_port_is_tied_off():
@@ -117,6 +143,8 @@ def test_without_external_memory_every_external_slave_port_is_tied_off():
     assert "ext_dma_read" not in head and "ext_core_instr" not in head
     assert ".ext_dma_read_resp_i('0)" in top and ".ext_dma_read_req_o()" in top
     assert "pad_req_o" in head
+    # No direct path: the accelerator's ports for it are tied off, and no memory port.
+    assert ".ext_gnt_i('0)" in top and "mem_req_o" not in top and "chipleap_mem" not in top
 
 
 def test_a_port_the_top_does_not_know_stops_it():

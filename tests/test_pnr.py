@@ -148,7 +148,7 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     pdn = (work / "pdn.tcl").read_text()
     assert "source $::env(SCRIPTS_DIR)/openroad/common/pdn_cfg.tcl" in pdn
     assert f"define_pdn_grid -macro -cells {{{cell}}}" in pdn
-    assert "module chipleap_accel_sram (" in (work / "src" / "chipleap_accel_sram.v").read_text()
+    assert "module chipleap_accel_sram #(" in (work / "src" / "chipleap_accel_sram.v").read_text()
     assert len(r.macros) == 4 and r.macro_um2 == pytest.approx(4 * 784.48 * 118.78)
     assert r.buffers == f"SRAM macros: 4 x {cell}" and r.cell_um2 == 250000.0
     # A build the banks cannot take keeps the flop buffers, and says why.

@@ -127,6 +127,14 @@ class Design:
     def sram_kib(self) -> int:
         return self.banks * self.bank_kib + self.il_banks * self.il_bank_kib
 
+    @property
+    def direct_memory(self) -> bool:
+        """Whether the accelerator reads external memory over a direct path of its own
+        (``EXT_DIRECT`` and ``chipleap_mem``): on X-HEEP, whose bus does not let an
+        external master reach its external slave window, whenever there is external
+        memory."""
+        return self.platform == "xheep" and self.accel is not None and self.ext_mem != NONE_KEY
+
     def validate(self) -> None:
         if not is_safe_name(self.name):
             raise DesignError(

@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from chipleap.gen.rtl import rtl_params
+from chipleap.gen.rtl import EXT_WINDOW, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
 from chipleap.macro import place
@@ -218,15 +218,21 @@ def bank_macros(
         lines.append(f"  assign {sig[3]} = {prefix}_q0[{bits - 1}:0];")
 
 
-def top_sv(banks: Banks, max_outstanding: int | None = None) -> str:
+def top_sv(banks: Banks, max_outstanding: int | None = None, direct: bool = False) -> str:
     """``chipleap_accel_sram``: the ports of ``chipleap_accel`` for this build, the core
     with ``SRAM_BUF`` and the macros of every bank. ``max_outstanding`` sets the core's
-    reads in flight per port (behind clock crossings, as many as they hold)."""
+    reads in flight per port (behind clock crossings, as many as they hold). The direct
+    read path to external memory is a parameter of the module (``EXT_DIRECT``, with its
+    window), on by default with ``direct``."""
     p = rtl_params(banks.accel)
     b, nab, nwb, aba, wba = banks.bank_bits, banks.nab, banks.nwb, banks.aba, banks.wba
     lines = [
         "// Written by ChipLeap: the accelerator with its buffers in IHP's SRAM macros.",
-        f"module {TOP} (",
+        f"module {TOP} #(",
+        f"    parameter EXT_DIRECT = {int(direct)},",
+        f"    parameter [31:0] EXT_BASE = 32'h{EXT_WINDOW[0]:08X},",
+        f"    parameter [31:0] EXT_SIZE = 32'h{EXT_WINDOW[1]:08X}",
+        ") (",
         "    input wire clk_i,",
         "    input wire rst_ni,",
         "    input wire reg_valid_i,",
@@ -248,6 +254,11 @@ def top_sv(banks: Banks, max_outstanding: int | None = None) -> str:
         "    output wire [31:0] wr_wdata_o,",
         "    output wire [3:0] wr_be_o,",
         "    input wire wr_rvalid_i,",
+        "    output wire [0:0] ext_req_o,",
+        "    input wire [0:0] ext_gnt_i,",
+        "    output wire [31:0] ext_addr_o,",
+        "    input wire [0:0] ext_rvalid_i,",
+        "    input wire [31:0] ext_rdata_i,",
         "    output wire irq_o",
         ");",
         f"  wire [{nab - 1}:0] abank_re, abank_we;",
@@ -273,6 +284,9 @@ def top_sv(banks: Banks, max_outstanding: int | None = None) -> str:
             )
         ),
         *([f"    .MAX_OUTSTANDING({max_outstanding}),"] if max_outstanding else []),
+        "    .EXT_DIRECT(EXT_DIRECT),",
+        "    .EXT_BASE(EXT_BASE),",
+        "    .EXT_SIZE(EXT_SIZE),",
         "    .SRAM_BUF(1)",
         "  ) u_core (",
         *(
@@ -299,6 +313,11 @@ def top_sv(banks: Banks, max_outstanding: int | None = None) -> str:
                 "wr_wdata_o",
                 "wr_be_o",
                 "wr_rvalid_i",
+                "ext_req_o",
+                "ext_gnt_i",
+                "ext_addr_o",
+                "ext_rvalid_i",
+                "ext_rdata_i",
             ]
         ),
         *(
