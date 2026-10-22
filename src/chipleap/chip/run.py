@@ -134,6 +134,20 @@ def run(
     return proc.returncode, data[-4000:].decode(errors="replace")
 
 
+def klayout_threads() -> int:
+    """Threads for IHP's KLayout decks: the run's own thread count when it gives one
+    (``LIBRELANE_MAX_CORES``, which a run that bounds LibreLane's threads sets), else the
+    CPUs this process may run on. ``run_drc.py`` otherwise takes one thread per CPU of the
+    machine, 255 on a shared server where the run was bound to a few with taskset."""
+    given = os.environ.get("LIBRELANE_MAX_CORES", "").strip()
+    if given.isdigit() and int(given) > 0:
+        return int(given)
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
 def ihp_runner(
     pdk: Path,
     which: str,

@@ -13,12 +13,11 @@ violations, each named with its rule and where it is.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from chipleap.chip.run import ToolError, ihp_runner, python_with_klayout
+from chipleap.chip.run import ToolError, ihp_runner, klayout_threads, python_with_klayout
 from chipleap.verify.drc import DrcReportError, DrcResult, read_lyrdb
 
 DECK = Path("libs.tech") / "klayout" / "tech" / "drc" / "rule_decks" / "antenna.drc"
@@ -26,16 +25,6 @@ DECK = Path("libs.tech") / "klayout" / "tech" / "drc" / "rule_decks" / "antenna.
 
 class AntennaError(RuntimeError):
     pass
-
-
-def threads() -> int:
-    """KLayout's threads for the deck: half the CPUs this process may use, at most 8, as
-    for LibreLane's KLayout DRC. The deck takes one per CPU of the machine without it."""
-    try:
-        cpus = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        cpus = os.cpu_count() or 2
-    return max(1, min(8, cpus // 2))
 
 
 def unavailable(pdk: Path | None) -> str:
@@ -65,7 +54,7 @@ def check(pdk: Path, gds: Path, top: str, out_dir: Path, timeout: float) -> DrcR
                 f"--topcell={top}",
                 f"--run_dir={d}",
                 "--antenna_only",
-                f"--density_thr={threads()}",
+                f"--density_thr={klayout_threads()}",
             ],
             (),
             timeout,

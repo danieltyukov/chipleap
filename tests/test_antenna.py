@@ -91,6 +91,7 @@ def _runner(monkeypatch, code: int, items: list[tuple[str, str, str]] | None, se
 
 
 def test_the_deck_runs_on_the_gds_alone_and_its_threads_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIBRELANE_MAX_CORES", "6")
     seen: dict = {}
     _runner(monkeypatch, 0, [], seen)
     gds = tmp_path / "top.gds"
@@ -104,7 +105,7 @@ def test_the_deck_runs_on_the_gds_alone_and_its_threads_are_bounded(tmp_path, mo
         "--antenna_only",
     ]
     # Without a bound the deck takes a thread per CPU of the machine.
-    assert seen["args"][4] == f"--density_thr={antenna.threads()}" and 1 <= antenna.threads() <= 8
+    assert seen["args"][4] == "--density_thr=6"
     assert seen["timeout"] == 60.0
 
 
@@ -176,6 +177,43 @@ def test_ihps_deck_flags_a_gate_on_a_long_poly_and_says_where(tmp_path):
     assert antenna.describe(antenna.summary(r), "ant") == "Ant.a at (0.50, 501.00) um"
     gds.write_bytes(_gate_gds("ant", 100))
     assert antenna.check(pdk, gds, "ant", tmp_path / "out2", 600.0).total == 0
+
+
+def test_ihps_decks_take_the_runs_threads_or_the_cpus_it_may_use(monkeypatch):
+    from chipleap.chip import run
+
+    monkeypatch.setattr(run.os, "sched_getaffinity", lambda pid: set(range(40, 48)))
+    monkeypatch.setattr(run.os, "cpu_count", lambda: 255)
+    monkeypatch.setenv("LIBRELANE_MAX_CORES", "12")
+    assert run.klayout_threads() == 12
+    for unset in ("", "0", "twelve", "-3"):
+        monkeypatch.setenv("LIBRELANE_MAX_CORES", unset)
+        assert run.klayout_threads() == 8  # bound to 8 of the machine's 255
+    monkeypatch.delenv("LIBRELANE_MAX_CORES")
+    assert run.klayout_threads() == 8
+
+
+@pytest.mark.parametrize(
+    "cores, parts, each", [("16", 4, 4), ("8", 2, 4), ("3", 1, 3), ("22", 4, 5)]
+)
+def test_the_chips_drc_shares_the_runs_threads_among_its_parts(
+    tmp_path, monkeypatch, cores, parts, each
+):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("LIBRELANE_MAX_CORES", cores)
+    seen: dict = {}
+
+    def fake(pdk, which, out_dir, inputs, args, keep, timeout):
+        seen.update(which=which, args=args(Path("run")))
+        return 0, ""
+
+    monkeypatch.setattr(assemble, "ihp_runner", fake)
+    monkeypatch.setattr(assemble, "drc_result", lambda *a: drc.DrcResult())
+    p = SimpleNamespace(work=tmp_path, pdk=tmp_path, imported=SimpleNamespace(views={}))
+    assemble.drc(p, tmp_path / "c.gds", "c")  # type: ignore[arg-type]
+    assert seen["which"] == "drc"
+    assert f"--mp={parts}" in seen["args"] and f"--density_thr={each}" in seen["args"]
 
 
 def test_what_the_deck_needs(tmp_path, monkeypatch):

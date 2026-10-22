@@ -31,6 +31,7 @@ from chipleap.chip.run import (
     ToolError,
     ihp_runner,
     klayout,
+    klayout_threads,
     python_with_klayout,
     run,
 )
@@ -429,7 +430,9 @@ def drc(p: Prepared, final: Path, name: str) -> DrcResult:
     included, recommended rules left out (bond pads against their IO cells break
     Pad.d1R and Pad.fR_* by design, as on IHP's own reference chips)."""
     drc_dir = builddir.work_dir(p.work, "drc", empty=True)
-    workers = max(1, min(4, (os.cpu_count() or 2) // 4))
+    # Up to four parts of the deck at once, the run's threads shared among them.
+    threads = klayout_threads()
+    workers = max(1, min(4, threads // 4))
     code, log = ihp_runner(
         p.pdk,
         "drc",
@@ -440,6 +443,7 @@ def drc(p: Prepared, final: Path, name: str) -> DrcResult:
             f"--topcell={name}",
             f"--run_dir={d}",
             f"--mp={workers}",
+            f"--density_thr={max(1, threads // workers)}",
             "--run_mode=deep",
             "--no_recommended",
         ],
