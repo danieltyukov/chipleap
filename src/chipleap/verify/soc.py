@@ -21,6 +21,7 @@ LibreLane on IHP SG13G2.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -549,6 +550,47 @@ def _pin_at(p: place.Placed, view: MacroView, pin: str) -> tuple[float, float] |
     return p.x + x, p.y + y
 
 
+# IHP's integrated clock gate, which X-HEEP's clock gates are (``chipleap.gen.soc``), and
+# the buffer after each.
+CLOCK_GATE = "sg13g2_slgcp_1"
+GATE_BUFFER = "sg13g2_buf_16"
+_DEF_UNITS_RE = re.compile(r"^UNITS DISTANCE MICRONS (\d+) ;", re.M)
+_DEF_GATE_RE = re.compile(
+    rf"^\s*-\s+(\S+)\s+{CLOCK_GATE}\s.*?\+\s+(?:PLACED|FIXED)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)",
+    re.M,
+)
+
+
+def clock_gates(def_text: str) -> list[tuple[str, float, float]]:
+    """Each clock gate (``CLOCK_GATE``) of a placed DEF, by its instance name as written in
+    the netlist (DEF's escapes removed), with its place in um."""
+    units = _DEF_UNITS_RE.search(def_text)
+    if units is None or int(units.group(1)) <= 0:
+        raise SocError("the DEF after the clock tree gives no database units")
+    dbu = int(units.group(1))
+    return [
+        (re.sub(r"\\(.)", r"\1", name), int(x) / dbu, int(y) / dbu)
+        for name, x, y in _DEF_GATE_RE.findall(def_text)
+    ]
+
+
+def gate_buffers(gates: Iterable[tuple[str, float, float]]) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS`` for a buffer after each clock gate's output,
+    placed where the gate is (the legaliser moves it beside it).
+
+    The integrated clock gate is IHP's one, a weak cell, and drives the root of its tree
+    over the wire to where CTS put that root (0.4 to 0.8 mm on the SmolLM2 SoC): the gated
+    trees reach their flip-flops 0.6 to 0.7 ns after the ungated ones at the slow corner,
+    and DMA0's registers were the worst hold endpoints in every layout. From one 36 MHz
+    placement, routed, a buffer after each gate took setup from +0.259 to +0.490 ns at the
+    slow corner and hold from -0.060 to +0.144 ns at the fast one. Placement decides where
+    the gates are, so the layout stops after the clock tree to read them (``layout``)."""
+    return [
+        {"target": f"{name}/GCLK", "buffer": GATE_BUFFER, "placement": [round(x, 3), round(y, 3)]}
+        for name, x, y in gates
+    ]
+
+
 def clock_pin_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> list[dict[str, Any]]:
     """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer before the clock pin of each of the
     accelerator's macros (``views`` by instance), placed just off the macro's edge where
@@ -712,10 +754,31 @@ def place_and_route(
     if synth <= 0:
         raise SocError("LibreLane's synthesis reported no standard-cell area")
     full, _ = with_floorplan(cfg, prep, synth, work)
+    metrics, gds = layout(work, full)
+    return routed(design, work, pdk, clock, prep.instances, synth, metrics, gds)
+
+
+def layout(work: Path, full: dict[str, Any]) -> tuple[dict[str, Any], Path | None]:
+    """The layout, resumed after synthesis, in two parts: up to the clock tree, then the
+    rest from the buffers inserted after it (``ECO_BUFFERS``), with a buffer after each
+    clock gate where placement put the gate (``gate_buffers``) besides those beside the
+    accelerator's macros. The final metrics and GDS."""
     # Without the second antenna repair (``late_antenna_repair``): the SoC's evidence was
     # routed without it, and it is turned on once a SoC run with it has been checked.
-    metrics, gds = pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S)
-    return routed(design, work, pdk, clock, prep.instances, synth, metrics, gds)
+    pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, to=CTS, timeout_s=TIMEOUT_S)
+    run = work / "runs" / "chipleap"
+    state = pnr.step_state(run, CTS)
+    if state is None:
+        raise SocError("LibreLane left no state after the clock tree")
+    try:
+        def_path = Path(json.loads(state.read_text()).get("def") or "")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise SocError(f"LibreLane's state after the clock tree: {exc}") from None
+    if not def_path.is_file() or not def_path.resolve().is_relative_to(run.resolve()):
+        raise SocError("LibreLane's state after the clock tree names no DEF in its run")
+    gates = clock_gates(def_path.read_text(errors="replace"))
+    full = {**full, "INSERT_ECO_BUFFERS": [*full["INSERT_ECO_BUFFERS"], *gate_buffers(gates)]}
+    return pnr.run_librelane(work, full, resume_from=ECO_BUFFERS, timeout_s=TIMEOUT_S)
 
 
 def routed(

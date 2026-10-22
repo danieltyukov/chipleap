@@ -605,3 +605,74 @@ def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
         monkeypatch.setenv(soc_step.HOLD_MARGIN_ENV, bad)
         with pytest.raises(soc_step.SocError, match="CHIPLEAP_SOC_HOLD_MARGIN must be"):
             soc_step.config(sources, 36.0)
+
+
+_DEF = """VERSION 5.8 ;
+UNITS DISTANCE MICRONS 1000 ;
+COMPONENTS 3 ;
+    - u_mcu.dma_i_gen\\[0\\].g_gate.i_icg sg13g2_slgcp_1 + PLACED ( 2218080 1202040 ) N ;
+    - u_mcu.other sg13g2_slgcp_1x + PLACED ( 1 2 ) N ;
+    - u_mcu.core_clock_gate_i.i_icg sg13g2_slgcp_1 + SOURCE TIMING + PLACED ( 2408000 809000 ) FS ;
+END COMPONENTS
+"""
+
+
+def test_clock_gates_are_read_where_placement_put_them():
+    gates = soc_step.clock_gates(_DEF)
+    assert gates == [
+        ("u_mcu.dma_i_gen[0].g_gate.i_icg", 2218.08, 1202.04),
+        ("u_mcu.core_clock_gate_i.i_icg", 2408.0, 809.0),
+    ]
+    assert soc_step.gate_buffers(gates)[0] == {
+        "target": "u_mcu.dma_i_gen[0].g_gate.i_icg/GCLK",
+        "buffer": "sg13g2_buf_16",
+        "placement": [2218.08, 1202.04],
+    }
+    with pytest.raises(soc_step.SocError, match="no database units"):
+        soc_step.clock_gates(_DEF.replace("UNITS DISTANCE MICRONS 1000 ;", ""))
+
+
+def test_the_layout_stops_after_the_clock_tree_to_buffer_the_gates(tmp_path, monkeypatch):
+    """The layout runs to the clock tree, reads the gates' places from the DEF it left,
+    and goes on from the buffers' step with a buffer after each gate besides the macros'."""
+    import json
+
+    from chipleap.verify import pnr
+
+    calls: list[tuple[dict, dict]] = []
+    run = tmp_path / "runs" / "chipleap"
+    outside = tmp_path / "elsewhere.def"
+
+    def fake(work, cfg, tag="chipleap", **kw):
+        calls.append((cfg, kw))
+        if kw.get("to") == soc_step.CTS:
+            step = run / "31-openroad-cts"
+            step.mkdir(parents=True)
+            target = outside if cfg.get("_outside") else step / "chipleap_soc.def"
+            target.write_text(_DEF)
+            (step / "state_out.json").write_text(json.dumps({"def": str(target)}))
+            return {}, None
+        return {"done": 1}, None
+
+    monkeypatch.setattr(pnr, "run_librelane", fake)
+    macro = {"target": "u_accel.abuf_s0_m0/A_CLK", "buffer": "sg13g2_buf_4", "placement": [1, 2]}
+    metrics, _ = soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [macro]})
+    assert metrics == {"done": 1}
+    assert calls[0][1] == {
+        "resume_from": soc_step.AFTER_SYNTHESIS,
+        "to": soc_step.CTS,
+        "timeout_s": soc_step.TIMEOUT_S,
+    }
+    assert calls[1][1]["resume_from"] == soc_step.ECO_BUFFERS and "to" not in calls[1][1]
+    eco = calls[1][0]["INSERT_ECO_BUFFERS"]
+    assert eco[0] == macro and [e["target"] for e in eco[1:]] == [
+        "u_mcu.dma_i_gen[0].g_gate.i_icg/GCLK",
+        "u_mcu.core_clock_gate_i.i_icg/GCLK",
+    ]
+    # A state that names a DEF outside the run is refused.
+    import shutil
+
+    shutil.rmtree(run)
+    calls.clear()
+    with pytest.raises(soc_step.SocError, match="names no DEF in its run"):
+        soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [], "_outside": True})

@@ -116,7 +116,7 @@ Most of a slow path is not logic. On the SmolLM2 SoC each of the worst carries 2
 | 36 MHz | -0.219 ns | 28.00 ns (35.7 MHz) |
 | @@CLOCK@@ MHz (the evidence) | @@SLACK@@ ns | @@NEEDED@@ ns |
 
-The 40 and 36 MHz layouts are from before two changes to the step: a buffer beside each accelerator macro's clock pin, and repairs that keep 6 ns of estimated setup slack after the clock tree and 5 ns after global routing, where the accelerator's keep 0.8 and 1.6 ns ([verification.md](verification.md)). The limit is the clock a layout met, not a promise for a faster one.
+The 40 and 36 MHz layouts are from before three changes to the step: a buffer beside each accelerator macro's clock pin, a buffer after each of X-HEEP's clock gates, and repairs that keep 6 ns of estimated setup slack after the clock tree and 5 ns after global routing, where the accelerator's keep 0.8 and 1.6 ns ([verification.md](verification.md)). The limit is the clock a layout met, not a promise for a faster one.
 
 The first estimate of this limit, 17.64 ns (56.7 MHz), was the slowest bank read after the repair that follows global routing, in a layout at 90 MHz, without the derate. That is no basis for a clock. The repairs work against the global router's estimate of each wire, and on the SoC's long wires the extraction after detailed routing puts 14 to 20 % more capacitance on them: at 50 MHz an SRAM output net repaired to 0.0576 pF came out 0.0657 pF, a clock net's slew went from 0.607 to 0.728 ns, and the slow corner's worst setup slack went from +0.54 ns after global routing to -3.63 ns after routing, a period of 23.63 ns. The model's limit is what the routed layout needs.
 
