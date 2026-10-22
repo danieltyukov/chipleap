@@ -354,6 +354,9 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     # KLayout's DRC threads as IHP's deck reads them: ChipLeap's, which the ECO writes again.
     threads = {"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": "4"}}
     assert E._settings(p, threads, sealed) == {"KLAYOUT_DRC_THREADS": 4}
+    # Timing-driven placement as ChipLeap turns it on for LibreLane 3.0.14.
+    placed = {"PL_TIMING_DRIVEN": True}
+    assert E._settings(p, placed, sealed) == placed
     for bad, why in [
         ({"PLACEMENT_SCRIPT": "x.tcl"}, "does not pass on"),
         ({"PRE_GLOBAL_PLACEMENT_HOOK": 1}, "does not pass on"),
@@ -366,6 +369,7 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
         ({"CLOCK_PERIOD": "10"}, "not a number"),
         ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": "4", "x": "1"}}, "DEFINES"),
         ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": 4}}, "DEFINES"),
+        ({"PL_TIMING_DRIVEN": "true"}, "PL_TIMING_DRIVEN"),
     ]:
         with pytest.raises(E.EcoError, match=why):
             E._settings(p, bad, sealed)

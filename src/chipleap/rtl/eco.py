@@ -62,6 +62,7 @@ from chipleap.verify.pnr import (
     PnrError,
     PnrResult,
     begin_second_part,
+    for_librelane,
     klayout_drc,
     klayout_report,
     parse,
@@ -69,7 +70,6 @@ from chipleap.verify.pnr import (
     patch_min_area,
     second_part_result,
     step_state,
-    with_drc_threads,
 )
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import (
@@ -85,8 +85,8 @@ RESUME_AT = "OpenROAD.DetailedRouting"
 PREFIX = ("OpenROAD.DEFtoODB", "OpenROAD.DetailedPlacement", "OpenROAD.GlobalRouting")
 REPAIR = "OpenROAD.ResizerTimingPostGRT"
 STEP_ID_RE = re.compile(r"[A-Z][A-Za-z]*\.[A-Z][A-Za-z0-9]*")
-# The LibreLane variables ChipLeap's place and route writes (chipleap.rtl.pnr.config and
-# chipleap.verify.pnr.signoff), by the kind of value each takes. An ECO resumes LibreLane
+# The LibreLane variables ChipLeap's place and route writes (chipleap.rtl.pnr.config,
+# chipleap.verify.pnr.signoff and for_librelane), by the kind of value each takes. An ECO resumes LibreLane
 # with these, and with the project's own pnr.librelane settings that are numbers or
 # booleans; anything else in the configuration fails the ECO.
 TEMPLATE_KEYS = {
@@ -116,6 +116,7 @@ TEMPLATE_KEYS = {
     "GRT_RESIZER_HOLD_SLACK_MARGIN": "number",
     "KLAYOUT_DRC_THREADS": "number",
     "KLAYOUT_DRC_DEFINES": "drc_defines",
+    "PL_TIMING_DRIVEN": "bool",
     # A project with hard macros (chipleap.rtl.pnr.macro_config).
     "CORE_AREA": "number",
     "FP_MACRO_HORIZONTAL_HALO": "number",
@@ -418,7 +419,7 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
             _macros(value, sealed)
             continue
         if kind == "drc_defines":
-            # ChipLeap's own (``chipleap.verify.pnr.with_drc_threads``), which the ECO's
+            # ChipLeap's own (``chipleap.verify.pnr.for_librelane``), which the ECO's
             # run writes again.
             if value != {"threads": str(cfg.get("KLAYOUT_DRC_THREADS"))}:
                 raise EcoError(f"the routed run's configuration sets {key} to {value!r}")
@@ -581,7 +582,7 @@ def _run_librelane(
         env = librelane_env()
     except ValueError as exc:
         raise EcoError(str(exc)) from None
-    cfg = with_drc_threads(cfg, tool.version)
+    cfg = for_librelane(cfg, tool.version)
     builddir.write_text(work, "config.eco.json", json.dumps(cfg, indent=2))
     base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", ECO_TAG]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))

@@ -344,16 +344,27 @@ def second_part_result(
 # at 22f2a25 does not read: it reads ``threads`` and otherwise runs on every CPU the process
 # may use. KLAYOUT_DRC_DEFINES, which 3.0.0.dev44 does not know, passes ``threads`` too.
 DRC_DEFINES_FROM = (3, 0, 14, 2, 0)
+# LibreLane 3.0.0.dev44 places for timing by default (PL_TIME_DRIVEN); 3.0.14 calls it
+# PL_TIMING_DRIVEN, which 3.0.0.dev44 does not know, and leaves it off. Without it a 12 x 12
+# multiplier routed at 5.4 ns with no timing repair missed the slow corner by 1.608 ns, where
+# 3.0.0.dev44 missed by 0.624 and 3.0.14 with it by 0.314.
+TIMING_DRIVEN_FROM = (3, 0, 14, 2, 0)
+TIMING_DRIVEN_KEYS = ("PL_TIMING_DRIVEN", "PL_TIME_DRIVEN")
 
 
-def with_drc_threads(cfg: dict[str, Any], version: str) -> dict[str, Any]:
-    """``cfg`` with KLayout's DRC thread count also passed as ``threads``, the name IHP's
-    rule deck reads, on a LibreLane that knows ``KLAYOUT_DRC_DEFINES``."""
+def for_librelane(cfg: dict[str, Any], version: str) -> dict[str, Any]:
+    """``cfg`` with what LibreLane ``version`` needs told: KLayout's DRC thread count also
+    passed as ``threads``, the name IHP's rule deck reads, and global placement driven by
+    timing unless ``cfg`` says otherwise, both on a LibreLane that knows the variable."""
+    key = librelane_version_key(version)
+    out = dict(cfg)
     threads = cfg.get("KLAYOUT_DRC_THREADS")
-    if threads is None or librelane_version_key(version) < DRC_DEFINES_FROM:
-        return cfg
-    # LibreLane takes the defines as text.
-    return {**cfg, "KLAYOUT_DRC_DEFINES": {"threads": str(threads)}}
+    if threads is not None and key >= DRC_DEFINES_FROM:
+        # LibreLane takes the defines as text.
+        out["KLAYOUT_DRC_DEFINES"] = {"threads": str(threads)}
+    if key >= TIMING_DRIVEN_FROM and not any(k in cfg for k in TIMING_DRIVEN_KEYS):
+        out["PL_TIMING_DRIVEN"] = True
+    return out
 
 
 def run_librelane(
@@ -375,7 +386,7 @@ def run_librelane(
         env = librelane_env()
     except ValueError as exc:
         raise PnrError(str(exc)) from None
-    cfg = with_drc_threads(cfg, tool.version)
+    cfg = for_librelane(cfg, tool.version)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
     base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", tag]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))

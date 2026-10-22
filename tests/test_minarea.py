@@ -507,7 +507,31 @@ def test_klayouts_drc_threads_reach_ihps_deck(tmp_path, monkeypatch, version, de
     for name in ("config.json", pnr.MIN_AREA_CONFIG):
         cfg = json.loads((tmp_path / "pnr" / name).read_text())
         assert cfg.get("KLAYOUT_DRC_DEFINES") == defines, name
-    assert pnr.with_drc_threads({}, "3.0.14") == {}
+    assert "KLAYOUT_DRC_DEFINES" not in pnr.for_librelane({}, "3.0.14")
+
+
+@pytest.mark.parametrize(
+    ("version", "cfg", "driven"),
+    [
+        ("3.0.14", {}, True),
+        ("3.0.0.dev44", {}, None),
+        ("3.0.14", {"PL_TIMING_DRIVEN": False}, False),
+        ("3.0.14", {"PL_TIME_DRIVEN": False}, None),
+    ],
+)
+def test_placement_is_timing_driven_as_on_dev44(tmp_path, monkeypatch, version, cfg, driven):
+    """3.0.0.dev44 placed for timing by default; 3.0.14 renamed the variable and turned it
+    off, so ChipLeap turns it on there, unless the configuration sets it under either name.
+    3.0.0.dev44 refuses PL_TIMING_DRIVEN."""
+    _fake_librelane(tmp_path, monkeypatch, _finishes({"timing__setup__ws": 0.5}), [])
+    monkeypatch.setattr(
+        pnr, "librelane", lambda: SimpleNamespace(found=True, path="ll", version=version)
+    )
+    pnr.run_librelane(tmp_path / "pnr", cfg)
+    for name in ("config.json", pnr.MIN_AREA_CONFIG):
+        written = json.loads((tmp_path / "pnr" / name).read_text())
+        assert written.get("PL_TIMING_DRIVEN") == driven, name
+        assert written.get("PL_TIME_DRIVEN") == cfg.get("PL_TIME_DRIVEN"), name
 
 
 def test_a_group_without_paths_is_read(tmp_path, monkeypatch):
