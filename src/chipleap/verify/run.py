@@ -32,13 +32,12 @@ from chipleap.hw.design import Design
 from chipleap.hw.tech import (
     ACCEL_CDC_KGE,
     ACCEL_CDC_PORT_KGE,
-    MEM_ARB_KGE,
     accel_bank_kge,
     accel_logic_kge,
     get_tech,
 )
 from chipleap.model.accel import direct_outstanding, ext_latency
-from chipleap.model.evaluate import buffer_mm2, direct_kge, soc_limit_mhz
+from chipleap.model.evaluate import buffer_mm2, direct_port_kge, soc_limit_mhz
 from chipleap.rtl import builddir
 from chipleap.verify import backends, crossings, pnr, sim, synth, xheep
 from chipleap.verify.remote import Remote
@@ -284,8 +283,7 @@ def synthesize(design: Design, workdir: Path | None = None) -> StepResult:
     a = design.accel
     # The accelerator with its direct path's longer queues, without chipleap_mem's arbiters.
     kge = accel_logic_kge(a.dataflow, a.rows, a.cols, a.ports)
-    if design.direct_memory:
-        kge += direct_kge(design.with_(accel_mhz=0.0)) - MEM_ARB_KGE
+    kge += direct_port_kge(design, crossings=False)
     model = kge * 1000 * ihp.ge_um2 / 1e6
     err = (model - r.logic_mm2) / r.logic_mm2 if r.logic_mm2 else 0.0
     data = {
@@ -337,6 +335,8 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         kge += accel_bank_kge(a.rows, a.cols, a.double_buffer)
     if clocks is not None:
         kge += ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * a.ports
+    # With its direct path the block has that path's queues (chipleap_mem is the SoC's).
+    kge += direct_port_kge(design, crossings=clocks is not None)
     model_cell = kge * 1000 * ihp.ge_um2
     model_buffers = buffer_mm2(a, ihp) * 1e6
     data = {

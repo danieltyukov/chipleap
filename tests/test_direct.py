@@ -130,3 +130,19 @@ def test_the_layout_has_the_direct_ports_timed_on_the_accelerators_clock(tmp_pat
     # Behind the crossings the macro build's top takes the path from the crossings' top.
     cfg = pnr.with_crossings({"VERILOG_FILES": []}, tmp_path, 35.0, 90.0, direct=True)
     assert cfg["SYNTH_PARAMETERS"] == ["EXT_DIRECT=1"]
+
+
+def test_the_layouts_model_area_counts_the_direct_paths_queues():
+    from chipleap.hw.tech import DIRECT_PORT_CDC_KGE, DIRECT_PORT_KGE
+    from chipleap.model.evaluate import direct_port_kge
+    from chipleap.verify import pnr
+
+    ge = get_tech("ihp-sg13g2").ge_um2
+    a = SMOLLM2.accel
+    for crossings, port in ((False, DIRECT_PORT_KGE), (True, DIRECT_PORT_CDC_KGE)):
+        added = pnr.model_cell_um2(a, True, crossings, direct=True) - pnr.model_cell_um2(
+            a, True, crossings
+        )
+        assert added == pytest.approx(port * a.ports * 1000 * ge)
+    # The block has the accelerator's side of the path, not chipleap_mem's arbiters.
+    assert direct_port_kge(SMOLLM2) == pytest.approx(direct_kge(SMOLLM2) - MEM_ARB_KGE)

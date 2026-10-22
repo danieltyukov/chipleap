@@ -805,17 +805,26 @@ def two_clock_sdc(
     return "\n".join(lines) + "\n"
 
 
-def model_cell_um2(accel: Accel, banked: bool = False, crossings: bool = False) -> float:
+def model_cell_um2(
+    accel: Accel, banked: bool = False, crossings: bool = False, direct: bool = False
+) -> float:
     """The model's standard-cell area for the accelerator's logic on SG13G2; ``banked``
     for a macro-backed build, whose logic also has its banks' interface, ``crossings``
-    for one on its own clock behind its crossings."""
-    um2 = banks.cell_um2(accel, banked)
-    if crossings:
-        from chipleap.hw.tech import ACCEL_CDC_KGE, ACCEL_CDC_PORT_KGE, get_tech
+    for one on its own clock behind its crossings, ``direct`` for one with its direct
+    read path (sixteen reads in flight per port, as on IHP SG13G2)."""
+    from chipleap.hw.tech import (
+        ACCEL_CDC_KGE,
+        ACCEL_CDC_PORT_KGE,
+        DIRECT_PORT_CDC_KGE,
+        DIRECT_PORT_KGE,
+        get_tech,
+    )
 
-        kge = ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * accel.ports
-        um2 += kge * 1000 * get_tech("ihp-sg13g2").ge_um2
-    return um2
+    um2 = banks.cell_um2(accel, banked)
+    kge = ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * accel.ports if crossings else 0.0
+    if direct:
+        kge += (DIRECT_PORT_CDC_KGE if crossings else DIRECT_PORT_KGE) * accel.ports
+    return um2 + kge * 1000 * get_tech("ihp-sg13g2").ge_um2
 
 
 def with_crossings(
@@ -998,7 +1007,7 @@ def sram_flow(
             place.Macro(prefix + inst, views[cell].view.width, views[cell].view.height)
             for inst, cell in plan.instances()
         ],
-        model_cell_um2(accel, banked=True, crossings=bool(accel_mhz)),
+        model_cell_um2(accel, banked=True, crossings=bool(accel_mhz), direct=direct),
     )
     # Behind the crossings the core keeps as many reads in flight per port as they hold.
     (workdir / "src" / f"{banks.TOP}.v").write_text(

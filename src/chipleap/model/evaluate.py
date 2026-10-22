@@ -585,16 +585,27 @@ def area_breakdown(
 
 def direct_kge(d: Design) -> float:
     """The logic of the accelerator's direct path to external memory, when it has one: its
-    ports' longer response queues (``direct_outstanding`` reads each), the arbiters of
-    chipleap_mem and, on the accelerator's own clock, the crossing of X-HEEP's side."""
+    ports' longer response queues (``direct_port_kge``), the arbiters of chipleap_mem and,
+    on the accelerator's own clock, the crossing of X-HEEP's side."""
+    if d.accel is None or not d.direct_memory:
+        return 0.0
+    return direct_port_kge(d) + MEM_ARB_KGE + (MEM_CDC_KGE if d.accel_mhz else 0.0)
+
+
+def direct_port_kge(d: Design, crossings: bool | None = None) -> float:
+    """The direct path's logic inside the accelerator, when it has one: each port's
+    response queue for ``direct_outstanding`` reads and the choice of path. ``crossings``
+    (by default, whether the accelerator has its own clock) for the build behind its
+    crossings, whose queues hold eight reads already."""
     if d.accel is None or not d.direct_memory:
         return 0.0
     a = d.accel
-    port = DIRECT_PORT_CDC_KGE if d.accel_mhz else DIRECT_PORT_KGE
+    own = bool(d.accel_mhz) if crossings is None else crossings
+    port = DIRECT_PORT_CDC_KGE if own else DIRECT_PORT_KGE
     # Each entry holds a buffer word's address.
     bits = max(1, (max(a.abuf_kib, a.wbuf_kib) * 256 - 1).bit_length())
     port += DIRECT_ENTRY_KGE * bits * (direct_outstanding(d) - DIRECT_OUTSTANDING)
-    return port * a.ports + MEM_ARB_KGE + (MEM_CDC_KGE if d.accel_mhz else 0.0)
+    return port * a.ports
 
 
 def soc_limit_mhz(design: Design, tech: Technology) -> float | None:
