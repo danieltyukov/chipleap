@@ -345,9 +345,11 @@ def second_part_result(
 # may use. KLAYOUT_DRC_DEFINES, which 3.0.0.dev44 does not know, passes ``threads`` too.
 DRC_DEFINES_FROM = (3, 0, 14, 2, 0)
 # LibreLane 3.0.0.dev44 places for timing by default (PL_TIME_DRIVEN); 3.0.14 calls it
-# PL_TIMING_DRIVEN, which 3.0.0.dev44 does not know, and leaves it off. Without it a 12 x 12
-# multiplier routed at 5.4 ns with no timing repair missed the slow corner by 1.608 ns, where
-# 3.0.0.dev44 missed by 0.624 and 3.0.14 with it by 0.314.
+# PL_TIMING_DRIVEN, which 3.0.0.dev44 does not know, and leaves it off. 3.0.14's repair after
+# placement also no longer upsizes gates that break no limit: on a 12 x 12 multiplier routed
+# at 5.4 ns with no timing repair, 3.0.0.dev44's resized 97 gates and 3.0.14's none, and the
+# multiplier missed the slow corner by 1.608 ns where it had missed by 0.624. Placing it for
+# timing on 3.0.14 more than makes that up: it missed by 0.314.
 TIMING_DRIVEN_FROM = (3, 0, 14, 2, 0)
 TIMING_DRIVEN_KEYS = ("PL_TIMING_DRIVEN", "PL_TIME_DRIVEN")
 
