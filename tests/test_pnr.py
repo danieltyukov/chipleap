@@ -223,6 +223,39 @@ def test_the_legaliser_reaches_past_the_macro_rows():
     assert pnr.macro_reach(mid, [inner]) == {"PL_MAX_DISPLACEMENT_Y": 100}
 
 
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [("RM_IHPSG13_1P_1024x64_c2_bm_bist", 784.48, 336.46)] * 4,
+        [("RM_IHPSG13_1P_2048x64_c2_bm_bist", 784.48, 626.7)] * 4,
+        [("RM_IHPSG13_1P_4096x16_c3_bm_bist", 416.64, 618.3)] * 4,
+        # Rows of two depths, as the SoC's: the deeper decides.
+        [("RM_IHPSG13_1P_1024x32_c2_bm_bist", 416.64, 336.46)] * 8
+        + [("RM_IHPSG13_1P_256x64_c2_bm_bist", 784.48, 118.78)] * 4,
+    ],
+)
+def test_the_legaliser_reaches_the_band_past_the_deepest_row(rows):
+    """From a pin on either edge, the legaliser's limit covers the margin, the deepest
+    macro row with its halos and a row of the band, for IHP's deepest SRAMs too."""
+    from chipleap.macro import place
+
+    ms = [place.Macro(f"m{i}", w, h) for i, (_, w, h) in enumerate(rows)]
+    fp = place.rows(ms, 3.2e6)
+    size = {m.instance: m for m in ms}
+    tops = [p for p in fp.macros if p.orient == "N"]
+    bottoms = [p for p in fp.macros if p.orient == "FS"]
+    need = (
+        max(
+            max(fp.die[1] - (p.y - place.HALO_UM) for p in tops),
+            max(p.y + size[p.instance].height + place.HALO_UM for p in bottoms),
+        )
+        + place.SITE_UM[1]
+    )
+    deepest = max(m.height for m in ms) + 2 * place.HALO_UM + place.MARGIN_UM
+    limit = pnr.macro_reach(fp, ms)["PL_MAX_DISPLACEMENT_Y"]
+    assert need >= deepest and need <= limit <= need + 51
+
+
 def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch):
     from dataclasses import replace
 
