@@ -38,6 +38,7 @@ from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
 from chipleap.rtl.synth import DEFAULT_PERIOD_NS, SynthError, prepare_verilog
 from chipleap.verify.drc import describe_markers
 from chipleap.verify.pnr import (
+    MACRO_PNR_SLEW_NS,
     MACRO_REPAIR,
     PnrError,
     PnrResult,
@@ -49,6 +50,23 @@ from chipleap.verify.result import StepResult
 from chipleap.verify.tools import librelane
 
 SDC_NAME = "chipleap.sdc"
+# With macros, placement and routing read this instead (``pnr_sdc``) and signoff the
+# project's own constraints, as the accelerator's layout does (chipleap.verify.pnr).
+PNR_SDC_NAME = "chipleap.pnr.sdc"
+
+
+def pnr_sdc() -> str:
+    """The constraints placement and routing read for a project with SRAM macros: the
+    design-wide slew limit repair needs to keep the macros' inputs within theirs
+    (``chipleap.verify.pnr.MACRO_PNR_SLEW_NS``), then the project's constraints from the
+    file beside this one, so a limit they set themselves wins."""
+    return (
+        "# A slew target for repair under the SRAM macros' input limit (0.595 ns at the\n"
+        "# slow corner), since repair holds nets to their drivers' limits, not their loads'.\n"
+        f"set_max_transition {MACRO_PNR_SLEW_NS} [current_design]\n"
+        "# The project's constraints, which signoff reads alone.\n"
+        f"source [file join [file dirname [info script]] {SDC_NAME}]\n"
+    )
 
 
 def sdc(project: Project) -> str:
@@ -316,6 +334,9 @@ def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, A
         (workdir / SDC_NAME).write_text(sdc(project))
     cfg["PNR_SDC_FILE"] = f"dir::{SDC_NAME}"
     cfg["SIGNOFF_SDC_FILE"] = f"dir::{SDC_NAME}"
+    if project.macros:
+        builddir.write_text(workdir, PNR_SDC_NAME, pnr_sdc())
+        cfg["PNR_SDC_FILE"] = f"dir::{PNR_SDC_NAME}"
     cfg["PL_TARGET_DENSITY_PCT"] = project.pnr.density
     if not project.macros:
         cfg["FP_CORE_UTIL"] = project.pnr.utilisation
@@ -352,7 +373,7 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
     if (why := macros.unsupported(project, "dft")) and project.dft and project.dft.insert:
         raise PnrError(f"scan insertion (dft.insert): {why}")
     cfg = config(project, work)
-    metrics, gds = run_librelane(work, cfg, RUN_TAG)
+    metrics, gds = run_librelane(work, cfg, RUN_TAG, late_antenna_repair=True)
     if project.macros:
         check_merged(work / "runs" / RUN_TAG, work, project.top)
     seal_routed(work, bool(project.macros))
@@ -391,7 +412,7 @@ def seal_routed(work: Path, with_macros: bool = False) -> Sealed:
     """Record the routed run in ``work`` (``build/pnr``): the configuration, the
     constraints and sources ChipLeap copied beside it (and the macros' views and their
     power grid), and LibreLane's run directory."""
-    extra = ["macros", "pdn.tcl"] if with_macros else []
+    extra = ["macros", "pdn.tcl", PNR_SDC_NAME] if with_macros else []
     return seal(
         work, PNR_MANIFEST, "pnr", ["config.json", SDC_NAME, "src", *extra, f"runs/{RUN_TAG}"]
     )

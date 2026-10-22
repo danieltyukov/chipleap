@@ -231,11 +231,15 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         }
     # Signed off where the model's clock limit for the node is measured: setup at the slow
     # corner (1.08 V, 125 C), hold at every corner. The typical corner is reported beside it.
+    # Antenna violations fail the step, as they do a project's and a chip's.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
-    checks = "DRC and LVS clean" if r.clean else f"{r.drc_errors} DRC and {r.lvs_errors} LVS errors"
+    clean = r.clean and r.antenna_nets == 0
+    checks = (
+        "DRC, LVS and antenna clean"
+        if clean
+        else f"{r.drc_errors} DRC, {r.lvs_errors} LVS and {r.antenna_nets} antenna violations"
+    )
     hold = f"; hold missed by {-r.hold_slack_ns:.3f} ns" if r.hold_slack_ns < 0 else ""
-    if r.antenna_nets:
-        checks += f", {r.antenna_nets} antenna violations"
     if r.pin_markers:
         checks += f"; {describe_markers(r.pin_markers)}"
     msg = (
@@ -260,7 +264,7 @@ def place_route(design: Design, workdir: Path) -> StepResult:
             )
     elif r.buffers:
         msg += f"; {r.buffers}"
-    return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)
+    return StepResult("pnr", "pass" if met and clean else "fail", msg, data)
 
 
 def _count(n: object, noun: str) -> str:
@@ -400,13 +404,12 @@ def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | No
     # Setup is signed off at the slowest corner given (the slow liberty, when there is one),
     # as in the LibreLane step; hold at every corner.
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
+    clean = r.clean and r.antenna_nets == 0
     checks = (
-        "DRC and connectivity clean"
-        if r.clean
-        else f"{r.drc_errors} DRC and {r.lvs_errors} connectivity violations"
+        "DRC, connectivity and antenna clean"
+        if clean
+        else f"{r.drc_errors} DRC, {r.lvs_errors} connectivity and {r.antenna_nets} antenna violations"
     )
-    if r.antenna_nets:
-        checks += f", {r.antenna_nets} antenna violations"
     corner = (
         f"at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz "
         "at the typical one)"
@@ -418,7 +421,7 @@ def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | No
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
         f"{'met' if met else 'missed'} {corner}; {checks}"
     )
-    return StepResult("pnr", "pass" if met and r.clean else "fail", msg, data)
+    return StepResult("pnr", "pass" if met and clean else "fail", msg, data)
 
 
 def verify_bundle(

@@ -111,3 +111,23 @@ def test_accel_clock_limit_follows_ports_lanes_and_width():
     assert ihp.clock_limit_mhz("gemv", 8, 16) == pytest.approx(89.1, abs=0.1)
     # Only the node the timing was measured on is capped by it.
     assert g28.clock_limit_mhz("gemv", 8, 8) == g28.max_freq_mhz
+
+
+def test_a_macro_backed_engine_is_capped_by_its_macros_read():
+    from chipleap.hw.tech import ACCEL_BANK_PATH_NS, accel_signoff_mhz, get_tech
+    from chipleap.macro.sram import IHP_1P_READ_NS
+
+    read = {d: IHP_1P_READ_NS[f"RM_IHPSG13_1P_{d}x64_c2_bm_bist"] for d in (256, 1024, 2048)}
+    flop = accel_signoff_mhz("gemv", 8, 1)
+    shallow, mid, deep = (accel_signoff_mhz("gemv", 8, 1, bank_read_ns=read[d]) for d in read)
+    # Macro builds route slower than flop builds, and deep macros read slower still.
+    assert flop > shallow >= mid > deep
+    assert deep == pytest.approx(1000 / (read[2048] + ACCEL_BANK_PATH_NS))
+    # Routed at the slow corner: the GEMV 1 x 4, 1 x 8 and 1 x 8 with 1024-word macros took
+    # 9.31, 9.88 and 10.06 ns, and the model's period is never shorter.
+    for cols, depth, routed in ((4, 256, 9.31), (8, 256, 9.88), (8, 1024, 10.06)):
+        r = IHP_1P_READ_NS[f"RM_IHPSG13_1P_{depth}x{cols * 8}_c2_bm_bist"]
+        assert 1000 / accel_signoff_mhz("gemv", cols, 1, bank_read_ns=r) >= routed
+    ihp = get_tech("ihp-sg13g2")
+    assert ihp.clock_limit_mhz("gemv", 8, 1, bank_read_ns=read[2048]) == pytest.approx(deep)
+    assert get_tech("generic-28nm").clock_limit_mhz("gemv", 8, 1, bank_read_ns=read[2048]) == 800

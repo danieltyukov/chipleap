@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from chipleap.hw import Accel, Design
@@ -128,9 +130,41 @@ def test_ihp_clock_above_the_accelerators_timing_is_a_violation(smol):
     assert any("closes timing" in v for v in ev.violations)
     slow = evaluate(smol, fast.with_(freq_mhz=75))
     assert not any("closes timing" in v for v in slow.violations)
-    # With four ports the routed 2 x 8 engine meets 100 MHz at the slow corner.
-    four = evaluate(smol, fast.with_(accel=Accel("gemv", 2, 8, 8, ports=4, abuf_kib=2, wbuf_kib=2)))
-    assert not any("closes timing" in v for v in four.violations)
+    # The weight-stationary 4 x 4 engine routed at 100 MHz with one port, and its buffers are
+    # no banks of macros.
+    ws = evaluate(smol, fast.with_(accel=Accel("ws", 4, 4, 8, ports=1, abuf_kib=2, wbuf_kib=2)))
+    assert not any("closes timing" in v for v in ws.violations)
+
+
+def test_a_gemv_engine_with_macro_buffers_is_held_to_the_macro_builds_clock(smol):
+    """A GEMV engine whose buffers the model prices as banks of macros is clocked as the
+    routed macro builds are: with 2048-word macros, at about 85 MHz."""
+    from chipleap.hw.tech import get_tech
+    from chipleap.model.evaluate import bank_read_ns
+
+    ihp = get_tech("ihp-sg13g2")
+    d = Design(
+        tech="ihp-sg13g2",
+        freq_mhz=100,
+        bus="NtoM",
+        il_banks=4,
+        ext_mem="octal-psram",
+        ext_channels=2,
+        accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=32, wbuf_kib=32),
+    )
+    assert bank_read_ns(d.accel, ihp) == pytest.approx(8.994)
+    ev = evaluate(smol, d)
+    assert any("SRAM macros that read in 9.0 ns" in v for v in ev.violations)
+    assert not any("closes timing" in v for v in evaluate(smol, d.with_(freq_mhz=75)).violations)
+    # The flop-buffer 2 x 8 engine with four ports routed at 100 MHz; with its buffers in
+    # macros, as the model prices them, it is held to the macro builds' clock.
+    four = d.with_(accel=Accel("gemv", 2, 8, 8, ports=4, abuf_kib=2, wbuf_kib=2))
+    assert bank_read_ns(four.accel, ihp) == pytest.approx(5.1522)  # its weight lanes in 64 x 64
+    assert any("closes timing" in v for v in evaluate(smol, four).violations)
+    assert not any("closes timing" in v for v in evaluate(smol, four.with_(freq_mhz=90)).violations)
+    # Other dataflows and nodes have no banks.
+    assert bank_read_ns(Accel("ws", 4, 4, 8, ports=1, abuf_kib=2, wbuf_kib=2), ihp) == 0
+    assert bank_read_ns(d.accel, get_tech("generic-28nm")) == 0
 
 
 def test_ihp_buffers_cost_the_macros_the_layout_places():
@@ -175,3 +209,70 @@ def test_logic_of_a_macro_backed_engine_has_the_banks_interface():
         assert accel_kge(one, other) == flops
     ws = Accel("ws", 4, 4, 8, ports=1, abuf_kib=2, wbuf_kib=2)
     assert accel_kge(ws, ihp) == accel_logic_kge("ws", 4, 4, 1)
+
+
+def test_the_model_and_place_and_route_agree_on_a_floorplan_too_flat_to_route(smol, tmp_path):
+    """The GEMV 1 x 16's eight macros leave a core 7.4 times as wide as tall, which did not
+    route: place and route keeps flop buffers, and the model prices and times the build as
+    one without banks, for the same reason, which the explorer's result carries."""
+    from chip_fakes import sram_1p
+    from chipleap.hw.tech import accel_logic_kge, get_tech
+    from chipleap.macro.sram import IHP_1P, choose
+    from chipleap.model.evaluate import accel_kge, bank_read_ns, buffer_mm2, floorplan_reason
+    from chipleap.report.text import format_explore
+    from chipleap.verify import pnr
+
+    ihp = get_tech("ihp-sg13g2")
+    pdk = tmp_path / "ihp-sg13g2"
+    for cell in ("RM_IHPSG13_1P_64x64_c2_bm_bist", "RM_IHPSG13_1P_256x64_c2_bm_bist"):
+        s = next(m for m in IHP_1P if m.cell == cell)
+        sram_1p(pdk, s.words, s.bits, (s.width_um, s.height_um))
+    flat = Accel("gemv", 1, 16, 8, ports=1, abuf_kib=2, wbuf_kib=2)
+    reason = pnr.sram_reason(flat, pdk)
+    assert reason is not None and "(7.4 to 1), too flat to route" in reason
+    assert floorplan_reason(flat, ihp) == reason
+    # Priced and timed as a build without banks: 32-bit macros, no bank interface or read.
+    slot = choose(IHP_1P, 256, 32).area_um2 / 1e6
+    assert buffer_mm2(flat, ihp) == pytest.approx(4 * slot)
+    assert accel_kge(flat, ihp) == accel_logic_kge("gemv", 1, 16, 1)
+    assert bank_read_ns(flat, ihp) == 0
+    d = Design(
+        tech="ihp-sg13g2",
+        freq_mhz=90,
+        bus="NtoM",
+        il_banks=4,
+        ext_mem="octal-psram",
+        ext_channels=2,
+        accel=flat,
+    )
+    ev = evaluate(smol, d)
+    assert any(reason in w for w in ev.warnings)
+    result = SimpleNamespace(
+        spec=SimpleNamespace(name="s", workload=lambda: smol),
+        evaluated=1,
+        sampled=1,
+        seconds=0.0,
+        baseline=SimpleNamespace(design=d, evaluation=ev),
+        steps=[],
+        notes=[],
+        best=SimpleNamespace(
+            design=d,
+            evaluation=ev,
+            point=SimpleNamespace(weights="int4"),
+            assessment=SimpleNamespace(violations=(), misses=()),
+        ),
+        pareto=[],
+    )
+    assert reason in format_explore(result)
+    # The same engine on a single buffer, two macros a row, and the 2 x 8 with rows of three
+    # are banks for both.
+    for a in (
+        Accel("gemv", 1, 16, 8, ports=1, abuf_kib=1, wbuf_kib=1, double_buffer=False),
+        Accel("gemv", 2, 8, 8, ports=1, abuf_kib=2, wbuf_kib=4),
+    ):
+        assert pnr.sram_reason(a, pdk) is None and floorplan_reason(a, ihp) is None
+        assert bank_read_ns(a, ihp) > 0
+        assert not any(
+            "flop buffers in ChipLeap's layout" in w
+            for w in evaluate(smol, d.with_(accel=a)).warnings
+        )

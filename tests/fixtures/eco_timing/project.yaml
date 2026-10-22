@@ -3,8 +3,10 @@
 # (tests/test_project_eco.py). Placed for timing on LibreLane 3.0.14, the margins were thin:
 # at 5.4 to 5.8 ns it missed by 0.31 to 0.18 ns and the repair ended at -0.13 to +0.20 ns.
 # Here it misses by about 0.8 ns and the repair leaves about 0.4 ns. PL_TIME_DRIVEN is the
-# name LibreLane 3.0.0.dev44 and 3.0.14 both read. Its multiplier is a power domain at another
-# voltage, which IHP's cells cannot cross (tests/test_project_upf.py).
+# name LibreLane 3.0.0.dev44 and 3.0.14 both read. On 3.0.0.dev44, whose repair_design upsizes
+# gates with no violation to fix, it meets timing at place and route, and the test is skipped
+# there. Its multiplier is a power domain at another voltage, which IHP's cells cannot cross
+# (tests/test_project_upf.py).
 schema: project/v1
 name: eco_timing
 top: mac

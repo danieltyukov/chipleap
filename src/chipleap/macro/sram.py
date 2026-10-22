@@ -113,6 +113,46 @@ IHP_1P = (
     Sram("RM_IHPSG13_1P_64x64_c2_bm_bist", 64, 64, 784.48, 64.36, True),
     Sram("RM_IHPSG13_1P_8192x32_c4", 8192, 32, 1520.16, 618.3, False),
 )
+# Each of those macros' read time at the slow corner (1.08 V, 125 C): A_CLK to A_DOUT, the
+# later of rise and fall at the liberty's smallest clock slew and load. It grows with the
+# depth, from 5.0 ns at 256 words to 9.4 ns at 8192, and bounds the clock of a design that
+# registers the word in the next cycle. tests/test_macro_sram.py checks it against the PDK.
+IHP_1P_READ_NS = {
+    "RM_IHPSG13_1P_1024x16_c2_bm_bist": 7.116,
+    "RM_IHPSG13_1P_1024x32_c2_bm_bist": 7.2485,
+    "RM_IHPSG13_1P_1024x64_c2_bm_bist": 7.2744,
+    "RM_IHPSG13_1P_1024x8_c2_bm_bist": 7.0497,
+    "RM_IHPSG13_1P_2048x64_c2_bm_bist": 8.994,
+    "RM_IHPSG13_1P_256x16_c2_bm_bist": 4.994,
+    "RM_IHPSG13_1P_256x32_c2_bm_bist": 5.1263,
+    "RM_IHPSG13_1P_256x48_c2_bm_bist": 5.2586,
+    "RM_IHPSG13_1P_256x64_c2_bm_bist": 5.151,
+    "RM_IHPSG13_1P_256x8_c3_bm_bist": 4.9619,
+    "RM_IHPSG13_1P_4096x16_c3_bm_bist": 8.8937,
+    "RM_IHPSG13_1P_4096x8_c3_bm_bist": 8.8071,
+    "RM_IHPSG13_1P_512x16_c2_bm_bist": 6.25,
+    "RM_IHPSG13_1P_512x32_c2_bm_bist": 6.3821,
+    "RM_IHPSG13_1P_512x64_c2_bm_bist": 6.4165,
+    "RM_IHPSG13_1P_512x8_c3_bm_bist": 4.9562,
+    "RM_IHPSG13_1P_64x64_c2_bm_bist": 5.1522,
+    "RM_IHPSG13_1P_8192x32_c4": 9.3689,
+}
+_DOUT_RE = re.compile(r"\bbus\s*\(\s*A_DOUT\s*\)")
+_ARC_RE = re.compile(r"\b(cell_rise|cell_fall)\s*\([^)]*\)\s*\{[^}]*?values\s*\(\s*\"\s*([0-9.]+)")
+
+
+def read_ns(liberty: str) -> float:
+    """A macro's read time in its liberty text: A_CLK to A_DOUT, the later of rise and fall
+    at the smallest clock slew and load (the first value of each table)."""
+    m = _DOUT_RE.search(liberty)
+    if m is None:
+        raise SramError("the liberty has no A_DOUT bus")
+    block = liberty[m.end() :]
+    clk = re.search(r"related_pin\s*:\s*\"A_CLK\"", block)
+    arcs = _ARC_RE.findall(block[clk.end() :] if clk else "")[:2]
+    if clk is None or {kind for kind, _ in arcs} != {"cell_rise", "cell_fall"}:
+        raise SramError("the liberty has no A_CLK to A_DOUT arc")
+    return max(float(v) for _, v in arcs)
 
 
 def catalog(pdk: Path) -> list[Sram]:

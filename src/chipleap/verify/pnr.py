@@ -6,12 +6,13 @@ for layout versus schematic, and OpenSTA for timing at the design's clock. The r
 passes the checks a foundry shuttle asks for.
 
 The activation and weight buffers are SRAM macros in silicon. When the build can have
-them without a change to its schedule (``chipleap.gen.banks``) and the IHP PDK ChipLeap
-uses is installed, the layout has them: IHP's own macros at the design's buffer sizes, in
-rows above and below the logic (``chipleap.macro.place``), each with its halo and the
-macro power grid (``chipleap.macro.grid``), timed at every corner from their liberty and
-checked by LVS as boxes with their pins. Otherwise the layout holds the accelerator's
-logic with 16-word flop buffers, and the result says why.
+them without a change to its schedule (``chipleap.gen.banks``), the IHP PDK ChipLeap
+uses is installed and the macros' rows leave a core that routes, the layout has them:
+IHP's own macros at the design's buffer sizes, in rows above and below the logic
+(``chipleap.macro.place``), each with its halo and the macro power grid
+(``chipleap.macro.grid``), timed at every corner from their liberty and checked by LVS as
+boxes with their pins. Otherwise the layout holds the accelerator's logic with 16-word
+flop buffers, and the result says why.
 """
 
 from __future__ import annotations
@@ -30,7 +31,6 @@ from chipleap.chip import io
 from chipleap.gen import banks
 from chipleap.gen.rtl import accel_sv, rtl_params
 from chipleap.hw.design import Accel
-from chipleap.hw.tech import accel_logic_kge, get_tech
 from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
 from chipleap.verify import launch, librelane_pdk, minarea
@@ -368,7 +368,11 @@ def for_librelane(cfg: dict[str, Any], version: str) -> dict[str, Any]:
 
 
 def run_librelane(
-    workdir: Path, cfg: dict[str, Any], tag: str = "chipleap"
+    workdir: Path,
+    cfg: dict[str, Any],
+    tag: str = "chipleap",
+    *,
+    late_antenna_repair: bool = False,
 ) -> tuple[dict[str, Any], Path | None]:
     """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
     Returns the final metrics and the GDS.
@@ -377,7 +381,13 @@ def run_librelane(
     rest. Between them, routed shapes under a layer's minimum area get a patch
     (``chipleap.verify.minarea``): the router leaves one now and then, and it would fail
     signoff. The patched layout goes back into LibreLane's database through
-    ``OpenROAD.DEFtoODB`` and the rest of the flow runs on it, signoff included."""
+    ``OpenROAD.DEFtoODB`` and the rest of the flow runs on it, signoff included.
+
+    With ``late_antenna_repair``, antennas are repaired again after the timing repair
+    (``with_late_antenna_repair``). The accelerator, an RTL project and a chip ask for it
+    (an ECO adds it to its own step list). The SoC step does not yet: the runs its
+    results stand on were routed without it, and it turns it on once a SoC run with it
+    has been checked."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
@@ -387,6 +397,8 @@ def run_librelane(
     except ValueError as exc:
         raise PnrError(str(exc)) from None
     cfg = for_librelane(cfg, tool.version)
+    if late_antenna_repair:
+        cfg = with_late_antenna_repair(cfg)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
     base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", tag]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
@@ -501,6 +513,48 @@ def with_def_to_odb(cfg: dict[str, Any]) -> dict[str, Any]:
     return {**cfg, "meta": meta}
 
 
+# LibreLane repairs antennas after global routing (jumpers, and diodes at the gates of
+# nets over the PDK's ratios) and then repairs timing, whose buffers are new gates on nets
+# routed again; nothing checks those nets until the detailed router's own repair. In the
+# SmolLM2 accelerator's layout a hold buffer's input (a dlygate4sd3_1) was left on a Metal2
+# island at a cumulative ratio of 312.72 against 200, out of reach of the router's diodes,
+# which joined only through Metal3. So every layout ChipLeap routes with LibreLane but the
+# SoC's (``run_librelane``) repairs antennas once more after the timing repair: in that
+# layout the second repair found 35 nets over the ratios and put 17 diodes on them, the
+# routed design was clean under OpenROAD's antenna check and IHP's rule deck, and its slack
+# at the slow corner moved by +0.004 ns. Only a repair's diodes last: LibreLane's step
+# routes globally again after repair_antennas, over the jumpers it inserted (40 there),
+# and the detailed router follows that route. The second repair put no diode on a clock
+# net there; the detailed router's own repair put 10 on one (see docs/verification.md).
+TIMING_REPAIR = "OpenROAD.ResizerTimingPostGRT"
+ANTENNA_REPAIR = "OpenROAD.RepairAntennas"
+
+
+def with_late_antenna_repair(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``cfg`` with LibreLane's antenna repair once more after the timing repair after
+    global routing: after that step in a flow given as a step list, else as a substitution.
+    Unchanged when the configuration turns antenna repair off, or the timing repair (a
+    Classic flow's) or a step list has none."""
+    if cfg.get("RUN_ANTENNA_REPAIR") is False:
+        return cfg
+    meta = dict(cfg.get("meta") or {"version": 2, "flow": "Classic"})
+    flow = meta.get("flow")
+    if isinstance(flow, list):
+        if TIMING_REPAIR not in flow:
+            return cfg
+        i = flow.index(TIMING_REPAIR)
+        if flow[i + 1 : i + 2] != [ANTENNA_REPAIR]:
+            meta["flow"] = [*flow[: i + 1], ANTENNA_REPAIR, *flow[i + 1 :]]
+    elif cfg.get("RUN_POST_GRT_RESIZER_TIMING"):
+        meta["substituting_steps"] = {
+            **(meta.get("substituting_steps") or {}),
+            f"+{TIMING_REPAIR}": ANTENNA_REPAIR,
+        }
+    else:
+        return cfg
+    return {**cfg, "meta": meta}
+
+
 # A design with hard macros has long nets to the macros' pins (a word written to every
 # bank, in rows at the top and the bottom of the core), whose slew and capacitance only
 # show once they are routed: LibreLane repairs them after global routing too, and buffers
@@ -514,6 +568,32 @@ MACRO_REPAIR = {
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
 }
+# IHP's SRAMs allow a slew of 0.595 ns at their inputs at the slow corner, a quarter of the
+# standard cells' 2.5 ns, and OpenROAD's repair_design holds a net to its driver's limit
+# and the design's, not to its loads': in the macro-backed GEMV 1 x 4 build, an address bit
+# driven 190 um from an o21ai_1 was estimated at 0.54 ns at the macro's pin, nothing
+# repaired it (not with a 50 % slew margin either), and routed it reached 0.80 ns, its
+# wire 45 to 60 % more capacitive than estimated. So a macro-backed accelerator is placed
+# and routed against a design-wide limit of MACRO_PNR_SLEW_NS (PNR_SDC), under which a
+# routed slew stays within the macros', and signed off against LibreLane's own constraints
+# (SIGNOFF_SDC), with every cell's own limit: in that build the repair added about 400
+# buffers, 1.6 % of its cells, and took the address pins to 0.09 ns estimated.
+MACRO_PNR_SLEW_NS = 0.3
+PNR_SDC = "pnr.sdc"
+SIGNOFF_SDC = "signoff.sdc"
+
+
+def macro_sdc(pnr: bool) -> str:
+    """The constraints of a macro-backed accelerator: LibreLane's own (base.sdc), and for
+    placement and routing the design-wide slew limit ``MACRO_PNR_SLEW_NS``."""
+    lines = ["# LibreLane's own constraints.", "source $::env(SCRIPTS_DIR)/base.sdc"]
+    if pnr:
+        lines += [
+            "# A slew target for repair under the SRAM macros' input limit (0.595 ns at the",
+            "# slow corner), since repair holds nets to their drivers' limits, not their loads'.",
+            f"set_max_transition {MACRO_PNR_SLEW_NS} [current_design]",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def sram_config(
@@ -536,16 +616,18 @@ def sram_config(
         "PL_TARGET_DENSITY_PCT": 55,
         "MACROS": macros,
         "PDN_CFG": "dir::pdn.tcl",
+        "PNR_SDC_FILE": f"dir::{PNR_SDC}",
+        "SIGNOFF_SDC_FILE": f"dir::{SIGNOFF_SDC}",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
         **signoff(),
     }
 
 
-def model_cell_um2(accel: Accel) -> float:
-    """The model's standard-cell area for the accelerator's logic on SG13G2."""
-    ihp = get_tech("ihp-sg13g2")
-    return accel_logic_kge(accel.dataflow, accel.rows, accel.cols, accel.ports) * 1000 * ihp.ge_um2
+def model_cell_um2(accel: Accel, banked: bool = False) -> float:
+    """The model's standard-cell area for the accelerator's logic on SG13G2; ``banked``
+    for a macro-backed build, whose logic also has its banks' interface."""
+    return banks.cell_um2(accel, banked)
 
 
 def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
@@ -553,8 +635,12 @@ def sram_reason(accel: Accel, pdk: Path | None) -> str | None:
     reason = banks.unsupported(accel)
     if reason is None and pdk is None:
         reason = f"no IHP PDK with its SRAM macros ({io.PDK_ENV})"
-    if reason is None and pdk is not None and not sram.catalog(pdk):
-        reason = f"the PDK at {pdk} has no single-port SRAM macros"
+    if reason is None and pdk is not None:
+        catalog = sram.catalog(pdk)
+        if not catalog:
+            reason = f"the PDK at {pdk} has no single-port SRAM macros"
+        else:
+            reason = banks.layout_reason(accel, catalog)
     return reason
 
 
@@ -572,11 +658,11 @@ def place_and_route(
     reason = sram_reason(accel, pdk)
     run = workdir / "runs" / "chipleap"
     if reason is not None or pdk is None:
-        metrics, gds = run_librelane(workdir, config(accel, clock_mhz))
+        metrics, gds = run_librelane(workdir, config(accel, clock_mhz), late_antenna_repair=True)
         result = parse_run(metrics, clock_mhz, gds, run, {})
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
     cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk)
-    metrics, gds = run_librelane(workdir, cfg)
+    metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
     from chipleap.rtl.pnr import check_merged
 
     check_merged(run, workdir, banks.TOP)
@@ -609,7 +695,7 @@ def sram_flow(
             place.Macro(inst, views[cell].view.width, views[cell].view.height)
             for inst, cell in plan.instances()
         ],
-        model_cell_um2(accel),
+        model_cell_um2(accel, banked=True),
     )
     (workdir / "src" / f"{banks.TOP}.v").write_text(banks.top_sv(plan))
     placements = [
@@ -617,6 +703,8 @@ def sram_flow(
         for p in fp.macros
     ]
     (workdir / "pdn.tcl").write_text(grid.core_script(placements, fp.core[1]))
+    (workdir / PNR_SDC).write_text(macro_sdc(pnr=True))
+    (workdir / SIGNOFF_SDC).write_text(macro_sdc(pnr=False))
     macros, _ = sram.librelane_macros(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )

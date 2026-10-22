@@ -206,6 +206,14 @@ def test_place_and_route_sizes_the_die_around_the_macro(
     x = entry["instances"]["u_mem"]["location"][0]
     assert x >= cfg["CORE_AREA"][0] + 40
     assert module_check == [[CELL]]
+    # Placed and routed against a slew limit under the macro's own, then the project's
+    # constraints; signed off against those alone.
+    assert cfg["PNR_SDC_FILE"] == "dir::chipleap.pnr.sdc"
+    assert cfg["SIGNOFF_SDC_FILE"] == "dir::chipleap.sdc"
+    lines = (work / "chipleap.pnr.sdc").read_text().splitlines()
+    assert "set_max_transition 0.3 [current_design]" in lines
+    assert lines[-1] == "source [file join [file dirname [info script]] chipleap.sdc]"
+    assert "set_max_transition 0.3" not in (work / "chipleap.sdc").read_text()
 
 
 def test_a_die_of_the_projects_own_places_each_macro_where_it_says(
@@ -411,7 +419,8 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
     monkeypatch.setattr(pnr, "check_merged", lambda *a: {})
     items: list[tuple[str, str]] = []
 
-    def run(workdir, cfg, tag="chipleap"):
+    def run(workdir, cfg, tag="chipleap", *, late_antenna_repair=False):
+        assert late_antenna_repair  # every layout but the SoC's repairs antennas twice
         # LibreLane leaves the verdict to ChipLeap: its own would end the run on exit 2.
         assert cfg["ERROR_ON_KLAYOUT_DRC"] is False
         (workdir / "config.json").write_text("{}")
