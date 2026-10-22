@@ -324,7 +324,9 @@ class DirectCase:
     (``latency`` on chip in bus cycles, ``ext_latency`` at the memory ports in their clock's
     cycles), how busy X-HEEP's ports keep the memory (``x_pct``, the chance per bus cycle
     that an idle port starts a request) and where the operands live (``place``: bit 0 the
-    weights in external memory, bit 1 the activations)."""
+    weights in external memory, bit 1 the activations). ``x_mask`` picks X-HEEP's ports
+    that make requests (bit 0 the CPU's data port, then the DMA's read and write ports; 0
+    for all)."""
 
     m: int
     k: int
@@ -336,11 +338,12 @@ class DirectCase:
     ext_latency: int = 9
     x_pct: int = 0
     place: int = 1
+    x_mask: int = 0
 
     def line(self) -> str:
         return (
             f"{self.m} {self.k} {self.n} {self.fmt} {self.seed} {self.stall_pct} "
-            f"{self.latency} {self.ext_latency} {self.x_pct} {self.place}"
+            f"{self.latency} {self.ext_latency} {self.x_pct} {self.place} {self.x_mask}"
         )
 
 
@@ -357,6 +360,8 @@ class DirectResult:
     x_bad: int  # X-HEEP reads with wrong data, or its writes lost
     x_max_wait: int  # bus cycles from an X-HEEP request to its grant, at most
     x_max_latency: int  # bus cycles from an X-HEEP request to its response, at most
+    x_read_lat_mean: float  # bus cycles from an X-HEEP read to its data, on average
+    x_read_lat_max: int
     obi_bad: int  # memory-port requests that changed or dropped before their grant
     accel_run: int  # grants in a row to the accelerator while X-HEEP waited, at most
 
@@ -673,6 +678,8 @@ def run_direct(
                 int(d["x_bad"]),
                 int(d["x_max_wait"]),
                 int(d["x_max_latency"]),
+                float(d["x_read_lat_mean"]),
+                int(d["x_read_lat_max"]),
                 int(d["obi_bad"]),
                 int(d["accel_run"]),
             )

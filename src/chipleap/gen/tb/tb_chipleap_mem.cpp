@@ -3,13 +3,15 @@
 // puts X-HEEP's external slave ports and the accelerator's direct ports on the memory
 // ports.
 //
-// Cases on stdin, one per line: "m k n fmt seed stall_pct latency ext_latency x_pct place".
+// Cases on stdin, one per line:
+// "m k n fmt seed stall_pct latency ext_latency x_pct place [x_mask]".
 // The on-chip memory model serves rd_* and wr_* and answers `latency` bus cycles after a
 // grant; the external memory model serves the memory ports, accepts requests while
 // earlier ones are in flight and answers in order `ext_latency` cycles of the memory
 // ports' clock after each grant. Both grant each request with probability
 // 100 - stall_pct percent in a cycle. place: bit 0 puts the weights in external memory,
-// bit 1 the activations; the results stay on chip. X-HEEP's NX external slave ports are
+// bit 1 the activations; the results stay on chip. X-HEEP's NX external slave ports (those
+// whose bit is set in x_mask, all when it is 0 or left out) are
 // traffic generators: an idle port starts a request with probability x_pct percent per bus
 // cycle (a read, or a write with random byte enables, to a region of external memory of
 // its own), holds it until granted and waits for its response, and every read is checked
@@ -23,7 +25,7 @@
 // the memory path: the most requests in flight at memory port 0, X-HEEP's requests and
 // how many of its reads were wrong (or of its writes lost: its regions are compared with
 // the shadow after each case), the longest an X-HEEP request waited for its grant and for
-// its response (bus cycles), requests at the memory ports that changed or dropped before their grant
+// its response (bus cycles), the mean and longest of its reads from request to data, requests at the memory ports that changed or dropped before their grant
 // (OBI violations), and the longest run of grants to the accelerator at memory port 0
 // while an X-HEEP request was waiting for one.
 //
@@ -97,6 +99,7 @@ template <typename T> static void set_bit(T &v, int i, bool b) {
 static std::vector<uint8_t> mem, ext;
 static std::mt19937 rng, xrng;
 static int stall_pct = 0, latency = 1, ext_latency = 1, x_pct = 0;
+static uint32_t x_mask = ~0u;
 
 static uint32_t rd32(const std::vector<uint8_t> &m, uint32_t a) {
   return m[a] | (m[a + 1] << 8) | (m[a + 2] << 16) | (static_cast<uint32_t>(m[a + 3]) << 24);
@@ -137,7 +140,7 @@ static std::vector<uint8_t> shadow;  // X-HEEP's regions as the memory must hold
 // The memory path's statistics for the current case.
 struct Stats {
   uint32_t max_inflight = 0, x_requests = 0, x_reads = 0, x_bad = 0, obi_bad = 0;
-  uint64_t x_max_wait = 0, x_max_latency = 0;
+  uint64_t x_max_wait = 0, x_max_latency = 0, x_read_lat_sum = 0, x_read_lat_max = 0;
   uint32_t run = 0, max_run = 0;
 };
 static Stats st;
@@ -183,7 +186,9 @@ static void edge() {
   // X-HEEP's ports present their requests; responses from both memories.
   if (b) {
     for (int i = 0; i < NX; i++) {
-      if (xp[i].state == 0 && x_pct && static_cast<int>(xrng() % 100) < x_pct) x_start(i);
+      if (xp[i].state == 0 && x_pct && ((x_mask >> i) & 1u) &&
+          static_cast<int>(xrng() % 100) < x_pct)
+        x_start(i);
       set_bit(t->x_req_i, i, xp[i].state == 1);
       set_bit(t->x_we_i, i, xp[i].we);
       set_nib(t->x_be_i, i, xp[i].be);
@@ -300,6 +305,8 @@ static void edge() {
         st.x_max_latency = std::max(st.x_max_latency, g_cycle - x.since);
         if (!x.we) {
           st.x_reads++;
+          st.x_read_lat_sum += g_cycle - x.since;
+          st.x_read_lat_max = std::max(st.x_read_lat_max, g_cycle - x.since);
           if (x_rd[i] != x.expect) {
             if (st.x_bad < 3)
               std::fprintf(stderr, "X-HEEP port %d read %08x: got %08x expected %08x\n", i,
@@ -407,6 +414,7 @@ int main(int argc, char **argv) {
     std::istringstream in(line);
     uint32_t m, k, n, fmt, seed, place;
     in >> m >> k >> n >> fmt >> seed >> stall_pct >> latency >> ext_latency >> x_pct >> place;
+    if (!(in >> x_mask) || !x_mask) x_mask = ~0u;
     latency = std::max(latency, 1);
     ext_latency = std::max(ext_latency, 1);
     rng.seed(seed);
@@ -495,11 +503,14 @@ int main(int argc, char **argv) {
         "\"x_pct\":%d,\"place\":%u,\"tm\":%u,\"tn\":%u,\"tk\":%u,\"x_resident\":%u,"
         "\"cycles\":%u,\"wall\":%llu,\"mismatches\":%u,\"max_inflight\":%u,"
         "\"x_requests\":%u,\"x_reads\":%u,\"x_bad\":%u,\"x_max_wait\":%llu,"
-        "\"x_max_latency\":%llu,\"obi_bad\":%u,\"accel_run\":%u,\"ok\":%s}\n",
+        "\"x_max_latency\":%llu,\"x_read_lat_mean\":%.3f,\"x_read_lat_max\":%llu,"
+        "\"obi_bad\":%u,\"accel_run\":%u,\"ok\":%s}\n",
         m, k, n, fmt, stall_pct, latency, ext_latency, x_pct, place, plan.tm, plan.tn, plan.tk,
         plan.x_resident, cycles, static_cast<unsigned long long>(wall), bad, st.max_inflight,
         st.x_requests, st.x_reads, st.x_bad, static_cast<unsigned long long>(st.x_max_wait),
-        static_cast<unsigned long long>(st.x_max_latency), st.obi_bad, st.max_run,
+        static_cast<unsigned long long>(st.x_max_latency),
+        st.x_reads ? static_cast<double>(st.x_read_lat_sum) / st.x_reads : 0.0,
+        static_cast<unsigned long long>(st.x_read_lat_max), st.obi_bad, st.max_run,
         ok ? "true" : "false");
     std::fflush(stdout);
   }

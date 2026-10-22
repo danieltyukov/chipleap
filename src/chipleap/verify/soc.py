@@ -36,7 +36,7 @@ import yaml
 
 from chipleap.chip import merge
 from chipleap.gen import banks, soc
-from chipleap.gen.rtl import accel_sv, mem_sv
+from chipleap.gen.rtl import accel_sv, cdc_sv, mem_sv
 from chipleap.hw.design import Design
 from chipleap.hw.tech import get_tech
 from chipleap.macro import grid, layer, place, sram
@@ -297,15 +297,19 @@ def generate(
     accel_banks = banks.plan(design.accel, srams)
     src = builddir.work_dir(work, "src", empty=True)
     # With external memory the accelerator reads it over its direct path, which shares the
-    # memory ports with X-HEEP's external slave ports (chipleap_mem).
+    # memory ports with X-HEEP's external slave ports (chipleap_mem). On a clock of its
+    # own it sits behind its crossings, its macro build inside them keeping as many reads
+    # in flight per port as they hold, and the memory ports run on its clock.
     direct = design.direct_memory
+    own = bool(design.accel_mhz)
     out = {
         "chipleap_clock_cells.sv": soc.clock_cells_sv(),
         "sram_wrapper.sv": soc.sram_wrapper_sv(plans),
         "chipleap_accel.sv": accel_sv(),
-        f"{banks.TOP}.v": banks.top_sv(accel_banks),
+        f"{banks.TOP}.v": banks.top_sv(accel_banks, pnr.CDC_DEPTH if own else None),
+        **({"chipleap_accel_cdc.sv": cdc_sv(banks.TOP)} if own else {}),
         **({"chipleap_mem.sv": mem_sv()} if direct else {}),
-        f"{soc.TOP}.sv": soc.top_sv(ports, design.accel.ports, ext_memory=direct),
+        f"{soc.TOP}.sv": soc.top_sv(ports, design.accel.ports, ext_memory=direct, accel_clock=own),
     }
     for name, text in out.items():
         builddir.write_text(src, name, text)
@@ -464,12 +468,24 @@ class Prepared:
     views: dict[str, sram.SramViews]
 
 
-def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
+def config(sources: Sources, clock_mhz: float, accel_mhz: float = 0.0) -> dict[str, Any]:
     """LibreLane's configuration for the SoC without its floorplan: slang reads the
     SystemVerilog, with the macros' and IHP's clock gate's black boxes that Yosys holds
     (``--extern-modules``) and without X-HEEP's assertions; LibreLane's Verilator lint is
     off, since X-HEEP is linted with its own waivers; the constraints are ChipLeap's
-    (``chipleap.gen.soc.sdc``), and the signoff is the accelerator's."""
+    (``chipleap.gen.soc.sdc``), and the signoff is the accelerator's. With ``accel_mhz``
+    the accelerator's clock is a second clock port, as in its own layout
+    (``chipleap.verify.pnr.with_crossings``)."""
+    clocks: dict[str, Any] = {
+        "CLOCK_PORT": "clk_i",
+        "CLOCK_PERIOD": round(1000.0 / clock_mhz, 3),
+    }
+    if accel_mhz:
+        clocks = {
+            "CLOCK_PORT": ["clk_i", soc.ACCEL_CLOCK],
+            # LibreLane reads one period: the faster clock's.
+            "CLOCK_PERIOD": round(1000.0 / max(clock_mhz, accel_mhz), 3),
+        }
     return {
         **pnr.MACRO_REPAIR,
         "DESIGN_NAME": soc.TOP,
@@ -485,8 +501,7 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # alert inputs are unconnected. ChipLeap checks the synthesized netlist instead,
         # bit by bit (``netlist_problems``), and stops on any problem there.
         "ERROR_ON_SYNTH_CHECKS": False,
-        "CLOCK_PORT": "clk_i",
-        "CLOCK_PERIOD": round(1000.0 / clock_mhz, 3),
+        **clocks,
         "PNR_SDC_FILE": f"dir::{SDC}",
         "SIGNOFF_SDC_FILE": f"dir::{SDC}",
         "PL_TARGET_DENSITY_PCT": 55,
@@ -722,8 +737,10 @@ def prepare(
     """Everything the LibreLane runs read, in ``work``: X-HEEP rendered for the design,
     its sources from FuseSoC, ChipLeap's sources and constraints, the macros' views. The
     configuration without its floorplan, and what was prepared. The clock is the design's
-    unless ``clock_mhz`` says otherwise."""
+    unless ``clock_mhz`` says otherwise; the accelerator's own clock, when it has one, is
+    ``accel_clock_mhz``'s."""
     clock = clock_mhz or design.freq_mhz
+    accel = accel_clock_mhz(design)
     if design.platform != "xheep":
         raise SocError("not an X-HEEP design (standalone AXI4 IP)")
     fs, gcc = fusesoc(), riscv_gcc()
@@ -745,9 +762,13 @@ def prepare(
     ours, plans, accel_banks = generate(design, tree, work, srams)
     sources = Sources(tuple(files + ours), tuple(includes), plans, accel_banks)
     ports = soc.mcu_ports((tree / "hw/core-v-mini-mcu/core_v_mini_mcu.sv").read_text())
-    builddir.write_text(work, SDC, soc.sdc(ports, round(1000.0 / clock, 3)))
+    accel_ns = round(1000.0 / accel, 3) if accel else 0.0
+    sdc = soc.sdc(ports, round(1000.0 / clock, 3), accel_ns, design.direct_memory)
+    builddir.write_text(work, SDC, sdc)
+    # Behind the crossings the accelerator's macros are one level further down.
+    under = f"{soc.ACCEL_INST}.{pnr.CDC_INSTANCE}" if accel else soc.ACCEL_INST
     instances = bank_instances(tree, plans) + [
-        (f"{soc.ACCEL_INST}.{inst}", cell) for inst, cell in accel_banks.instances()
+        (f"{under}.{inst}", cell) for inst, cell in accel_banks.instances()
     ]
     views = {cell: sram.views(pdk, cell, work) for cell in sorted({c for _, c in instances})}
     # The macros' cells go into one layout and one netlist with the rest; a clash among
@@ -756,7 +777,15 @@ def prepare(
         merge.check_macros(v.view for v in views.values())
     except merge.MergeError as exc:
         raise SocError(f"merged names: {exc}") from None
-    return config(sources, clock), Prepared(sources, instances, views)
+    return config(sources, clock, accel), Prepared(sources, instances, views)
+
+
+def accel_clock_mhz(design: Design) -> float:
+    """The accelerator's own clock in the SoC (0 when it shares X-HEEP's): the design's,
+    capped at what IHP SG13G2 allows."""
+    if not design.accel_mhz:
+        return 0.0
+    return min(design.accel_mhz, get_tech("ihp-sg13g2").max_freq_mhz)
 
 
 _CHECK_RE = re.compile(r"Found and reported (\d+) problems")
@@ -862,5 +891,12 @@ def routed(
         macros=placed,
         macro_um2=sum(area[cell] for _, cell in placed),
     )
+    if accel := accel_clock_mhz(design):
+        # Two clocks: each one's paths and the crossings between them, as path groups.
+        result = replace(
+            result,
+            clocks={"clk": round(1000.0 / clock, 3), soc.ACCEL_CLOCK: round(1000.0 / accel, 3)},
+            groups=pnr.group_slacks(run, ("clk", soc.ACCEL_CLOCK)),
+        )
     result = pnr.with_ihp_antenna(result, pdk, soc.TOP, work)
     return SocResult(result, placed, *model_areas_um2(design))

@@ -57,7 +57,7 @@ The direct path costs, measured with Yosys on IHP SG13G2: 1.24 kGE per read port
 
 The memory controller and the memory's PHY are not ChipLeap RTL: ChipLeap's SoC ends at its memory ports, and the controller attaches there. What it must do, and what the model assumes it does:
 
-- One port per accelerator read port, each an OBI port synchronous to the memory ports' clock: X-HEEP's `clk_i`, or `accel_clk_i` with `accel_mhz`.
+- One port per accelerator read port, each an OBI port that runs on the accelerator's clock: `accel_clk_i` when the accelerator has a clock of its own (`accel_mhz`), X-HEEP's `clk_i` when it shares X-HEEP's. A controller for octal PSRAM or HyperRAM at 90 to 100 MHz is ordinary. The alternative, a controller on X-HEEP's clock with the accelerator's ports crossing into it, caps the stream at 4 bytes per SoC cycle (140 MB/s at 35 MHz) and costs 6.76 kGE per port (above); ChipLeap does not build it.
 - OBI semantics with requests in flight: a request (`req`, `we`, `be`, `addr`, `wdata`) is granted in the cycle `gnt` is high, and the controller may hold `gnt` low as long as it needs; it must accept a new request while earlier ones wait for their responses, and answer each port's requests in the order it granted them, with `rvalid` (and `rdata` for a read) in a later cycle. There is no error response.
 - Port 0 carries X-HEEP's reads and byte-enabled writes beside the accelerator's reads; the other ports only read whole words.
 - Each port's reads are sequential within a row of a transfer: port `p` of `P` reads words `p`, `p + P`, `p + 2P` and so on, so with one port consecutive words. The controller should turn them into bursts on the memory, which is what lets a serial memory reach its sustained rate.

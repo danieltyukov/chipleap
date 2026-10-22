@@ -137,6 +137,46 @@ def test_x_heeps_external_slave_ports_share_the_memory_port_with_the_accelerator
     assert top.index("xs_req;") < top.index(f"{soc.MCU_INST} (")
 
 
+def test_on_its_own_clock_the_accelerator_and_the_memory_ports_run_on_accel_clk_i():
+    top = soc.top_sv(soc.mcu_ports(MCU), accel_ports=1, accel_clock=True)
+    head = top[: top.index(");")]
+    assert "input logic accel_clk_i" in head and "mem_req_o" in head
+    # The macro build behind its crossings, with the direct path for X-HEEP's window.
+    i = top.index(f"{soc.CDC_MODULE} #(")
+    inst = top[i : top.index(f") {soc.ACCEL_INST} (", i)]
+    assert ".PORTS(1)" in inst and ".EXT_DIRECT(1)" in inst
+    assert ".EXT_SIZE(core_v_mini_mcu_pkg::EXT_SLAVE_SIZE)" in inst
+    # It is chipleap_accel_cdc's to instantiate, not the top's.
+    assert f"\n  {banks.TOP} #(" not in top and f"\n  {banks.TOP} u_accel" not in top
+    assert top.count(".accel_clk_i(accel_clk_i)") == 2  # the crossings and chipleap_mem
+    assert "      .CDC(1)" in top
+    # Without external memory there is no memory block, but the clock still goes in.
+    bare = soc.top_sv(soc.mcu_ports(MCU), accel_ports=1, ext_memory=False, accel_clock=True)
+    assert "chipleap_mem" not in bare and ".EXT_DIRECT" not in bare
+    assert ".accel_clk_i(accel_clk_i)" in bare
+
+
+def test_the_accelerators_clock_is_bounded_against_x_heeps_without_clock_groups():
+    ports = soc.mcu_ports(MCU)
+    text = soc.sdc(ports, 28.571, 11.111, direct=True)
+    assert "create_clock [get_ports accel_clk_i] -name accel_clk_i -period 11.111" in text
+    assert "foreach name {clk_i accel_clk_i}" in text  # a clock input, not data
+    for a, b in (("clk", "accel_clk_i"), ("accel_clk_i", "clk")):
+        assert (
+            f"set_max_delay -ignore_clock_latency 11.111 -from [get_clocks {a}] "
+            f"-to [get_clocks {b}]" in text
+        )
+        assert f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]" in text
+    # In OpenSTA set_clock_groups drops those bounds: the accelerator's clock is in none.
+    groups = text[text.index("set groups {}") : text.index("set_clock_groups")]
+    assert "accel_clk_i" not in groups
+    # The memory ports run on it, their delays replace the ones against clk.
+    assert "set_input_delay $mem_delay -clock [get_clocks accel_clk_i] $mem_in" in text
+    assert text.index("set_input_delay $io_delay") < text.index("set_input_delay $mem_delay")
+    one = soc.sdc(ports, 28.571)
+    assert "accel_clk_i" not in one and "mem_delay" not in one
+
+
 def test_without_external_memory_every_external_slave_port_is_tied_off():
     top = soc.top_sv(soc.mcu_ports(MCU), accel_ports=1, ext_memory=False)
     head = top[: top.index(");")]
@@ -418,6 +458,20 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     slow, _ = soc_step.prepare(design, xheep_config(design), co, work, pdk, clock_mhz=55.0)
     assert slow["CLOCK_PERIOD"] == pytest.approx(18.182)
     assert "-name clk -period 18.182" in (work / soc_step.SDC).read_text()
+    # The accelerator on its own clock: behind its crossings, its macros one level down,
+    # and two clock ports.
+    own = design.with_(accel_mhz=90.0)
+    cfg2, prep2 = soc_step.prepare(own, xheep_config(own), co, work, pdk, clock_mhz=35.0)
+    assert cfg2["CLOCK_PORT"] == ["clk_i", "accel_clk_i"]
+    assert cfg2["CLOCK_PERIOD"] == pytest.approx(11.111)
+    assert "src/chipleap_accel_cdc.sv" in prep2.sources.files
+    accel2 = {i for i, _ in prep2.instances if i.startswith(f"{soc.ACCEL_INST}.")}
+    assert len(accel2) == 4 and all(i.startswith("u_accel.u_accel.") for i in accel2)
+    sdc2 = (work / soc_step.SDC).read_text()
+    assert "-name clk -period 28.571" in sdc2 and "-name accel_clk_i -period 11.111" in sdc2
+    full2, _ = soc_step.with_floorplan(cfg2, prep2, 3.0e6, work)
+    clock2 = {e["target"] for e in full2["INSERT_ECO_BUFFERS"] if e["target"].endswith("/A_CLK")}
+    assert clock2 == {f"{i}/A_CLK" for i in accel2}
 
 
 def _check_report(run: Path, text: str) -> None:

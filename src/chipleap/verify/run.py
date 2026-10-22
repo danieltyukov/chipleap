@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chipleap.gen.rtl import rtl_params
+from chipleap.gen.soc import ACCEL_CLOCK
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import (
@@ -566,13 +567,21 @@ def soc_step_result(design: Design, s: SocResult, runtime_s: float) -> StepResul
         "model_um2": round(model),
         "gds": str(r.gds) if r.gds else None,
     }
+    if r.clocks:
+        # The accelerator on its own clock: each clock's paths and the crossings.
+        data |= {"clock_periods_ns": r.clocks, "path_groups": r.groups}
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     checks = r.checks()
+    own = (
+        f", the accelerator at {1000.0 / r.clocks[ACCEL_CLOCK]:.4g} MHz ({group_note(r.groups)})"
+        if ACCEL_CLOCK in r.clocks
+        else ""
+    )
     msg = (
         f"X-HEEP with the accelerator, placed and routed on IHP SG13G2: "
         f"{r.core_um2 / 1e6:.3f} mm2 core at {r.utilisation * 100:.0f}% utilisation, "
         f"{r.cells} cells; {clock:g} MHz"
-        f"{'' if clock == design.freq_mhz else f' (the design asks {design.freq_mhz:g})'} "
+        f"{'' if clock == design.freq_mhz else f' (the design asks {design.freq_mhz:g})'}{own} "
         f"{'met' if met else 'missed'} at the slow "
         f"corner (about {r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the "
         f"typical one{f'; the model puts the SoC at about {limit:.0f} MHz' if limit else ''}); "
