@@ -166,6 +166,58 @@ class PnrResult:
         return self._fmax(self.setup_slack_ns)
 
 
+# IHP SG13G2's routing layers as its tech LEF gives them, which OpenROAD's estimates fall
+# back on without LibreLane's LAYERS_RC: resistance in ohm/um, capacitance in fF/um
+# (OpenROAD's rsz::dblayer_wire_rc on the LEF of IHP-Open-PDK cb7daaa).
+IHP_LEF_RC = {
+    "Metal1": (0.84375, 0.068784),
+    "Metal2": (0.515, 0.09302),
+    "Metal3": (0.515, 0.092),
+    "Metal4": (0.515, 0.091788),
+    "Metal5": (0.515, 0.088826),
+    "TopMetal1": (0.0128049, 0.1108496),
+    "TopMetal2": (0.00725, 0.09006),
+}
+# What the extraction after routing (IHP's RCX rules) puts on a wire against the LEF's
+# capacitance, which has no coupling between neighbours. Measured on dev44 layouts by
+# redoing the estimate after global routing with each layer's capacitance scaled, against
+# the routed SPEF: the routed resistance is the LEF's (0.51 to 0.52 ohm/um on Metal2 to
+# Metal5, and about 20 ohm a via, which moved no slack), the routed capacitance a median
+# 1.49 to 1.60 times the estimate on the SoC (coupling a median 45 % of a net's), 1.34 to
+# 1.52 on the SmolLM2 accelerator, 1.07 to 1.15 on the UART. With Metal2 to Metal5 at 1.6
+# times the LEF, the SoC's per-net median came to 1.0, the accelerator's estimated worst
+# setup slack after global routing to +0.636 ns against +0.685 ns at signoff (it was
+# +1.577 ns), and the SoC's to +1.209 ns against -0.219 ns (it was +4.558 ns): wires that
+# run beside others for millimetres couple more than the median. The TopMetals, few wires,
+# fitted at 1.0 to 1.4.
+IHP_COUPLING = {
+    "Metal2": 1.6,
+    "Metal3": 1.6,
+    "Metal4": 1.6,
+    "Metal5": 1.6,
+    "TopMetal1": 1.2,
+    "TopMetal2": 1.2,
+}
+# The layers routing uses: the placement estimate's average resistance and capacitance
+# are taken over these, not over the TopMetals too, whose resistance is 40 times lower.
+ESTIMATE_LAYERS = ["Metal2", "Metal3", "Metal4", "Metal5"]
+
+
+def ihp_layers_rc() -> dict[str, dict[str, dict[str, float]]]:
+    """LibreLane's LAYERS_RC for IHP SG13G2, every corner: the LEF's resistance and the
+    capacitance the extraction after routing gives (``IHP_COUPLING``), in the liberty's
+    units, kohm and pF per um."""
+    return {
+        "*": {
+            layer: {
+                "res": round(r * 1e-3, 9),
+                "cap": round(c * IHP_COUPLING.get(layer, 1.0) * 1e-3, 9),
+            }
+            for layer, (r, c) in IHP_LEF_RC.items()
+        }
+    }
+
+
 def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[str, Any]:
     """LibreLane settings every ChipLeap layout shares: the generated accelerator's and an
     RTL project's (``chipleap.rtl.pnr``)."""
@@ -200,6 +252,11 @@ def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[
         # run's own (klayout_threads: LIBRELANE_MAX_CORES or the CPUs the process may use, as
         # the chip's DRC and IHP's antenna deck take them), not the machine's.
         "KLAYOUT_DRC_THREADS": max(1, min(8, klayout_threads() // 2)),
+        # The repairs work against estimates of each wire; give them the wires routing
+        # makes (``IHP_COUPLING``).
+        "LAYERS_RC": ihp_layers_rc(),
+        "SIGNAL_WIRE_RC_LAYERS": list(ESTIMATE_LAYERS),
+        "CLOCK_WIRE_RC_LAYERS": list(ESTIMATE_LAYERS),
     }
 
 

@@ -416,6 +416,10 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
         ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": "4", "x": "1"}}, "DEFINES"),
         ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": 4}}, "DEFINES"),
         ({"PL_TIMING_DRIVEN": "true"}, "PL_TIMING_DRIVEN"),
+        ({"LAYERS_RC": {"*": {"Metal2": {"res": "x", "cap": 1e-4}}}}, "not a number"),
+        ({"LAYERS_RC": {"*": {"Metal2": {"res": 1e-3}}}}, "for 'Metal2'"),
+        ({"LAYERS_RC": {"expr::[x]": {}}}, "cannot go into a tool script"),
+        ({"LAYERS_RC": ["x"]}, "not a mapping"),
     ]:
         with pytest.raises(E.EcoError, match=why):
             E._settings(p, bad, sealed)

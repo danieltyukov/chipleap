@@ -366,3 +366,26 @@ def test_slew_and_capacitance_violations_at_any_corner_fail_the_step_and_fanout_
         assert step.data["max_cap_violations"] == r.max_cap_violations
         assert step.data["max_fanout_violations"] == r.max_fanout_violations
     assert pnr.parse({**base, slew: float("nan")}, 90.0, None).max_slew_violations == 0
+
+
+def test_every_ihp_layout_estimates_its_wires_as_routing_makes_them():
+    """LAYERS_RC: the LEF's resistance, the capacitance the extraction after routing gives
+    (1.6 times the LEF's on Metal2 to Metal5, 1.2 on the TopMetals), in kohm and pF per um,
+    for every corner; the placement estimate averages over Metal2 to Metal5 only."""
+    from chipleap.verify import pnr
+
+    cfg = pnr.signoff()
+    rc = cfg["LAYERS_RC"]["*"]
+    assert rc["Metal3"] == {"res": pytest.approx(0.515e-3), "cap": pytest.approx(0.092 * 1.6e-3)}
+    assert rc["TopMetal2"]["cap"] == pytest.approx(0.09006 * 1.2e-3)
+    assert rc["Metal1"]["cap"] == pytest.approx(0.068784e-3)
+    assert (
+        cfg["SIGNAL_WIRE_RC_LAYERS"]
+        == cfg["CLOCK_WIRE_RC_LAYERS"]
+        == [
+            "Metal2",
+            "Metal3",
+            "Metal4",
+            "Metal5",
+        ]
+    )
