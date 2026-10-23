@@ -178,10 +178,11 @@ def _inside(item: ET.Element, outlines: Sequence[tuple[str, Box]]) -> str | None
 class MacroLayout:
     """Where the PDK's own macros are in a layout's GDS: each cell only they place, under
     the name the GDS gives it, with the macros that hold it; and each macro the top cell
-    places, with its outline there in um."""
+    (``top``) places, with its outline there in um."""
 
     cells: dict[str, tuple[str, ...]]
     outlines: list[tuple[str, Box]]
+    top: str = ""
 
 
 @dataclass
@@ -198,12 +199,14 @@ class _Ref:
 
 def macro_layout(data: bytes, top: str, sizes: Mapping[str, tuple[float, float]]) -> MacroLayout:
     """The PDK's macros in a GDS stream: ``sizes`` names them, each with its outline's width
-    and height in um from its LEF, whose origin is the GDS cell's. A cell the top reaches
-    without passing through one of them is the layout's own, never a macro's."""
+    and height in um from its LEF, whose origin is the GDS cell's. ``top`` is the layout's
+    top cell; empty, it is the stream's one cell no other places (with several, no outline
+    is known). A cell a top cell reaches without passing through one of the macros is the
+    layout's own, never a macro's."""
     from chipleap.macro.layer import _real8, gds_raw_name, gds_records
 
     children: dict[str, set[str]] = {}
-    placed: list[_Ref] = []
+    placed: list[tuple[str, _Ref]] = []  # each macro placed, with the cell that places it
     um = 0.001  # per database unit, from UNITS
     current = ""
     ref: _Ref | None = None
@@ -228,18 +231,25 @@ def macro_layout(data: bytes, top: str, sizes: Mapping[str, tuple[float, float]]
                 ref.xy = struct.unpack(">2i", data[a : a + 8])
             elif rtype == 0x11:  # ENDEL
                 children[current].add(ref.name)
-                if current == top and ref.name in sizes and not ref.array and ref.xy:
-                    placed.append(ref)
+                if ref.name in sizes and not ref.array and ref.xy:
+                    placed.append((current, ref))
                 ref = None
+    tops = sorted(set(children) - set().union(*children.values()))
+    if not top:
+        top = tops[0] if len(tops) == 1 else ""
     macros = set(sizes) & set(children)
-    own = _reach(children, top, macros)
+    own: set[str] = set()
+    for t in [top] if top else tops:
+        own |= _reach(children, t, macros)
     cells: dict[str, set[str]] = {}
     for m in macros:
         for c in _reach(children, m, set()) | {m}:
-            if c not in own and c != top:
+            if c not in own and c != top and c not in tops:
                 cells.setdefault(c, set()).add(m)
     outlines = []
-    for r in placed:
+    for parent, r in placed:
+        if parent != top:
+            continue
         w, h = sizes[r.name]
         turn = math.radians(r.angle)
         cos, sin = round(math.cos(turn), 12), round(math.sin(turn), 12)
@@ -249,7 +259,7 @@ def macro_layout(data: bytes, top: str, sizes: Mapping[str, tuple[float, float]]
             xs.append(r.xy[0] * um + px * cos - py * sin)
             ys.append(r.xy[1] * um + px * sin + py * cos)
         outlines.append((r.name, (min(xs), min(ys), max(xs), max(ys))))
-    return MacroLayout({c: tuple(sorted(m)) for c, m in cells.items()}, outlines)
+    return MacroLayout({c: tuple(sorted(m)) for c, m in cells.items()}, outlines, top)
 
 
 def _reach(children: Mapping[str, set[str]], start: str, stop: set[str]) -> set[str]:
