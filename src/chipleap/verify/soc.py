@@ -611,10 +611,11 @@ def gate_buffers(gates: Iterable[tuple[str, float, float]]) -> list[dict[str, An
     The integrated clock gate is IHP's one, a weak cell, and drives the root of its tree
     over the wire to where CTS put that root (0.4 to 0.8 mm on the SmolLM2 SoC): the gated
     trees reach their flip-flops 0.6 to 0.7 ns after the ungated ones at the slow corner,
-    and DMA0's registers were the worst hold endpoints in every layout. From one 36 MHz
-    placement, routed, a buffer after each gate took setup from +0.259 to +0.490 ns at the
-    slow corner and hold from -0.060 to +0.144 ns at the fast one. Placement decides where
-    the gates are, so the layout stops after the clock tree to read them (``layout``)."""
+    and DMA0's registers were the worst hold endpoints in every 40 and 36 MHz layout. From
+    one 36 MHz placement, routed, a buffer after each gate took setup from +0.259 to +0.490
+    ns at the slow corner and hold from -0.060 to +0.144 ns at the fast one. Placement
+    decides where the gates are, so with these buffers (``trial_buffers``) the layout stops
+    after the clock tree to read them (``layout``)."""
     return [
         {"target": f"{name}/GCLK", "buffer": GATE_BUFFER, "placement": [round(x, 3), round(y, 3)]}
         for name, x, y in gates

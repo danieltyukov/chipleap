@@ -235,7 +235,7 @@ def test_x_heeps_soc_runs_at_what_it_meets_and_the_accelerator_is_reported_apart
     # The SoC was laid out at a clock it met, so what it meets is no slower.
     assert fast.soc_limit_mhz >= SOC_EVIDENCE_MHZ
     assert fast.soc_mhz == fast.soc_limit_mhz and fast.accel_limit_mhz > 90
-    assert any("X-HEEP reads its SRAM in one cycle" in w for w in fast.warnings)
+    assert any("X-HEEP reads a bank and crosses its bus in one cycle" in w for w in fast.warnings)
     assert clock_note(fast).startswith(f"{fast.soc_mhz:.1f} MHz, what X-HEEP's SoC meets")
     # The CPU and the accelerator share the clock: the same design asked for the limit.
     at_limit = evaluate(smol, SMOL_SOC.with_(freq_mhz=fast.soc_mhz))

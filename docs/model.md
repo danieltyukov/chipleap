@@ -106,17 +106,31 @@ So the model takes the SoC's period as the slower of the two (`chipleap.hw.tech.
 
     period = max(read time of the bank's macro + SOC_READ_PATH_NS, SOC_BUS_PATH_NS)
 
-Both terms are measured on the SmolLM2 SoC (CV32E20, the one-to-many bus, one 32 KiB bank of eight 1024 x 32 macros, the GEMV 1 x 8 accelerator) laid out with `chipleap verify --steps soc --soc-clock @@CLOCK@@` at @@COMMIT@@, after detailed routing and extraction, at the slow corner (1.08 V, 125 C) with the 5 % derate the step's constraints apply, by `scripts/fit_soc_clock.py`: SOC_READ_PATH_NS (@@READ@@ ns) is the period the slowest path from a bank needs, less the 1024 x 32's read time, and SOC_BUS_PATH_NS (@@BUS@@ ns) the period the slowest other path needs, leaving out the accelerator's own paths, which its limit covers. The SmolLM2 SoC's limit is then @@CAP@@ MHz. The macro of each of the design's banks gives its read time (the 1024 x 32 for banks of 4 KiB and more, 512 x 32 for 2 KiB, 256 x 32 for 1 KiB), so smaller banks shorten the read but not the rest.
+Both terms are measured on the SmolLM2 SoC (CV32E20, the one-to-many bus, one 32 KiB bank of eight 1024 x 32 macros, the GEMV 1 x 8 accelerator) laid out with `chipleap verify --steps soc --soc-clock 36` at 6d026c0, after detailed routing and extraction, at the slow corner (1.08 V, 125 C) with the 5 % derate the step's constraints apply, by `scripts/fit_soc_clock.py`: SOC_READ_PATH_NS (18.63 ns) is the period the slowest path from a bank needs, less the 1024 x 32's read time, and SOC_BUS_PATH_NS (27.15 ns) the period the slowest other path needs, leaving out the accelerator's own paths, which its limit covers. The SmolLM2 SoC's limit is then 36.8 MHz, set by the other paths: its slowest bank read needs 25.87 ns. The macro of each of the design's banks gives its read time (the 1024 x 32 for banks of 4 KiB and more, 512 x 32 for 2 KiB, 256 x 32 for 1 KiB), so smaller banks shorten the read but not the rest.
 
-Most of a slow path is not logic. On the SmolLM2 SoC each of the worst carries 2.7 to 4.2 ns of hold repair's delay cells and 7.6 to 9.2 ns of the buffers that repair puts on long and loaded wires. X-HEEP gates its clock on IHP's one integrated clock gate, a weak cell, and OpenROAD's CTS does not balance the gated trees against the ungated flip-flops, so the gated ones get their clock 0.6 to 0.7 ns later at the slow corner. Hold repair pads the paths that are short against that skew and the 0.25 ns uncertainty, about 25,000 delay cells, and it may put them on any path whose estimated setup slack allows it, which on these long paths is 4 to 5 ns more than routing leaves. So the period a layout needs grows with the clock it is laid out at:
+Most of a slow path is not logic. On the SmolLM2 SoC each of the worst carries 2.7 to 4.2 ns of hold repair's delay cells and 7.6 to 9.2 ns of the buffers that repair puts on long and loaded wires. X-HEEP gates its clock on IHP's one integrated clock gate, a weak cell, and OpenROAD's CTS does not balance the gated trees against the ungated flip-flops, so the gated ones get their clock 0.6 to 0.7 ns later at the slow corner. Hold repair pads the paths that are short against that skew and the 0.25 ns uncertainty, about 25,000 delay cells, and it may put them on any path whose estimated setup slack allows it, which on these long paths is 4 to 5 ns more than routing leaves. So the slower the clock a layout is made for, the longer the period it needs. Every layout of the SmolLM2 SoC, after routing, at the slow corner (the period needed is the clock's period less the worst setup slack):
 
-| Layout clock | Setup slack at the slow corner | Period needed |
-|---|---|---|
-| 40 MHz | -1.030 ns | 26.03 ns (38.4 MHz) |
-| 36 MHz | -0.219 ns | 28.00 ns (35.7 MHz) |
-| @@CLOCK@@ MHz (the evidence) | @@SLACK@@ ns | @@NEEDED@@ ns |
+| Layout clock | Settings | Setup slack | Period needed | Hold slack |
+|---|---|---|---|---|
+| 50 MHz | antenna repair with a 100 % margin, 10 iterations | -3.629 ns (1,054 endpoints) | 23.63 ns (42.3 MHz) | -0.050 ns |
+| 50 MHz | repairs' wire length 150 um | -4.699 ns (2,526 endpoints) | 24.70 ns (40.5 MHz) | +0.049 ns |
+| 45 MHz | both | -3.162 ns (1,102 endpoints) | 25.38 ns (39.4 MHz) | -0.065 ns |
+| 40 MHz | as the 36 MHz one below | -1.030 ns (20 endpoints) | 26.03 ns (38.4 MHz) | +0.104 ns |
+| 36 MHz | the accelerator's margins, no clock-pin buffers | -0.219 ns (11 endpoints) | 28.00 ns (35.7 MHz) | +0.006 ns |
+| 36 MHz (the evidence) | clock-pin buffers, setup margins 6 and 5 ns | +0.627 ns | 27.15 ns (36.8 MHz) | +0.070 ns |
 
-The 40 and 36 MHz layouts are from before three changes to the step: a buffer beside each accelerator macro's clock pin, a buffer after each of X-HEEP's clock gates, and repairs that keep 6 ns of estimated setup slack after the clock tree and 5 ns after global routing, where the accelerator's keep 0.8 and 1.6 ns ([verification.md](verification.md)). The limit is the clock a layout met, not a promise for a faster one.
+All six were DRC, LVS and antenna clean; the five before the evidence had four slew violations each, at the accelerator's macros' clock pins, and the first 50 MHz and the 40 MHz layouts one capacitance violation each, at a bank's output. Those five are from before two changes to the step: a buffer beside each accelerator macro's clock pin, and repairs that keep 6 ns of estimated setup slack after the clock tree and 5 ns after global routing, where the accelerator's keep 0.8 and 1.6 ns ([verification.md](verification.md)). The limit is the clock a layout met, not a promise for a faster one: whether the evidence's settings meet 38 or 40 MHz has not been tried.
+
+The terms move little between layouts at 36 MHz. The evidence's other runs, with the buffers a trial run can add (`CHIPLEAP_SOC_BUFFERS`), and five variants routed from one 36 MHz placement ([verification.md](verification.md)):
+
+| 36 MHz layout | Setup slack | Period needed | Slowest bank read |
+|---|---|---|---|
+| the evidence | +0.627 ns | 27.15 ns | 25.87 ns |
+| with the clock gates' buffers | +0.429 ns | 27.35 ns | 25.07 ns |
+| with those and the bank outputs' buffers | +1.271 ns | 26.51 ns | 24.92 ns |
+| five variants from one placement | +0.076 to +0.545 ns | 27.23 to 27.70 ns | 25.39 to 26.23 ns |
+
+So a 36 MHz layout of this SoC needs 26.5 to 27.7 ns (36.1 to 37.7 MHz), always set by the bus's other paths.
 
 The first estimate of this limit, 17.64 ns (56.7 MHz), was the slowest bank read after the repair that follows global routing, in a layout at 90 MHz, without the derate. That is no basis for a clock. The repairs work against the global router's estimate of each wire, and on the SoC's long wires the extraction after detailed routing puts 14 to 20 % more capacitance on them: at 50 MHz an SRAM output net repaired to 0.0576 pF came out 0.0657 pF, a clock net's slew went from 0.607 to 0.728 ns, and the slow corner's worst setup slack went from +0.54 ns after global routing to -3.63 ns after routing, a period of 23.63 ns. The model's limit is what the routed layout needs.
 
