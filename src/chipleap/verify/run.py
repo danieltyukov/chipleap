@@ -4,6 +4,8 @@ Every step is optional and skipped with a reason when its tool is missing:
 
 * lint:  Verilator --lint-only -Wall on the generated accelerator
 * sim:   randomized matrix multiplies against a golden model, cycles against the model
+  (with the accelerator on its own clock, X-HEEP's side on the SoC's)
+* cdc:   with the accelerator on its own clock, ChipLeap's CDC checker on its crossings
 * synth: Yosys on IHP SG13G2, logic area against the model's estimate, fmax estimate
 * xheep: X-HEEP's own generator loads, validates and renders the configuration
 """
@@ -22,10 +24,16 @@ from typing import TYPE_CHECKING, Any
 from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
-from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
+from chipleap.hw.tech import (
+    ACCEL_CDC_KGE,
+    ACCEL_CDC_PORT_KGE,
+    accel_bank_kge,
+    accel_logic_kge,
+    get_tech,
+)
 from chipleap.model.evaluate import buffer_mm2, soc_limit_mhz
 from chipleap.rtl import builddir
-from chipleap.verify import backends, pnr, sim, synth, xheep
+from chipleap.verify import backends, crossings, pnr, sim, synth, xheep
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import clean_env, verilator
@@ -60,15 +68,19 @@ def lint(design: Design, bundle: Path) -> StepResult:
     if not tool.found:
         return StepResult("lint", "skipped", "Verilator is not installed")
     rtl = bundle / "rtl"
-    # The standalone platform's AXI4 wrapper is linted together with the core it wraps.
+    # The standalone platform's AXI4 wrapper, and the crossings of an accelerator on its
+    # own clock, are linted together with the core they wrap.
     axi = design.platform == "standalone"
+    own = bool(design.accel_mhz)
     files = [rtl / "chipleap_accel.sv"] + ([rtl / "chipleap_accel_axi.sv"] if axi else [])
+    files += [rtl / "chipleap_accel_cdc.sv"] if own else []
+    top = "chipleap_accel_axi" if axi else crossings.TOP if own else "chipleap_accel"
     cmd = [
         str(tool.path),
         "--lint-only",
         "-Wall",
         "--top-module",
-        "chipleap_accel_axi" if axi else "chipleap_accel",
+        top,
         *rtl_params(design.accel).verilator_args(),
         *(str(f) for f in files),
     ]
@@ -79,19 +91,37 @@ def lint(design: Design, bundle: Path) -> StepResult:
     return StepResult("lint", "fail", f"{len(msgs)} lint messages", {"messages": msgs[:40]})
 
 
+def sim_clocks(design: Design) -> sim.Clocks | None:
+    """The two clocks a design whose accelerator has its own simulates on: X-HEEP's side
+    at the SoC's clock (the design's, or what the SoC meets after routing), the
+    accelerator at its own, its first edge a third of its period after the bus's."""
+    if not design.accel_mhz:
+        return None
+    limit = soc_limit_mhz(design, get_tech(design.tech))
+    bus = min(design.freq_mhz, limit) if limit else design.freq_mhz
+    accel_ps = round(1e6 / design.accel_mhz)
+    return sim.Clocks(round(1e6 / bus), accel_ps, accel_ps // 3 + 1)
+
+
 def simulate(design: Design, cases: int = 0, seed: int = 0) -> StepResult:
     if design.accel is None:
         return StepResult("sim", "skipped", "no accelerator in this design")
     if not verilator().found:
         return StepResult("sim", "skipped", "Verilator is not installed")
+    clocks = sim_clocks(design)
     try:
         todo = sim.default_cases(design.accel, seed=seed)
         if cases:
             todo = todo[:cases]
-        results = sim.run(design.accel, todo, platform=design.platform)
+        results = sim.run(design.accel, todo, platform=design.platform, clocks=clocks)
     except sim.SimError as exc:
         return StepResult("sim", "fail", str(exc).splitlines()[0], {"error": str(exc)})
     via = " through the AXI4 wrapper" if design.platform == "standalone" else ""
+    if clocks is not None:
+        via = (
+            f" on its own clock ({1e6 / clocks.accel_ps:.4g} MHz) through its crossings, "
+            f"X-HEEP's side at {1e6 / clocks.bus_ps:.4g} MHz"
+        )
     return sim_step(results, via=via)
 
 
@@ -174,8 +204,17 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         return StepResult("pnr", "skipped", "no accelerator in this design")
     ihp = get_tech("ihp-sg13g2")
     clock = min(design.freq_mhz, ihp.max_freq_mhz) if design.tech == ihp.key else ihp.max_freq_mhz
+    # On its own clock the accelerator is laid out with its crossings, X-HEEP's side at
+    # the SoC's clock (the design's, or what the routed SoC meets).
+    clocks = sim_clocks(design)
+    bus = 1e6 / clocks.bus_ps if clocks else 0.0
     try:
-        r = pnr.place_and_route(design.accel, clock, workdir)
+        if clocks is not None:
+            accel = min(design.accel_mhz, ihp.max_freq_mhz)
+            r = pnr.place_and_route(design.accel, bus, workdir, accel_mhz=accel)
+            clock = accel
+        else:
+            r = pnr.place_and_route(design.accel, clock, workdir)
     except pnr.PnrError as exc:
         msg = str(exc).splitlines()[0]
         return StepResult(
@@ -186,6 +225,8 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     if r.macros:
         # The layout's buffers are macros, and its logic has their interface.
         kge += accel_bank_kge(a.rows, a.cols, a.double_buffer)
+    if clocks is not None:
+        kge += ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * a.ports
     model_cell = kge * 1000 * ihp.ge_um2
     model_buffers = buffer_mm2(a, ihp) * 1e6
     data = {
@@ -213,6 +254,11 @@ def place_route(design: Design, workdir: Path) -> StepResult:
         "buffers": r.buffers,
         "buffer_words": rtl_params(a).abuf_words if r.macros else pnr.PNR_WORDS,
         "gds": str(r.gds) if r.gds else None,
+        **(
+            {"bus_clock_mhz": round(bus, 3), "clock_periods_ns": r.clocks, "path_groups": r.groups}
+            if clocks is not None
+            else {}
+        ),
     }
     # The block as it is in silicon, standard cells and macros, against the model's logic
     # and buffers.
@@ -243,11 +289,21 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     clean = r.checks_clean
     checks = r.checks()
+    hold = f"; hold missed by {-r.hold_slack_ns:.3f} ns" if r.hold_slack_ns < 0 else ""
+    setup = "met" if r.setup_slack_ns >= 0 else "missed"
+    if clocks is not None:
+        timing = (
+            f"the accelerator at {clock:g} MHz and X-HEEP's side at {bus:.4g} MHz "
+            f"{setup} at the slow corner ({group_note(r.groups)}){hold}"
+        )
+    else:
+        timing = (
+            f"{clock:g} MHz {setup} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
+            f"and about {r.fmax_mhz:.0f} MHz at the typical one){hold}"
+        )
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "
-        f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {clock:g} MHz "
-        f"{'met' if met else 'missed'} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
-        f"and about {r.fmax_mhz:.0f} MHz at the typical one); {checks}"
+        f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells; {timing}; {checks}"
     )
     if r.macros:
         msg += (
@@ -265,6 +321,37 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     elif r.buffers:
         msg += f"; {r.buffers}"
     return StepResult("pnr", "pass" if met and clean else "fail", msg, data)
+
+
+SLOW = "nom_slow_1p08V_125C"
+
+
+def group_note(groups: dict[str, dict[str, dict[str, float]]]) -> str:
+    """Each path group's worst setup slack at the slow corner and the worst hold slack of
+    all corners, for a summary: each clock's paths, and the crossings' ("path delay")."""
+    names = {"path delay": "crossings", "asynchronous": "resets"}
+
+    def worst(kind: str, corner: str | None) -> tuple[dict[str, float], dict[str, float]]:
+        # The worst at the corner (or of every corner), and the groups only bounded below.
+        exact: dict[str, float] = {}
+        above: dict[str, float] = {}
+        for key, into in ((kind, exact), (f"{kind}_above", above)):
+            for c, per in groups.get(key, {}).items():
+                if corner is None or c == corner:
+                    for g, v in per.items():
+                        into[g] = min(into.get(g, v), v)
+        return exact, above
+
+    parts: list[str] = []
+    for kind, corner in (("setup", SLOW), ("hold", None)):
+        exact, above = worst(kind, corner)
+        parts += [f"{kind} {names.get(g, g)} {v:+.3f} ns" for g, v in sorted(exact.items())]
+        parts += [
+            f"{kind} {names.get(g, g)} above {v:+.3f} ns"
+            for g, v in sorted(above.items())
+            if g not in exact
+        ]
+    return ", ".join(parts) if parts else "no path groups reported"
 
 
 def corner_slacks(metrics: dict[str, Any]) -> dict[str, dict[str, float]]:
@@ -557,7 +644,7 @@ def _place_route_on(design: Design, tech: str, bundle: Path, remote: Remote | No
 def verify_bundle(
     bundle: Path,
     *,
-    steps: tuple[str, ...] = ("consistency", "lint", "sim", "synth", "xheep"),
+    steps: tuple[str, ...] = ("consistency", "lint", "sim", "cdc", "synth", "xheep"),
     xheep_dir: Path | None = None,
     fetch_xheep: bool = False,
     cases: int = 0,
@@ -581,6 +668,8 @@ def verify_bundle(
             results.append(consistency(design, bundle))
         elif step == "lint":
             results.append(lint(design, bundle))
+        elif step == "cdc":
+            results.append(crossings.check(design, builddir.work_dir(bundle, "verify", "cdc")))
         elif step == "sim" and sim_tool != "verilator":
             results.append(_simulate_on(design, sim_tool, bundle, remote, cases, seed))
         elif step == "sim":
