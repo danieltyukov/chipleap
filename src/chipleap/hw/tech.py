@@ -84,16 +84,17 @@ FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical cor
 #   datapath, but on 3.0.14 the narrow designs route faster than on 3.0.0.dev44 and the wide
 #   trees do not: that ratio (1.938) would put the 1 x 32 at 88.7 MHz, where it met 86.7.
 # - A GEMV engine slows with its lanes, which make it larger: the 2 x 8 engine with four
-#   ports took 9.60 ns and the 4 x 8 with two 9.96 ns. ACCEL_LANE_NS per doubling of lanes
-#   bounds them from above.
-# - More ports make the engine larger and its wires longer. On 3.0.0.dev44 the GEMV 1 x 8
-#   engine took 9.11 ns with one port, 10.09 ns with eight (weight unpacking, then the DMA's
-#   setup of each port's start address at 9.74 ns) and 10.41 ns with sixteen (at 35 % core
-#   utilisation; the activation read address into an operand register). ACCEL_PORT_NS is
-#   the line a + b x ports through one and eight ports; sixteen lie 0.8 ns under it. Each
-#   port has an address generator of its own, so the DMA no longer hands words to the ports
-#   one after another; with that chain the GEMV 2 x 8 engine with four ports took 14.02 ns
-#   on 3.0.0.dev44.
+#   ports took 9.60 ns, under the port line below, and the 4 x 8 with two 9.96 ns.
+#   ACCEL_LANE_NS per doubling of lanes bounds the 4 x 8 from above.
+# - More ports make the engine larger and its wires longer. The GEMV 1 x 8 engine took
+#   9.30 ns with one port, 10.82 ns with eight (between flip-flops, through 6.4 ns of
+#   repeaters across the engine and a 0.65 ns hold buffer) and 11.05 ns with sixteen (a read
+#   port's data input into the engine through weak buffers, at 51 % core utilisation).
+#   ACCEL_PORT_NS is the line a + b x ports through one and eight ports; sixteen lie 1.5 ns
+#   under it. On 3.0.0.dev44 the engine took 9.11, 10.09 and 10.41 ns, sixteen 0.8 ns under
+#   that flow's line. Each port has an address generator of its own, so the DMA no longer
+#   hands words to the ports one after another; with that chain the GEMV 2 x 8 engine with
+#   four ports took 14.02 ns on 3.0.0.dev44.
 # - The core reads its tile descriptor from a register loaded a cycle ahead, not through a
 #   select by the buffer slot. With the select, the slot's net and its buffer tree led into
 #   the GEMV engine's operand registers and accumulators, and set the period of the 4 x 8
@@ -104,7 +105,7 @@ FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical cor
 ACCEL_ROUTED_NS = 9.303
 ACCEL_SIGNOFF_FACTOR = 1.981
 ACCEL_LANE_NS = 0.329
-ACCEL_PORT_NS = (8.966, 0.1413)
+ACCEL_PORT_NS = (9.087, 0.2169)
 # A GEMV engine whose buffers are IHP's SRAM macros (chipleap.gen.banks, routed with
 # LibreLane 3.0.14 at the slow corner, 100 MHz):
 # - It registers each bank word in the cycle after its read, so the macro's read time

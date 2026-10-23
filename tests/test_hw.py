@@ -101,14 +101,26 @@ def test_accel_clock_limit_follows_ports_lanes_and_width():
     assert one >= two > four > eight
     assert accel_signoff_mhz("gemv", 16, 1) < accel_signoff_mhz("gemv", 8, 1)
     assert accel_signoff_mhz("gemv", 8, 2, rows=4) < accel_signoff_mhz("gemv", 8, 2, rows=2)
+    # Routed at the slow corner with LibreLane 3.0.14 at 100 MHz, buffers in flip-flops: the
+    # GEMV 2 x 8 engine with four ports took 9.604 ns, the 4 x 8 with two 9.961 ns, the 1 x 8
+    # with eight and sixteen 10.821 and 11.046 ns, the 1 x 16 and 1 x 32 10.196 and 11.528 ns,
+    # and the weight-stationary 8 x 8 with two 8.744 ns. The model's period is never shorter.
+    for dataflow, rows, cols, ports, routed in (
+        ("gemv", 2, 8, 4, 9.604),
+        ("gemv", 4, 8, 2, 9.961),
+        ("gemv", 1, 8, 8, 10.821),
+        ("gemv", 1, 8, 16, 11.046),
+        ("gemv", 1, 16, 1, 10.196),
+        ("gemv", 1, 32, 1, 11.528),
+        ("ws", 8, 8, 2, 8.744),
+    ):
+        assert 1000 / accel_signoff_mhz(dataflow, cols, ports, rows) >= routed - 1e-9
     ihp, g28 = get_tech("ihp-sg13g2"), get_tech("generic-28nm")
-    # Routed at the slow corner: a GEMV 2 x 8 engine with four ports met 100 MHz, a 4 x 8
-    # engine with two 97.7 MHz (and 103.2 MHz in another run), and a 1 x 8 engine 99.06 MHz
-    # with eight ports and 96.0 MHz with sixteen.
     assert ihp.clock_limit_mhz("gemv", 8, 4, rows=2) == ihp.max_freq_mhz
-    assert 97.5 < ihp.clock_limit_mhz("gemv", 8, 2, rows=4) <= 97.72
-    assert 99.0 < ihp.clock_limit_mhz("gemv", 8, 8) <= 99.06
-    assert ihp.clock_limit_mhz("gemv", 8, 16) == pytest.approx(89.1, abs=0.1)
+    assert accel_signoff_mhz("gemv", 8, 2, rows=4) == pytest.approx(100.39, abs=0.01)
+    assert ihp.clock_limit_mhz("gemv", 8, 8) == pytest.approx(92.40, abs=0.01)
+    assert ihp.clock_limit_mhz("gemv", 8, 16) == pytest.approx(79.63, abs=0.01)
+    assert ihp.clock_limit_mhz("gemv", 32, 1) == pytest.approx(86.73, abs=0.01)
     # Only the node the timing was measured on is capped by it.
     assert g28.clock_limit_mhz("gemv", 8, 8) == g28.max_freq_mhz
 
