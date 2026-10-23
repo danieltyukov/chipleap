@@ -500,8 +500,8 @@ def _finish(
 
 def structure_identities(data: bytes) -> list[tuple[bytes, str]]:
     """Each structure of a GDS stream: its name as written (one NUL pads an odd length)
-    and its identity, what macro/v1's ``pdk.cell_name`` and a chip's merges
-    (``chipleap.chip.merge``) compare. The identity is the file's UNITS record and the
+    and its identity, what macro/v1's ``pdk.cell_name`` compares (a chip's merges compare
+    layouts instead, ``chipleap.chip.merge.gds_names``). The identity is the file's UNITS record and the
     SHA-256 of the structure's records from BGNSTR to ENDSTR, each with its four-byte
     header, BGNSTR's body (the dates) left out: every other record a tool reads, its
     STRCLASS, properties and the order of its elements, counts. In a file whose UNITS
