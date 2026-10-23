@@ -441,6 +441,31 @@ def hold_margin_ns() -> float:
     return value
 
 
+# Buffers a trial run may add, by name in CHIPLEAP_SOC_BUFFERS (``trial_buffers``): one
+# after each of X-HEEP's clock gates (``gate_buffers``) and one after each output bit of
+# X-HEEP's bank macros (``bank_output_buffers``). The SmolLM2 SoC's evidence layout has
+# neither. At 36 MHz, the gates' buffers left +0.429 ns of setup and +0.053 ns of hold
+# against its +0.627 and +0.070 ns, and both together +1.271 and +0.070 ns with one net
+# failing OpenROAD's antenna check after routing (a bank output's, on Metal2).
+BUFFERS_ENV = "CHIPLEAP_SOC_BUFFERS"
+GATES = "gates"
+BANK_OUTPUTS = "bank-outputs"
+
+
+def trial_buffers() -> frozenset[str]:
+    """The buffers ``BUFFERS_ENV`` names, comma-separated (``GATES``, ``BANK_OUTPUTS``);
+    none when it is unset or empty."""
+    raw = os.environ.get(BUFFERS_ENV, "")
+    names = frozenset(n.strip() for n in raw.split(",") if n.strip())
+    unknown = sorted(names - {GATES, BANK_OUTPUTS})
+    if unknown:
+        raise SocError(
+            f"{BUFFERS_ENV} names {GATES} and {BANK_OUTPUTS}, comma-separated, "
+            f"not {unknown[0][:20]!r}"
+        )
+    return names
+
+
 # The step LibreLane runs the clock tree in, and the one inserted after it.
 CTS = "OpenROAD.CTS"
 ECO_BUFFERS = "Odb.InsertECOBuffers"
@@ -585,10 +610,11 @@ def gate_buffers(gates: Iterable[tuple[str, float, float]]) -> list[dict[str, An
     The integrated clock gate is IHP's one, a weak cell, and drives the root of its tree
     over the wire to where CTS put that root (0.4 to 0.8 mm on the SmolLM2 SoC): the gated
     trees reach their flip-flops 0.6 to 0.7 ns after the ungated ones at the slow corner,
-    and DMA0's registers were the worst hold endpoints in every layout. From one 36 MHz
-    placement, routed, a buffer after each gate took setup from +0.259 to +0.490 ns at the
-    slow corner and hold from -0.060 to +0.144 ns at the fast one. Placement decides where
-    the gates are, so the layout stops after the clock tree to read them (``layout``)."""
+    and DMA0's registers were the worst hold endpoints in every 40 and 36 MHz layout. From
+    one 36 MHz placement, routed, a buffer after each gate took setup from +0.259 to +0.490
+    ns at the slow corner and hold from -0.060 to +0.144 ns at the fast one. Placement
+    decides where the gates are, so with these buffers (``trial_buffers``) the layout stops
+    after the clock tree to read them (``layout``)."""
     return [
         {"target": f"{name}/GCLK", "buffer": GATE_BUFFER, "placement": [round(x, 3), round(y, 3)]}
         for name, x, y in gates
@@ -679,8 +705,9 @@ def with_floorplan(
 ) -> tuple[dict[str, Any], place.Floorplan]:
     """``cfg`` with a floorplan for ``cell_um2`` of standard cells: the die, the macros
     where ChipLeap puts them, their power grid (``pdn.tcl``) and the buffers beside the
-    accelerator's macros' clock pins and X-HEEP's banks' outputs (``clock_pin_buffers``,
-    ``bank_output_buffers``)."""
+    accelerator's macros' clock pins (``clock_pin_buffers``), and beside X-HEEP's banks'
+    outputs when a trial run asks for them (``trial_buffers``, ``bank_output_buffers``)."""
+    trial = trial_buffers()
     fp = floorplan(prep.instances, prep.views, cell_um2)
     by_inst = dict(prep.instances)
     by_instance = {i: prep.views[c].view for i, c in prep.instances}
@@ -702,7 +729,7 @@ def with_floorplan(
         "MACROS": macros,
         "INSERT_ECO_BUFFERS": [
             *clock_pin_buffers(fp, by_instance),
-            *bank_output_buffers(fp, by_instance),
+            *(bank_output_buffers(fp, by_instance) if BANK_OUTPUTS in trial else []),
         ],
     }
     netlists = sorted((work / "runs" / "chipleap").glob("*-yosys-synthesis/*.nl.v"))
@@ -809,12 +836,14 @@ def place_and_route(
 
 
 def layout(work: Path, full: dict[str, Any]) -> tuple[dict[str, Any], Path | None]:
-    """The layout, resumed after synthesis, in two parts: up to the clock tree, then the
-    rest from the buffers inserted after it (``ECO_BUFFERS``), with a buffer after each
-    clock gate where placement put the gate (``gate_buffers``) besides those beside the
-    accelerator's macros. The final metrics and GDS."""
+    """The layout, resumed after synthesis; the final metrics and GDS. With the clock
+    gates' buffers (``trial_buffers``) it runs in two parts: up to the clock tree, then
+    the rest from the buffers inserted after it (``ECO_BUFFERS``), with a buffer after
+    each clock gate where placement put the gate (``gate_buffers``) besides the others."""
     # Without the second antenna repair (``late_antenna_repair``): the SoC's evidence was
     # routed without it, and it is turned on once a SoC run with it has been checked.
+    if GATES not in trial_buffers():
+        return pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S)
     pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, to=CTS, timeout_s=TIMEOUT_S)
     run = work / "runs" / "chipleap"
     state = pnr.step_state(run, CTS)
