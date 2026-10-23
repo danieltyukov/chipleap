@@ -430,7 +430,7 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     cells = [c for _, c in prep.instances]
     assert cells.count("RM_IHPSG13_1P_1024x32_c2_bm_bist") == 8
     assert cells.count("RM_IHPSG13_1P_256x64_c2_bm_bist") == 4
-    full, fp = soc_step.with_floorplan(cfg, prep, 3.0e6, work)
+    full, fp = soc_step.with_floorplan(cfg, prep, 3.0e6, work, "3.0.0.dev44")
     assert set(full["MACROS"]) == set(cells)
     assert {p.instance for p in fp.macros} == {i for i, _ in prep.instances}
     assert (work / "pdn.tcl").is_file()
@@ -438,13 +438,17 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     accel = {i for i, _ in prep.instances if i.startswith(f"{soc.ACCEL_INST}.")}
     assert len(accel) == 4
     assert {e["target"] for e in full["INSERT_ECO_BUFFERS"]} == {f"{i}/A_CLK" for i in accel}
-    # A trial run adds one after each of the 32 output bits of the eight bank macros.
+    # From LibreLane 3.0.14 on, and on dev44 for a trial run, one goes after each output
+    # bit of every SRAM: the eight bank macros' 32 and the accelerator's four macros' 64.
+    new, _ = soc_step.with_floorplan(cfg, prep, 3.0e6, work, "3.0.14")
     monkeypatch.setenv(soc_step.BUFFERS_ENV, soc_step.BANK_OUTPUTS)
-    trial, _ = soc_step.with_floorplan(cfg, prep, 3.0e6, work)
-    outs = [e for e in trial["INSERT_ECO_BUFFERS"] if "/A_DOUT[" in e["target"]]
-    assert len(outs) == 256 and {e["buffer"] for e in outs} == {"sg13g2_buf_2"}
-    assert trial["INSERT_ECO_BUFFERS"][: len(accel)] == full["INSERT_ECO_BUFFERS"]
+    trial, _ = soc_step.with_floorplan(cfg, prep, 3.0e6, work, "3.0.0.dev44")
     monkeypatch.delenv(soc_step.BUFFERS_ENV)
+    for buffered in (new, trial):
+        outs = [e for e in buffered["INSERT_ECO_BUFFERS"] if "/A_DOUT[" in e["target"]]
+        assert len(outs) == 8 * 32 + 4 * 64 and {e["buffer"] for e in outs} == {"sg13g2_buf_2"}
+        assert len([o for o in outs if o["target"].startswith(f"{soc.ACCEL_INST}.")]) == 256
+        assert buffered["INSERT_ECO_BUFFERS"][: len(accel)] == full["INSERT_ECO_BUFFERS"]
     # More standard cells, a larger core.
     _, small = soc_step.with_floorplan(cfg, prep, 1.0e6, work)
     assert small.core_um2 < fp.core_um2
@@ -865,10 +869,10 @@ def test_the_layout_stops_after_the_clock_tree_to_buffer_the_gates(tmp_path, mon
         soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [], "_outside": True})
 
 
-def test_each_bank_output_gets_a_buffer_beside_its_pin():
-    """X-HEEP's bank macros' A_DOUT bits each get a buffer just past the halo beside the
-    pin (below a macro of the top row, above one of the bottom row); the accelerator's
-    macros get none; a bank macro without A_DOUT pins stops the step."""
+def test_each_sram_output_gets_a_buffer_beside_its_pin():
+    """Every SRAM macro's A_DOUT bits, X-HEEP's banks' and the accelerator's, each get a
+    buffer just past the halo beside the pin (below a macro of the top row, above one of
+    the bottom row); SRAM macros without A_DOUT pins stop the step."""
     from chipleap.macro import place
     from chipleap.macro.layer import MacroPin, MacroView
 
@@ -889,17 +893,20 @@ def test_each_bank_output_gets_a_buffer_beside_its_pin():
             place.Placed(f"{soc.ACCEL_INST}.abuf_s0_m0", 60.48, 2040.94, "N"),
         ),
     )
-    eco = soc_step.bank_output_buffers(fp, {m.instance: bank for m in fp.macros})
+    eco = soc_step.output_buffers(fp, {m.instance: bank for m in fp.macros})
     off = place.HALO_UM + soc_step.CLOCK_PIN_GAP_UM
+    accel = f"{soc.ACCEL_INST}.abuf_s0_m0"
     assert [e["target"] for e in eco] == [
         f"{top}/A_DOUT[0]",
         f"{top}/A_DOUT[31]",
         f"{bottom}/A_DOUT[0]",
         f"{bottom}/A_DOUT[31]",
+        f"{accel}/A_DOUT[0]",
+        f"{accel}/A_DOUT[31]",
     ]
     assert eco[0]["placement"] == [2553.79, round(1823.26 - off, 3)]
     assert eco[3]["placement"] == [3385.73, round(32.68 + 336.46 + off, 3)]
     assert {e["buffer"] for e in eco} == {"sg13g2_buf_2"}
     bare = MacroView("RM_C", "pdk", 10.0, 10.0, pins[2:], p, p, p, p, ("RM_C",), ("RM_C",))
     with pytest.raises(soc_step.SocError, match="have no A_DOUT"):
-        soc_step.bank_output_buffers(fp, {m.instance: bare for m in fp.macros})
+        soc_step.output_buffers(fp, {m.instance: bare for m in fp.macros})

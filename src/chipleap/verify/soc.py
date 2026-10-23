@@ -513,11 +513,12 @@ def hold_margin_ns() -> float:
 
 
 # Buffers a trial run may add, by name in CHIPLEAP_SOC_BUFFERS (``trial_buffers``): one
-# after each of X-HEEP's clock gates (``gate_buffers``) and one after each output bit of
-# X-HEEP's bank macros (``bank_output_buffers``). The SmolLM2 SoC's evidence layout has
-# neither. At 36 MHz, the gates' buffers left +0.429 ns of setup and +0.053 ns of hold
-# against its +0.627 and +0.070 ns, and both together +1.271 and +0.070 ns with one net
-# failing OpenROAD's antenna check after routing (a bank output's, on Metal2).
+# after each of X-HEEP's clock gates (``gate_buffers``), and on LibreLane 3.0.0.dev44 one
+# after each SRAM output bit (``output_buffers``), which 3.0.14's layouts always have. #20's
+# evidence layout (dev44, 36 MHz) has neither: the gates' buffers left +0.429 ns of setup
+# and +0.053 ns of hold against its +0.627 and +0.070 ns, and with the banks' outputs
+# buffered too +1.271 and +0.070 ns, with one net failing OpenROAD's antenna check after
+# routing (a bank output's, on Metal2), without the second antenna repair.
 BUFFERS_ENV = "CHIPLEAP_SOC_BUFFERS"
 GATES = "gates"
 BANK_OUTPUTS = "bank-outputs"
@@ -747,51 +748,55 @@ def _beside(
     }
 
 
-# What drives a bank's output wire from beside the macro (0.6 pF limit, about ten times
-# the most a routed bank output carried).
-BANK_OUTPUT_BUFFER = "sg13g2_buf_2"
-BANK_OUTPUT_PIN = "A_DOUT["
+# What drives an SRAM output's wire from beside the macro (0.6 pF limit, about ten times
+# the most a routed SRAM output carried).
+OUTPUT_BUFFER = "sg13g2_buf_2"
+OUTPUT_PIN = "A_DOUT["
 
 
-def bank_output_buffers(
-    fp: place.Floorplan, views: Mapping[str, MacroView]
-) -> list[dict[str, Any]]:
-    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer after each output bit of X-HEEP's bank
-    macros (``views`` by instance), placed just off the macro's edge beside the pin.
+def output_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer after each output bit of every SRAM
+    macro in the SoC, X-HEEP's banks' and the accelerator's buffers' (``views`` by
+    instance), placed just off the macro's edge beside the pin.
 
-    A bank's 32 output bits run side by side on Metal3 for about 230 um, and the global
-    router's estimate, which the repairs work against, has the layers' capacitance from
-    the LEF without the coupling between neighbours: on the SmolLM2 SoC routed at 36 MHz,
-    the 256 bank outputs carried a median 1.19 times and at most 2.39 times their
-    estimate, over the same length of wire (bank_m6's A_DOUT[4]: 0.0288 pF estimated,
-    0.0687 pF routed, against the macro's 0.064 pF). A design-wide limit would buffer
-    every heavy net of X-HEEP, and OpenSTA does not apply a limit set on the macros' pins
-    to them. With a buffer beside the pin, the macro drives a few um and the buffer the
-    wire."""
+    A macro's output bits run side by side for hundreds of um, and the global router's
+    estimate, which the repairs work against, leaves out most of the coupling between
+    them. On the SmolLM2 SoC routed at 36 MHz with LibreLane 3.0.0.dev44, the 256 bank
+    outputs carried a median 1.19 times and at most 2.39 times their estimate over the
+    same length of wire (bank_m6's A_DOUT[4]: 0.0288 pF estimated, 0.0687 pF routed,
+    against the macro's 0.064 pF), and on 3.0.14 an accelerator's buffer output was
+    estimated at 0.0297 pF and came out 0.0650 pF. A design-wide limit would buffer every
+    heavy net of X-HEEP, and OpenSTA does not apply a limit set on the macros' pins to
+    them. With a buffer beside the pin, the macro drives a few um and the buffer the wire."""
     out: list[dict[str, Any]] = []
     for p in fp.macros:
-        if not p.instance.startswith(f"{soc.MCU_INST}."):
-            continue
         view = views[p.instance]
         for mp in view.pins:
-            if not mp.name.startswith(BANK_OUTPUT_PIN):
+            if not mp.name.startswith(OUTPUT_PIN):
                 continue
             at = _pin_at(p, view, mp.name)
             if at is not None:
-                out.append(_beside(p, view, mp.name, at, BANK_OUTPUT_BUFFER))
-    if any(p.instance.startswith(f"{soc.MCU_INST}.") for p in fp.macros) and not out:
-        raise SocError(f"X-HEEP's bank macros have no {BANK_OUTPUT_PIN}...] pins")
+                out.append(_beside(p, view, mp.name, at, OUTPUT_BUFFER))
+    if fp.macros and not out:
+        raise SocError(f"the SoC's SRAM macros have no {OUTPUT_PIN}...] pins")
     return out
 
 
 def with_floorplan(
-    cfg: dict[str, Any], prep: Prepared, cell_um2: float, work: Path
+    cfg: dict[str, Any],
+    prep: Prepared,
+    cell_um2: float,
+    work: Path,
+    version: str | None = None,
 ) -> tuple[dict[str, Any], place.Floorplan]:
     """``cfg`` with a floorplan for ``cell_um2`` of standard cells: the die, the macros
     where ChipLeap puts them, their power grid (``pdn.tcl``) and the buffers beside the
-    accelerator's macros' clock pins (``clock_pin_buffers``), and beside X-HEEP's banks'
-    outputs when a trial run asks for them (``trial_buffers``, ``bank_output_buffers``)."""
+    accelerator's macros' clock pins (``clock_pin_buffers``), and beside every SRAM
+    output (``output_buffers``) from LibreLane 3.0.14 on (``librelane_from_3014`` for
+    ``version``, the one that runs by default) or when a trial run asks for them
+    (``trial_buffers``)."""
     trial = trial_buffers()
+    outputs = BANK_OUTPUTS in trial or librelane_from_3014(version)
     fp = floorplan(prep.instances, prep.views, cell_um2)
     by_inst = dict(prep.instances)
     by_instance = {i: prep.views[c].view for i, c in prep.instances}
@@ -813,7 +818,7 @@ def with_floorplan(
         "MACROS": macros,
         "INSERT_ECO_BUFFERS": [
             *clock_pin_buffers(fp, by_instance),
-            *(bank_output_buffers(fp, by_instance) if BANK_OUTPUTS in trial else []),
+            *(output_buffers(fp, by_instance) if outputs else []),
         ],
     }
     netlists = sorted((work / "runs" / "chipleap").glob("*-yosys-synthesis/*.nl.v"))
@@ -928,7 +933,7 @@ def place_and_route(
     clock = clock_mhz or design.freq_mhz
     version = librelane().version
     cfg, prep = prepare(design, config_text, checkout, work, pdk, clock, version)
-    first, _ = with_floorplan(cfg, prep, model_areas_um2(design)[0], work)
+    first, _ = with_floorplan(cfg, prep, model_areas_um2(design)[0], work, version)
     pnr.run_librelane(work, first, to="Yosys.Synthesis", timeout_s=TIMEOUT_S)
     run = work / "runs" / "chipleap"
     if problems := netlist_problems(run):
@@ -936,7 +941,7 @@ def place_and_route(
     synth = pnr.synth_area(run)
     if synth <= 0:
         raise SocError("LibreLane's synthesis reported no standard-cell area")
-    full, _ = with_floorplan(cfg, prep, synth, work)
+    full, _ = with_floorplan(cfg, prep, synth, work, version)
     metrics, gds = layout(work, full)
     return routed(design, work, pdk, clock, prep.instances, synth, metrics, gds)
 
