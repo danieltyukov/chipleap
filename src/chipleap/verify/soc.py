@@ -902,7 +902,7 @@ def routed(
         (soc.TOP,),
     )
     result = replace(
-        pnr.parse_run(metrics, clock, gds, run, held),
+        pnr.parse_run(metrics, clock, gds, run, held, pdk),
         synth_cell_um2=synth_um2,
         macros=placed,
         macro_um2=sum(area[cell] for _, cell in placed),
