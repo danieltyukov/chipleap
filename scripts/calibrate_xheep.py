@@ -1,7 +1,8 @@
 """Measure X-HEEP's logic per peripheral on IHP SG13G2 and fit the model's prices to it.
 
     python scripts/calibrate_xheep.py measure OUT [--configs NAME,...] [--yosys CMD] [--jobs N]
-    python scripts/calibrate_xheep.py fit OUT
+    python scripts/calibrate_xheep.py collect OUT
+    python scripts/calibrate_xheep.py fit OUT [OUT...]
 
 ``measure`` writes, for each configuration below, the SmolLM2 SoC with X-HEEP configured
 that way, as ``chipleap verify --steps soc`` prepares it (X-HEEP rendered by its own
@@ -13,16 +14,23 @@ PDK with its SRAM macros, an X-HEEP checkout) and a Yosys with the slang plugin,
 LibreLane's: ``--yosys`` is the command that runs it, words split as a shell would, for
 instance a container wrapper. Each synthesis takes about an hour on one core.
 
-``fit`` reads every ``OUT/*/blocks.json`` and prints:
+``collect`` writes ``blocks.json`` for a synthesis in ``OUT`` that finished without
+``measure`` there to read it, when its X-HEEP configuration is the one ChipLeap writes now.
+
+``fit`` reads every ``OUT/*/blocks.json`` (a later ``OUT``'s replaces an earlier one's) and
+prints:
 
 * each block's area per configuration: the subtree of the instances that make it up, so
   the blocks of one configuration add up to its total exactly, since no logic crosses
   a module boundary in a hierarchical synthesis;
-* the least-squares fits of the parts that depend on the configuration: the DMA against
-  its channels and master ports, the one-to-many bus against its masters, the user
-  domain's interconnect against its peripherals;
-* the model's total (``chipleap.model.evaluate.xheep_kge``) against each configuration's
-  measured total, and the same with each configuration left out of the fits.
+* the prices fitted to the configurations in ``CONFIGS``, the least-squares fits among
+  them: the DMA against its channels and master ports, the one-to-many bus against its
+  masters, the user domain's interconnect against its peripherals, and the NtoM
+  crossbar per master and slave pair;
+* the model's total (``chipleap.model.evaluate.xheep_kge`` and ``bus_kge``) against each
+  configuration's measured total, with the shipped prices, the fitted ones and the ones
+  fitted without that configuration, and against the configurations the fit never sees
+  (``CHECKS``).
 
 Compare the output with the XHEEP_* constants in chipleap/model/evaluate.py.
 """
