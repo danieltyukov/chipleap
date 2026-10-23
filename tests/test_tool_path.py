@@ -20,7 +20,7 @@ from chipleap.rtl import confine
 from chipleap.rtl import sim as sim_mod
 from chipleap.rtl.project import load_project
 from chipleap.rtl.verify import run_step
-from chipleap.verify import tools
+from chipleap.verify import librelane_pdk, tools
 from chipleap.verify.remote import RemoteError, Step, run_steps
 
 # Every program a step starts by name, directly or through another tool.
@@ -243,51 +243,28 @@ def test_relative_liberty_settings_are_refused_with_the_reason(monkeypatch, tmp_
     assert "PDK_ROOT is a relative path, pdk" in tools.liberty_settings_problem()
 
 
-def test_librelane_runs_on_the_pdk_root_it_is_given(monkeypatch, tmp_path):
-    # A ciel root: ihp-sg13g2 links to the version ciel keeps under its commit.
-    version = tmp_path / "ciel/ihp-sg13g2/versions" / ("22f2a25" + "0" * 33) / "ihp-sg13g2"
-    version.mkdir(parents=True)
-    (tmp_path / "ihp-sg13g2").symlink_to(version.relative_to(tmp_path))
-    monkeypatch.delenv(tools.LIBRELANE_PDK_ENV, raising=False)
-    assert tools.librelane_pdk_args() == ["--pdk", "ihp-sg13g2"]
-    monkeypatch.setenv(tools.LIBRELANE_PDK_ENV, str(tmp_path))
-    assert tools.librelane_pdk_args() == [
-        "--pdk",
-        "ihp-sg13g2",
-        "--manual-pdk",
-        "--pdk-root",
-        str(tmp_path),
-    ]
-    assert tools.librelane_pdk_commit(tmp_path).startswith("22f2a25")
-    # Files LibreLane takes from that root are trusted like those of any PDK directory.
-    assert tmp_path.resolve() in tools.pdk_roots()
-    # A setting that names no PDK fails instead of falling back to LibreLane's own.
-    (tmp_path / "empty").mkdir()
-    for bad, reason in (("relative", "relative path"), (str(tmp_path / "empty"), "holds no")):
-        monkeypatch.setenv(tools.LIBRELANE_PDK_ENV, bad)
-        with pytest.raises(ValueError, match=reason):
-            tools.librelane_pdk_args()
-
-
 def test_a_librelane_wrapper_starts_the_image_chipleap_names(monkeypatch, tmp_path):
     wrapper = tmp_path / "librelane"
     wrapper.write_text('#!/bin/sh\nexec docker run "$LIBRELANE_IMAGE" "$@"\n')
     wrapper.chmod(0o755)
     monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(wrapper))
-    monkeypatch.delenv(tools.LIBRELANE_PDK_ENV, raising=False)
+    monkeypatch.delenv(librelane_pdk.ENV, raising=False)
     monkeypatch.delenv(tools.LIBRELANE_IMAGE_ENV, raising=False)
     monkeypatch.delenv("LIBRELANE_IMAGE", raising=False)
-    # Unset, the wrapper keeps its own image, and its version is not known.
+    # Unset, the wrapper starts the release ChipLeap runs.
+    assert tools.librelane().version == "3.0.14"
+    assert tools.librelane_env()["LIBRELANE_IMAGE"] == tools.LIBRELANE_DEFAULT_IMAGE
+    assert tools.librelane_loads_pad_views()
+    # Set empty, the wrapper keeps its own image, and its version is not known.
+    monkeypatch.setenv(tools.LIBRELANE_IMAGE_ENV, "")
     assert tools.librelane().version == "container wrapper"
     assert "LIBRELANE_IMAGE" not in tools.librelane_env()
     assert not tools.librelane_loads_pad_views()
     monkeypatch.setenv(tools.LIBRELANE_IMAGE_ENV, "ghcr.io/librelane/librelane:3.0.14")
     assert tools.librelane().version == "3.0.14"
-    assert tools.librelane_env()["LIBRELANE_IMAGE"] == "ghcr.io/librelane/librelane:3.0.14"
-    assert tools.librelane_loads_pad_views()
     # The wrapper mounts the PDK root it is told of, so LibreLane can read it.
     (tmp_path / "pdk/ihp-sg13g2").mkdir(parents=True)
-    monkeypatch.setenv(tools.LIBRELANE_PDK_ENV, str(tmp_path / "pdk"))
+    monkeypatch.setenv(librelane_pdk.ENV, str(tmp_path / "pdk"))
     assert tools.librelane_env()["LIBRELANE_PDK_ROOT"] == str(tmp_path / "pdk")
     # A run records the version that ran it; another than the image's fails the run.
     run = tmp_path / "run"

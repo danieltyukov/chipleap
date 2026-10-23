@@ -2,6 +2,7 @@
 (chipleap.verify.minarea)."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -410,7 +411,7 @@ def _fake_librelane(tmp_path, monkeypatch, second, calls):
     monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(tool))
 
     def fake(cmd, workdir, log, timeout, limit, env):
-        calls.append(cmd[5:])
+        calls.append(cmd[cmd.index("--run-tag") + 2 :])
         run = workdir / "runs" / "chipleap"
         log.write_text("")
         if "--to" not in cmd:
@@ -523,6 +524,66 @@ def test_slacks_no_timing_analysis_gives_are_refused(tmp_path, monkeypatch):
             pnr.check_metrics({"timing__hold__ws__corner:nom_fast_1p32V_m40C": bad})
 
 
+@pytest.mark.parametrize(
+    ("version", "defines"), [("3.0.14", {"threads": "4"}), ("3.0.0.dev44", None)]
+)
+def test_klayouts_drc_threads_reach_ihps_deck(tmp_path, monkeypatch, version, defines):
+    """LibreLane 3.0.14 passes KLAYOUT_DRC_THREADS to IHP's deck as thr, which the deck at
+    22f2a25 does not read, so KLayout ran on every CPU; the count goes as threads too.
+    3.0.0.dev44 refuses KLAYOUT_DRC_DEFINES, and its deck reads the count it is given."""
+    _fake_librelane(tmp_path, monkeypatch, _finishes({"timing__setup__ws": 0.5}), [])
+    monkeypatch.setattr(
+        pnr, "librelane", lambda: SimpleNamespace(found=True, path="ll", version=version)
+    )
+    pnr.run_librelane(tmp_path / "pnr", {"KLAYOUT_DRC_THREADS": 4})
+    for name in ("config.json", pnr.MIN_AREA_CONFIG):
+        cfg = json.loads((tmp_path / "pnr" / name).read_text())
+        assert cfg.get("KLAYOUT_DRC_DEFINES") == defines, name
+    assert "KLAYOUT_DRC_DEFINES" not in pnr.for_librelane({}, "3.0.14")
+
+
+def test_librelanes_drc_threads_come_from_the_runs_budget(monkeypatch):
+    """Half the run's threads, at most 8: LIBRELANE_MAX_CORES when the run gives it, else
+    the CPUs the process may use, as the chip's DRC and IHP's antenna deck count them, not
+    every CPU of a shared machine."""
+    from chipleap.chip import run
+
+    monkeypatch.setenv("LIBRELANE_MAX_CORES", "6")
+    assert pnr.signoff()["KLAYOUT_DRC_THREADS"] == 3
+    monkeypatch.setenv("LIBRELANE_MAX_CORES", "40")
+    assert pnr.signoff()["KLAYOUT_DRC_THREADS"] == 8
+    monkeypatch.delenv("LIBRELANE_MAX_CORES")
+    monkeypatch.setattr(run.os, "sched_getaffinity", lambda pid: {0, 1, 2, 3}, raising=False)
+    monkeypatch.setattr(run.os, "cpu_count", lambda: 255)
+    assert pnr.signoff()["KLAYOUT_DRC_THREADS"] == 2
+    monkeypatch.setattr(run.os, "sched_getaffinity", lambda pid: {0}, raising=False)
+    assert pnr.signoff()["KLAYOUT_DRC_THREADS"] == 1
+
+
+@pytest.mark.parametrize(
+    ("version", "cfg", "driven"),
+    [
+        ("3.0.14", {}, True),
+        ("3.0.0.dev44", {}, None),
+        ("3.0.14", {"PL_TIMING_DRIVEN": False}, False),
+        ("3.0.14", {"PL_TIME_DRIVEN": False}, None),
+    ],
+)
+def test_placement_is_timing_driven_as_on_dev44(tmp_path, monkeypatch, version, cfg, driven):
+    """3.0.0.dev44 placed for timing by default; 3.0.14 renamed the variable and turned it
+    off, so ChipLeap turns it on there, unless the configuration sets it under either name.
+    3.0.0.dev44 refuses PL_TIMING_DRIVEN."""
+    _fake_librelane(tmp_path, monkeypatch, _finishes({"timing__setup__ws": 0.5}), [])
+    monkeypatch.setattr(
+        pnr, "librelane", lambda: SimpleNamespace(found=True, path="ll", version=version)
+    )
+    pnr.run_librelane(tmp_path / "pnr", cfg)
+    for name in ("config.json", pnr.MIN_AREA_CONFIG):
+        written = json.loads((tmp_path / "pnr" / name).read_text())
+        assert written.get("PL_TIMING_DRIVEN") == driven, name
+        assert written.get("PL_TIME_DRIVEN") == cfg.get("PL_TIME_DRIVEN"), name
+
+
 def test_a_group_without_paths_is_read(tmp_path, monkeypatch):
     """LibreLane writes a group with no path as Infinity, as for the memory chip's
     register-to-register paths."""
@@ -585,7 +646,7 @@ def test_run_librelane_stops_after_a_step_then_resumes_through_routing(tmp_path,
     monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(tool))
 
     def fake(cmd, workdir, log, timeout, limit, env):
-        calls.append((cmd[5:], log.name))
+        calls.append((cmd[cmd.index("--run-tag") + 2 :], log.name))
         run = workdir / "runs" / "chipleap"
         if "Yosys.Synthesis" in cmd:
             step = run / "02-yosys-synthesis"
@@ -719,7 +780,6 @@ def test_run_librelane_repairs_antennas_after_the_timing_repair(tmp_path, monkey
 
 @pytest.mark.parametrize("finishes", [True, False])
 def test_an_ecos_second_part_is_read_only_from_its_own_final(tmp_path, monkeypatch, finishes):
-    from types import SimpleNamespace
 
     from chipleap.rtl import eco
 
@@ -746,8 +806,9 @@ def test_an_ecos_second_part_is_read_only_from_its_own_final(tmp_path, monkeypat
         (run / "final" / "metrics.json").write_text(json.dumps(PART1_METRICS))
         return 0
 
-    monkeypatch.setattr(eco, "librelane", lambda: SimpleNamespace(found=True, path="ll"))
-    monkeypatch.setattr(eco, "librelane_pdk_args", lambda: [])
+    monkeypatch.setattr(
+        eco, "librelane", lambda: SimpleNamespace(found=True, path="ll", version="3.0.14")
+    )
     monkeypatch.setattr(eco, "librelane_env", lambda: {})
     monkeypatch.setattr(eco, "_launch", fake)
     state = tmp_path / "state_in.json"

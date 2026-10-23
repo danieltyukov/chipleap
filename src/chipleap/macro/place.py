@@ -151,6 +151,22 @@ def rows(macros: Sequence[Macro], cell_um2: float, util: float = 0.45) -> Floorp
     return out
 
 
+def edge_reach_um(plan: Floorplan, macros: Sequence[Macro]) -> float:
+    """How far, in um, a cell at a pin on the die's top or bottom edge lies from the rows
+    that macros leave free: across the margin and every macro whose halo reaches that edge
+    of the core (within a row), and its halo. 0 when no macro does."""
+    size = {m.instance: m for m in macros}
+    _, y0, _, y1 = plan.core
+    reach = 0.0
+    for p in plan.macros:
+        m = size[p.instance]
+        if y1 - (p.y + m.height + HALO_UM) < SITE_UM[1]:
+            reach = max(reach, plan.die[1] - (p.y - HALO_UM))
+        if p.y - HALO_UM - y0 < SITE_UM[1]:
+            reach = max(reach, p.y + m.height + HALO_UM)
+    return round(reach, 4)
+
+
 def check(plan: Floorplan, macros: Sequence[Macro]) -> None:
     """Every macro inside the core by its halo, and two halos from every other; for a
     floorplan ChipLeap made or one a project gave."""

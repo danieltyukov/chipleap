@@ -120,6 +120,15 @@ def test_counter_places_and_routes(counter_project):
     assert r.data["gds"] == "build/pnr/runs/chipleap/final/gds/counter.gds"
 
 
+def test_librelane_leaves_the_drc_and_timing_verdicts_to_chipleap():
+    """LibreLane ends a run it judges failed on exit 2, and ChipLeap reads no result from
+    one: a run with IHP's SRAMs (off-grid pin markers ChipLeap sets apart) or one that
+    misses timing at a corner. ChipLeap judges both from the run's report and metrics."""
+    s = accel_pnr.signoff()
+    assert s["ERROR_ON_KLAYOUT_DRC"] is False
+    assert s["SETUP_VIOLATION_CORNERS"] == s["HOLD_VIOLATION_CORNERS"] == [""]
+
+
 def test_slew_and_capacitance_violations_fail_a_project_and_fanout_is_reported(
     counter_project, monkeypatch
 ):
