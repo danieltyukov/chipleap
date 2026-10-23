@@ -942,20 +942,30 @@ def place_and_route(
     if synth <= 0:
         raise SocError("LibreLane's synthesis reported no standard-cell area")
     full, _ = with_floorplan(cfg, prep, synth, work, version)
-    metrics, gds = layout(work, full)
+    metrics, gds = layout(work, full, version)
     return routed(design, work, pdk, clock, prep.instances, synth, metrics, gds)
 
 
-def layout(work: Path, full: dict[str, Any]) -> tuple[dict[str, Any], Path | None]:
+def layout(
+    work: Path, full: dict[str, Any], version: str | None = None
+) -> tuple[dict[str, Any], Path | None]:
     """The layout, resumed after synthesis; the final metrics and GDS. With the clock
     gates' buffers (``trial_buffers``) it runs in two parts: up to the clock tree, then
     the rest from the buffers inserted after it (``ECO_BUFFERS``), with a buffer after
-    each clock gate where placement put the gate (``gate_buffers``) besides the others."""
-    # Without the second antenna repair (``late_antenna_repair``): the SoC's evidence was
-    # routed without it, and it is turned on once a SoC run with it has been checked.
+    each clock gate where placement put the gate (``gate_buffers``) besides the others.
+    From LibreLane 3.0.14 on (``librelane_from_3014`` for ``version``) antennas are
+    repaired a second time after the timing repair, as in the accelerator's layout."""
+    # The second antenna repair (``late_antenna_repair``) catches nets the timing repair
+    # after global routing leaves over the antenna ratios: the one net over OpenROAD's
+    # check in the dev44 layout with buffers after the banks' outputs, a buffer's output
+    # on Metal2, was at 1.06 of its limit after global routing and 1.27 after routing.
+    # #20's evidence (dev44) was routed without it, and dev44 keeps that.
+    late = {"late_antenna_repair": True} if librelane_from_3014(version) else {}
     if GATES not in trial_buffers():
-        return pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S)
-    pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, to=CTS, timeout_s=TIMEOUT_S)
+        return pnr.run_librelane(
+            work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S, **late
+        )
+    pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, to=CTS, timeout_s=TIMEOUT_S, **late)
     run = work / "runs" / "chipleap"
     state = pnr.step_state(run, CTS)
     if state is None:
@@ -968,7 +978,7 @@ def layout(work: Path, full: dict[str, Any]) -> tuple[dict[str, Any], Path | Non
         raise SocError("LibreLane's state after the clock tree names no DEF in its run")
     gates = clock_gates(def_path.read_text(errors="replace"))
     full = {**full, "INSERT_ECO_BUFFERS": [*full["INSERT_ECO_BUFFERS"], *gate_buffers(gates)]}
-    return pnr.run_librelane(work, full, resume_from=ECO_BUFFERS, timeout_s=TIMEOUT_S)
+    return pnr.run_librelane(work, full, resume_from=ECO_BUFFERS, timeout_s=TIMEOUT_S, **late)
 
 
 def routed(

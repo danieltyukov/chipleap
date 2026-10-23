@@ -785,7 +785,8 @@ def test_clock_gates_are_read_where_placement_put_them():
 
 def test_the_layout_is_one_run_after_synthesis_without_the_gates_buffers(tmp_path, monkeypatch):
     """By default the layout goes on from synthesis in one run, with the configuration as
-    given, as the evidence layout did."""
+    given, as the evidence layout did; from LibreLane 3.0.14 on with the second antenna
+    repair after the timing repair."""
     from chipleap.verify import pnr
 
     calls: list[tuple[dict, dict]] = []
@@ -802,10 +803,13 @@ def test_the_layout_is_one_run_after_synthesis_without_the_gates_buffers(tmp_pat
             monkeypatch.delenv(soc_step.BUFFERS_ENV, raising=False)
         else:
             monkeypatch.setenv(soc_step.BUFFERS_ENV, value)
-        assert soc_step.layout(tmp_path, full) == ({"done": 1}, None)
+        assert soc_step.layout(tmp_path, full, "3.0.0.dev44") == ({"done": 1}, None)
         assert calls == [
             (full, {"resume_from": soc_step.AFTER_SYNTHESIS, "timeout_s": soc_step.TIMEOUT_S})
         ]
+        calls.clear()
+        soc_step.layout(tmp_path, full, "3.0.14")
+        assert calls[0][1]["late_antenna_repair"] is True
 
 
 def test_a_trial_run_names_its_buffers(monkeypatch):
@@ -847,7 +851,7 @@ def test_the_layout_stops_after_the_clock_tree_to_buffer_the_gates(tmp_path, mon
 
     monkeypatch.setattr(pnr, "run_librelane", fake)
     macro = {"target": "u_accel.abuf_s0_m0/A_CLK", "buffer": "sg13g2_buf_4", "placement": [1, 2]}
-    metrics, _ = soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [macro]})
+    metrics, _ = soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [macro]}, "3.0.0.dev44")
     assert metrics == {"done": 1}
     assert calls[0][1] == {
         "resume_from": soc_step.AFTER_SYNTHESIS,
