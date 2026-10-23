@@ -132,9 +132,8 @@ class Peripherals:
     pdm2pcm: bool = False
     spi_slave: bool = True  # the debug module's SPI slave, which reads and writes memory
     dma_channels: int = 2
-    dma_ports: int = (
-        1  # the DMA's master ports on the bus, each a read, a write and an address port
-    )
+    # The DMA's master ports on the bus, each a read, a write and an address port.
+    dma_ports: int = 1
 
     @property
     def plic(self) -> bool:
