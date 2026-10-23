@@ -45,7 +45,7 @@ For each case, `simulate_job` in `chipleap.model.accel` predicts the cycle count
 
 The closed form the explorer uses (`job_timing`) is within 0.1 % on average of `simulate_job` over random jobs; jobs of up to 256 tiles use `simulate_job` directly. Together this ties the explorer's numbers to the RTL.
 
-Verilator models are cached by parameter hash in `~/.cache/chipleap` (`CHIPLEAP_CACHE` moves it), so re-running costs seconds.
+Verilator models are cached by a hash of their sources, parameters and the Verilator that built them (its path and version) in `~/.cache/chipleap` (`CHIPLEAP_CACHE` moves it), so re-running costs seconds and another Verilator builds its own.
 
 ### The accelerator on its own clock
 
