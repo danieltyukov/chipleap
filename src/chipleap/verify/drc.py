@@ -56,6 +56,18 @@ class DrcResult:
     def markers(self) -> int:
         return sum(self.pin_markers.values())
 
+    def add(self, other: DrcResult) -> None:
+        """Count ``other``'s report with this one's, as if read into it."""
+        for rule, n in other.violations.items():
+            self.violations[rule] = self.violations.get(rule, 0) + n
+        for key, n in other.pin_markers.items():
+            self.pin_markers[key] = self.pin_markers.get(key, 0) + n
+        self.held_by.update(other.held_by)
+        for rule, places in other.places.items():
+            kept = self.places.setdefault(rule, [])
+            kept.extend(places[: max(0, PLACES_KEPT - len(kept))])
+        self.reports += other.reports
+
     def markers_data(self) -> list[dict[str, Any]]:
         """The set-apart pin markers for a report: rule, cell, the PDK macros that hold
         the cell, and count."""
