@@ -22,7 +22,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -34,11 +34,13 @@ from chipleap.gen.rtl import accel_sv, cdc_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
-from chipleap.verify import antenna, launch, librelane_pdk, minarea
+from chipleap.verify import antenna, launch, librelane_pdk, maximal, minarea
 from chipleap.verify.drc import (
+    PIN_OFFGRID_RE,
     DrcReportError,
     DrcResult,
     describe_markers,
+    macro_layout,
     pdk_cells,
     read_lyrdb,
 )
@@ -88,6 +90,9 @@ class PnrResult:
     # (``ihp_antenna_skipped``); neither when the flow does not run it.
     ihp_antenna: DrcResult | None = None
     ihp_antenna_skipped: str = ""
+    # IHP's DRC deck's violations by rule, counted in drc_errors, when ChipLeap ran the deck
+    # itself (``with_ihp_drc``, the soc step); None when LibreLane's KLayout DRC was the check.
+    ihp_drc: dict[str, int] | None = None
     # With two clocks: each clock's period, and the worst slack of each path group (each
     # clock, and "path delay" for the crossings) at each corner, for setup and for hold
     # (``group_slacks``).
@@ -120,10 +125,14 @@ class PnrResult:
         slew and capacitance violations, the drivers over their fanout limit (reported
         only), and the pin markers set apart."""
         ihp = self.ihp_antenna
+        decks = [d for d, ran in (("DRC", self.ihp_drc is not None), ("antenna", ihp)) if ran]
+        included = f"IHP's {' and '.join(decks)} deck{'s' if len(decks) > 1 else ''} included"
+        if self.ihp_drc is not None:
+            included += " (density and recommended rules not checked)"
         if self.checks_clean:
             text = "DRC, LVS and antenna clean"
-            if ihp is not None:
-                text += ", IHP's antenna deck included"
+            if decks:
+                text += f", {included}"
             text += ", no slew or capacitance violations"
         else:
             text = (
@@ -131,6 +140,8 @@ class PnrResult:
                 f"antenna violations, {self.max_slew_violations} slew and "
                 f"{self.max_cap_violations} capacitance violations"
             )
+            if self.ihp_drc is not None:
+                text += f" ({included})"
         if ihp is not None and ihp.total:
             n = ihp.total
             text += (
@@ -144,6 +155,20 @@ class PnrResult:
         if self.pin_markers:
             text += f"; {describe_markers(self.pin_markers)}"
         return text
+
+    def ihp_drc_data(self) -> dict[str, Any]:
+        """IHP's DRC deck for a step's result, as the chip step reports its own run of it;
+        empty when LibreLane's KLayout DRC was the check."""
+        if self.ihp_drc is None:
+            return {}
+        return {
+            "ihp_drc": {
+                "violations": sum(self.ihp_drc.values()),
+                "rules": self.ihp_drc,
+                "density": "not checked",
+                "recommended_rules": "not checked",
+            }
+        }
 
     def ihp_antenna_data(self) -> dict[str, Any]:
         """IHP's antenna deck for a step's result (``chipleap.verify.antenna.summary``), or
@@ -397,6 +422,185 @@ def with_ihp_antenna(
         return replace(r, ihp_antenna=antenna.check(pdk, r.gds, top, out, limit))
     except antenna.AntennaError as exc:
         raise PnrError(str(exc)) from None
+
+
+DRC_DIR = "drc"  # beside the run: IHP's DRC deck's reports and logs, when ChipLeap runs it
+DRC_MAIN = "drc"  # run_drc.py's output, among the runs of ``ihp_drc``
+MAXIMAL_PARTS = 8  # at most, so many layouts in memory at once stay a few tens of GB
+
+
+def drc_plan(threads: int) -> tuple[int, int, int]:
+    """How ``ihp_drc`` shares ``threads``: the extra-rules deck's parts (0: run whole by
+    run_drc.py), the main tables run_drc.py runs at once, and each KLayout's threads.
+    KLayout in deep mode keeps about one CPU busy whatever its threads (16 threads ran the
+    SoC's deck at 2.6 CPUs on average), so there is about one process per thread."""
+    parts = min(MAXIMAL_PARTS, threads // 2) if threads >= 4 else 0
+    return parts, max(1, min(8, threads - parts)), max(1, min(4, threads // 4))
+
+
+def ihp_drc(
+    pdk: Path, gds: Path, top: str, out: Path, held: Mapping[str, tuple[str, ...]]
+) -> DrcResult:
+    """IHP's DRC deck (IHP-Open-PDK's ``run_drc.py``) on ``gds``, with density off, as
+    LibreLane checks a block, and recommended rules off, as the chip step and LibreLane
+    3.0.14 check (IHP's recommended rules are guidelines, not tapeout rules): the main
+    deck's tables run_drc.py runs several at once, and beside them the extra-rules deck in
+    parts that run at once too (``chipleap.verify.maximal``; whole, by run_drc.py, when it
+    cannot be split or there are too few threads). ``held`` names the cells of the PDK's
+    own macros, whose off-grid pin markers are set apart. A run that did not finish, or
+    whose exit code or counts disagree with its report, is an error."""
+    from chipleap.chip.run import ToolError, ihp_runs, klayout
+
+    parts, workers, threads = drc_plan(klayout_threads())
+    tech = pdk / "libs.tech" / "klayout" / "tech" / "drc"
+    deck = tech / "rule_decks" / maximal.DECK
+    split = maximal.split(deck.read_text(), parts) if parts and deck.is_file() else None
+    tool = klayout()
+    if split and tool.path is None:
+        raise PnrError(f"IHP's DRC: {tool.missing('KLayout')}")
+    names = [f"maximal_{k}" for k in range(1, len(split or ()) + 1)]
+
+    def main(d: Path, python: str) -> list[str]:
+        return [
+            python,
+            str(tech / "run_drc.py"),
+            f"--path={d.parent / 'layout.gds'}",
+            f"--topcell={top}",
+            f"--run_dir={d}",
+            f"--mp={workers}",
+            f"--density_thr={threads}",
+            "--run_mode=deep",
+            "--no_density",
+            "--no_recommended",
+            *(["--disable_extra_rules"] if split else []),
+        ]
+
+    def part(name: str) -> Callable[[Path, str], list[str]]:
+        def build(d: Path, python: str) -> list[str]:
+            switches = {
+                "input": d.parent / "layout.gds",
+                "topcell": top,
+                "report": d / f"layout_{top}_{name}.lyrdb",
+                "log": d / f"layout_{top}_{name}.log",
+                "threads": threads,
+                "run_mode": "deep",
+                "no_recommended": "true",
+            }
+            rd = [a for k, v in switches.items() for a in ("-rd", f"{k}={v}")]
+            return [str(tool.path), "-b", "-r", str(d.parent / f"{name}.drc"), *rd]
+
+        return build
+
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    try:
+        runs = ihp_runs(
+            pdk,
+            out,
+            {"layout.gds": gds},
+            {f"{n}.drc": text for n, text in zip(names, split or (), strict=True)},
+            {DRC_MAIN: main, **{n: part(n) for n in names}},
+            limit,
+        )
+    except ToolError as exc:
+        raise PnrError(f"IHP's DRC: {exc}") from None
+    code, log = runs[DRC_MAIN]
+    report = out / f"layout_{top}_full.lyrdb"
+    if code not in (0, 1) or not report.is_file():
+        last = next((ln for ln in reversed(log.splitlines()) if ln.strip()), "")
+        raise PnrError(f"IHP's DRC did not finish (exit {code}): {last}")
+    result = _drc_report(report, held)
+    if (code == 1) != (result.total + result.markers > 0):
+        raise PnrError(f"IHP's DRC exited {code} with {result.total} violations in its report")
+    whole = deck.read_text() if split else ""
+    for name, text in zip(names, split or (), strict=True):
+        rules = maximal.checked(whole, text)
+        result.add(_maximal_part(out, top, name, rules, runs[name], held))
+    if not any(PIN_OFFGRID_RE.fullmatch(rule) for rule in result.violations):
+        return result
+    # Off-grid pin markers not in a cell of the PDK's macros as the PDK names them: find
+    # the macros' cells and outlines in the GDS itself (``chipleap.verify.drc``).
+    macros = {m for ms in held.values() for m in ms}
+    sizes = {s.cell: (s.width_um, s.height_um) for s in sram.catalog(pdk) if s.cell in macros}
+    try:
+        found = macro_layout(gds.read_bytes(), top, sizes)
+    except (layer.MacroImportError, OSError) as exc:
+        raise PnrError(f"IHP's DRC: the GDS's macros: {exc}") from None
+    every = {**held, **found.cells}
+    again = DrcResult()
+    for f in [report, *(out / f"layout_{top}_{n}.lyrdb" for n in names)]:
+        try:
+            read_lyrdb(f, again, every, found.outlines, top)
+        except (DrcReportError, OSError) as exc:
+            raise PnrError(f"IHP's DRC report: {exc}") from None
+    return again
+
+
+def _drc_report(report: Path, held: Mapping[str, tuple[str, ...]]) -> DrcResult:
+    result = DrcResult()
+    try:
+        read_lyrdb(report, result, held)
+    except (DrcReportError, OSError) as exc:
+        raise PnrError(f"IHP's DRC report: {exc}") from None
+    return result
+
+
+def _maximal_part(
+    out: Path,
+    top: str,
+    name: str,
+    rules: list[str],
+    run: tuple[int, str],
+    held: Mapping[str, tuple[str, ...]],
+) -> DrcResult:
+    """The report of one part of the extra-rules deck, after checking it ran to its end:
+    KLayout exits 0, the part logs its last line, prints a count for each of ``rules`` (the
+    rules it runs; the deck's own ``output`` prints them) and reports something exactly
+    when one of its counts is not 0."""
+    code, tail = run
+    report, log = out / f"layout_{top}_{name}.lyrdb", out / f"layout_{top}_{name}.log"
+    done = log.is_file() and maximal.DONE in log.read_text(errors="replace")
+    if code != 0 or not report.is_file() or not done:
+        last = next((ln for ln in reversed(tail.splitlines()) if ln.strip()), "")
+        raise PnrError(f"IHP's extra rules, {name}, did not finish (exit {code}): {last}")
+    printed = (out / f"{name}.log").read_text(errors="replace")
+    counts = {m[1]: int(m[2]) for m in re.finditer(r"^Rule (\S+): (\d+) error", printed, re.M)}
+    missing = sorted(set(rules) - set(counts))
+    if missing:
+        raise PnrError(f"IHP's extra rules, {name}, did not run {', '.join(missing[:5])}")
+    result = _drc_report(report, held)
+    if (sum(counts.values()) > 0) != (result.total + result.markers > 0):
+        raise PnrError(
+            f"IHP's extra rules, {name}, counted {sum(counts.values())} violations and "
+            f"reported {result.total + result.markers}"
+        )
+    return result
+
+
+def with_ihp_drc(
+    r: PnrResult,
+    pdk: Path | None,
+    top: str,
+    work: Path,
+    held: Mapping[str, tuple[str, ...]],
+    name: str = DRC_DIR,
+) -> PnrResult:
+    """``r``, from a run with LibreLane's KLayout DRC off, with IHP's DRC deck run on its
+    GDS (``ihp_drc``, its reports in ``work/name``): its violations added to the DRC count
+    and the PDK macros' off-grid pin markers set apart. Signoff needs it, so a deck that
+    cannot run here is an error, not a skipped check."""
+    if r.gds is None:
+        raise PnrError("the run left no GDS for IHP's DRC")
+    why = antenna.unavailable(pdk)
+    if why or pdk is None:
+        raise PnrError(f"IHP's DRC cannot run: {why}")
+    out = builddir.work_dir(work, name, empty=True)
+    result = ihp_drc(pdk, r.gds, top, out, held)
+    return replace(
+        r,
+        drc_errors=r.drc_errors + result.total,
+        pin_markers=[*r.pin_markers, *result.markers_data()],
+        ihp_drc=dict(sorted(result.violations.items())),
+    )
 
 
 DETAILED_ROUTING = "OpenROAD.DetailedRouting"
