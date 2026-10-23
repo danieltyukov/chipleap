@@ -636,9 +636,9 @@ def evaluate(
     f = clock * 1e6
     if soc_limit and design.freq_mhz > soc_limit:
         warnings.append(
-            f"the SoC runs at {clock:.1f} MHz, not {design.freq_mhz:g}: X-HEEP reads its SRAM "
-            f"in one cycle, which closes timing at about {soc_limit:.1f} MHz on {tech.name} "
-            "after routing, at the slow corner"
+            f"the SoC runs at {clock:.1f} MHz, not {design.freq_mhz:g}: X-HEEP reads a bank and "
+            f"crosses its bus in one cycle, which closes timing at about {soc_limit:.1f} MHz "
+            f"on {tech.name} after routing, at the slow corner"
         )
     accel_limit = None
     # The accelerator's clock: its own (behind its crossings), or the design's, which the

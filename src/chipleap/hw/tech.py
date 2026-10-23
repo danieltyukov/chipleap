@@ -200,10 +200,12 @@ def accel_signoff_mhz(
 # 256 x 32 and 512 x 32 for 1 and 2 KiB).
 # The estimate after global routing is no basis: extraction after routing put 14 to 20 %
 # more capacitance on these wires, and at 50 MHz the slow corner went from +0.54 ns after
-# global routing to -3.63 ns after routing.
-SOC_EVIDENCE_MHZ = 40.0
-SOC_READ_PATH_NS = 14.25
-SOC_BUS_PATH_NS = 23.63
+# global routing to -3.63 ns after routing. The evidence layout met 36 MHz with +0.627 ns
+# at the slow corner; its slowest path, cve2 into another subsystem's registers, sets the
+# limit (scripts/fit_soc_clock.py), and its slowest bank read needs 25.87 ns.
+SOC_EVIDENCE_MHZ = 36.0
+SOC_READ_PATH_NS = 18.63
+SOC_BUS_PATH_NS = 27.15
 
 
 def soc_signoff_mhz(bank_cells: Iterable[str]) -> float:
