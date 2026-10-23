@@ -123,11 +123,20 @@ def test_a_macro_backed_engine_is_capped_by_its_macros_read():
     # Macro builds route slower than flop builds, and deep macros read slower still.
     assert flop > shallow >= mid > deep
     assert deep == pytest.approx(1000 / (read[2048] + ACCEL_BANK_PATH_NS))
-    # Routed at the slow corner: the GEMV 1 x 4, 1 x 8 and 1 x 8 with 1024-word macros took
-    # 9.31, 9.88 and 10.06 ns, and the model's period is never shorter.
-    for cols, depth, routed in ((4, 256, 9.31), (8, 256, 9.88), (8, 1024, 10.06)):
+    # Routed at the slow corner with LibreLane 3.0.14: the GEMV 1 x 4 and 1 x 8 with 256-word
+    # macros took 8.921 and 9.845 ns, the 1 x 8 with 1024 and 2048 words 11.224 and 13.024 ns
+    # (on the macros' read) and the 2 x 8 with 256 x 64 macros 10.63 ns, and the model's
+    # period is never shorter.
+    for rows, cols, depth, routed in (
+        (1, 4, 256, 8.921),
+        (1, 8, 256, 9.845),
+        (1, 8, 1024, 11.224),
+        (1, 8, 2048, 13.024),
+        (2, 8, 256, 10.63),
+    ):
         r = IHP_1P_READ_NS[f"RM_IHPSG13_1P_{depth}x{cols * 8}_c2_bm_bist"]
-        assert 1000 / accel_signoff_mhz("gemv", cols, 1, bank_read_ns=r) >= routed
+        period = 1000 / accel_signoff_mhz("gemv", cols, 1, rows, bank_read_ns=r)
+        assert period >= routed - 1e-9
     ihp = get_tech("ihp-sg13g2")
     assert ihp.clock_limit_mhz("gemv", 8, 1, bank_read_ns=read[2048]) == pytest.approx(deep)
     assert get_tech("generic-28nm").clock_limit_mhz("gemv", 8, 1, bank_read_ns=read[2048]) == 800
