@@ -97,18 +97,28 @@ Accelerator jobs cost the CPU 80 cycles each to program and to take the completi
 
 The CPU, its bus and the accelerator share X-HEEP's clock. On IHP SG13G2 the model runs them at the design's clock or at what X-HEEP's SoC meets after routing, whichever is lower, and reports that clock, the SoC's limit and the accelerator's own limit apart (`chipleap explore` and `chipleap evaluate`, and the datasheet).
 
-The SoC does in one cycle two things the accelerator alone never does, across a die of millimetres:
+The SoC does in one cycle what the accelerator alone never does, across a die of millimetres:
 
 - It reads a bank. The bank's macro puts the word out its read time after the clock edge (`chipleap.macro.sram.IHP_1P_READ_NS`, as for the accelerator's buffers: 7.25 ns for the 1024 x 32 at the slow corner), and the crossbar takes it to the CPU's load path or into the accelerator's buffer macro.
-- Its OBI bus grants a master in the cycle it asks. The CPU's request leaves its decoder and load-store unit, passes the crossbar's arbiter, and the grant it leaves another master, the accelerator's write port, ends in that master's store engine.
+- It crosses from one subsystem to another. In the routed SoC the slowest paths run from cve2's instruction register through its decoder, its ALU's adder and the bus into another subsystem's registers: the DMA's transfer pointers, or the accelerator's programming registers.
 
 So the model takes the SoC's period as the slower of the two (`chipleap.hw.tech.soc_signoff_mhz`):
 
     period = max(read time of the bank's macro + SOC_READ_PATH_NS, SOC_BUS_PATH_NS)
 
-Both terms are measured on the SmolLM2 SoC (CV32E20, the one-to-many bus, one 32 KiB bank of eight 1024 x 32 macros, the GEMV 1 x 8 accelerator) laid out with `chipleap verify --steps soc --soc-clock 40`, after detailed routing and extraction, at the slow corner (1.08 V, 125 C) with the 5 % derate the step's constraints apply: SOC_READ_PATH_NS is the period the slowest path from a bank needs, less the 1024 x 32's read time, and SOC_BUS_PATH_NS the period the slowest other path needs. The macro of each of the design's banks gives its read time (the 1024 x 32 for banks of 4 KiB and more, 512 x 32 for 2 KiB, 256 x 32 for 1 KiB), so smaller banks shorten the read but not the bus.
+Both terms are measured on the SmolLM2 SoC (CV32E20, the one-to-many bus, one 32 KiB bank of eight 1024 x 32 macros, the GEMV 1 x 8 accelerator) laid out with `chipleap verify --steps soc --soc-clock @@CLOCK@@` at @@COMMIT@@, after detailed routing and extraction, at the slow corner (1.08 V, 125 C) with the 5 % derate the step's constraints apply, by `scripts/fit_soc_clock.py`: SOC_READ_PATH_NS (@@READ@@ ns) is the period the slowest path from a bank needs, less the 1024 x 32's read time, and SOC_BUS_PATH_NS (@@BUS@@ ns) the period the slowest other path needs, leaving out the accelerator's own paths, which its limit covers. The SmolLM2 SoC's limit is then @@CAP@@ MHz. The macro of each of the design's banks gives its read time (the 1024 x 32 for banks of 4 KiB and more, 512 x 32 for 2 KiB, 256 x 32 for 1 KiB), so smaller banks shorten the read but not the rest.
 
-The first estimate of this limit, 17.64 ns (56.7 MHz), was the slowest bank read after the repair that follows global routing, in a layout at 90 MHz, without the derate. That is no basis for a clock. The repairs work against the global router's estimate of each wire, and on the SoC's long wires the extraction after detailed routing puts 14 to 20 % more capacitance on them: at 50 MHz an SRAM output net repaired to 0.0576 pF came out 0.0657 pF, a clock net's slew went from 0.607 to 0.728 ns, and the slow corner's worst setup slack went from +0.54 ns after global routing to -3.63 ns after routing, a period of 23.63 ns. The SoC's step now keeps margins for that (docs/verification.md), and the model's limit is what the routed layout needs.
+Most of a slow path is not logic. On the SmolLM2 SoC each of the worst carries 2.7 to 4.2 ns of hold repair's delay cells and 7.6 to 9.2 ns of the buffers that repair puts on long and loaded wires. X-HEEP gates its clock on IHP's one integrated clock gate, a weak cell, and OpenROAD's CTS does not balance the gated trees against the ungated flip-flops, so the gated ones get their clock 0.6 to 0.7 ns later at the slow corner. Hold repair pads the paths that are short against that skew and the 0.25 ns uncertainty, about 25,000 delay cells, and it may put them on any path whose estimated setup slack allows it, which on these long paths is 4 to 5 ns more than routing leaves. So the period a layout needs grows with the clock it is laid out at:
+
+| Layout clock | Setup slack at the slow corner | Period needed |
+|---|---|---|
+| 40 MHz | -1.030 ns | 26.03 ns (38.4 MHz) |
+| 36 MHz | -0.219 ns | 28.00 ns (35.7 MHz) |
+| @@CLOCK@@ MHz (the evidence) | @@SLACK@@ ns | @@NEEDED@@ ns |
+
+The 40 and 36 MHz layouts are from before three changes to the step: a buffer beside each accelerator macro's clock pin, a buffer after each of X-HEEP's clock gates, and repairs that keep 6 ns of estimated setup slack after the clock tree and 5 ns after global routing, where the accelerator's keep 0.8 and 1.6 ns ([verification.md](verification.md)). The limit is the clock a layout met, not a promise for a faster one.
+
+The first estimate of this limit, 17.64 ns (56.7 MHz), was the slowest bank read after the repair that follows global routing, in a layout at 90 MHz, without the derate. That is no basis for a clock. The repairs work against the global router's estimate of each wire, and on the SoC's long wires the extraction after detailed routing puts 14 to 20 % more capacitance on them: at 50 MHz an SRAM output net repaired to 0.0576 pF came out 0.0657 pF, a clock net's slew went from 0.607 to 0.728 ns, and the slow corner's worst setup slack went from +0.54 ns after global routing to -3.63 ns after routing, a period of 23.63 ns. The model's limit is what the routed layout needs.
 
 ## Placement and feasibility
 

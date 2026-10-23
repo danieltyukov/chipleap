@@ -21,6 +21,8 @@ LibreLane on IHP SG13G2.
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import re
 import shutil
@@ -418,6 +420,32 @@ PINS = "pins.cfg"
 AFTER_SYNTHESIS = "Checker.YosysUnmappedCells"
 
 
+# The estimated setup slack the repairs keep after CTS and after global routing (``config``).
+SETUP_MARGINS_NS = (6.0, 5.0)
+# The hold slack the repair after global routing keeps, in ns. The worst hold endpoints
+# after routing are DMA0's registers, whose clock gate hangs on the clock tree's long
+# first-level net with the accelerator's macros, and routing moves them by more than the
+# margin: from one 36 MHz placement they came out at -0.047 ns with a 0.1 ns margin and
+# -0.060 ns with 0.2 ns. CHIPLEAP_SOC_HOLD_MARGIN sets another margin for a trial run.
+HOLD_MARGIN_NS = 0.2
+HOLD_MARGIN_ENV = "CHIPLEAP_SOC_HOLD_MARGIN"
+
+
+def hold_margin_ns() -> float:
+    """The hold margin after global routing: ``HOLD_MARGIN_ENV`` when set, a number of ns
+    from 0 to 1, else ``HOLD_MARGIN_NS``."""
+    raw = os.environ.get(HOLD_MARGIN_ENV, "").strip()
+    if not raw:
+        return HOLD_MARGIN_NS
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not 0.0 <= value <= 1.0:
+        raise SocError(f"{HOLD_MARGIN_ENV} must be a number of ns from 0 to 1, not {raw[:20]!r}")
+    return value
+
+
 # The step LibreLane runs the clock tree in, and the one inserted after it.
 CTS = "OpenROAD.CTS"
 ECO_BUFFERS = "Odb.InsertECOBuffers"
@@ -480,7 +508,14 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         "PDN_CFG": "dir::pdn.tcl",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
-        **pnr.signoff(),
+        # The repairs keep SETUP_MARGINS_NS of estimated setup slack, after CTS and after
+        # global routing, where the accelerator keeps 0.8 and 1.6 ns. Hold repair puts its
+        # delay cells wherever the estimate shows setup slack, and on the SoC's long paths
+        # the estimate after global routing shows 4 to 5 ns more than routing leaves (36 MHz:
+        # +4.56 ns there, -0.22 ns after routing). From one 36 MHz placement, routed:
+        # 0.8 and 1.6 ns left +0.259 ns of setup and -0.060 ns of hold, 6 and 5 ns +0.349
+        # and +0.047 ns.
+        **pnr.signoff(*SETUP_MARGINS_NS),
         # The SoC's wires are millimetres long, and the extraction after detailed routing
         # puts 14 to 20 % more capacitance on them than the global router's estimate that
         # the repairs work against: at 50 MHz a 0.0576 pF net (LibreLane's 10 % margin
@@ -488,12 +523,8 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # routing keeps that much margin on slew and capacitance.
         "GRT_DESIGN_REPAIR_MAX_CAP_PCT": 25,
         "GRT_DESIGN_REPAIR_MAX_SLEW_PCT": 25,
-        # Hold is repaired after global routing to the 0.1 ns the repair after CTS keeps
-        # (LibreLane's default). Hold repair puts delay cells wherever the estimate shows
-        # setup slack, which on the SoC's long paths is 4 to 5 ns more than routing leaves:
-        # at 0.2 ns it inserted about 10,900 more delay cells in the 36 MHz SoC, some on its
-        # slowest paths, for 0.8 ns less setup slack in the estimate.
-        "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.1,
+        # Hold after global routing (``hold_margin_ns``).
+        "GRT_RESIZER_HOLD_SLACK_MARGIN": hold_margin_ns(),
         # The clock tree hangs the accelerator's macros, at the top and bottom of the core,
         # and X-HEEP's clock gates on one net of its first level, millimetres of wire. IHP's
         # strongest buffer drives the tree's long nets, which alone left the macros' clock
@@ -524,6 +555,47 @@ def _pin_at(p: place.Placed, view: MacroView, pin: str) -> tuple[float, float] |
     return p.x + x, p.y + y
 
 
+# IHP's integrated clock gate, which X-HEEP's clock gates are (``chipleap.gen.soc``), and
+# the buffer after each.
+CLOCK_GATE = "sg13g2_slgcp_1"
+GATE_BUFFER = "sg13g2_buf_16"
+_DEF_UNITS_RE = re.compile(r"^UNITS DISTANCE MICRONS (\d+) ;", re.M)
+_DEF_GATE_RE = re.compile(
+    rf"^\s*-\s+(\S+)\s+{CLOCK_GATE}\s.*?\+\s+(?:PLACED|FIXED)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)",
+    re.M,
+)
+
+
+def clock_gates(def_text: str) -> list[tuple[str, float, float]]:
+    """Each clock gate (``CLOCK_GATE``) of a placed DEF, by its instance name as written in
+    the netlist (DEF's escapes removed), with its place in um."""
+    units = _DEF_UNITS_RE.search(def_text)
+    if units is None or int(units.group(1)) <= 0:
+        raise SocError("the DEF after the clock tree gives no database units")
+    dbu = int(units.group(1))
+    return [
+        (re.sub(r"\\(.)", r"\1", name), int(x) / dbu, int(y) / dbu)
+        for name, x, y in _DEF_GATE_RE.findall(def_text)
+    ]
+
+
+def gate_buffers(gates: Iterable[tuple[str, float, float]]) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS`` for a buffer after each clock gate's output,
+    placed where the gate is (the legaliser moves it beside it).
+
+    The integrated clock gate is IHP's one, a weak cell, and drives the root of its tree
+    over the wire to where CTS put that root (0.4 to 0.8 mm on the SmolLM2 SoC): the gated
+    trees reach their flip-flops 0.6 to 0.7 ns after the ungated ones at the slow corner,
+    and DMA0's registers were the worst hold endpoints in every layout. From one 36 MHz
+    placement, routed, a buffer after each gate took setup from +0.259 to +0.490 ns at the
+    slow corner and hold from -0.060 to +0.144 ns at the fast one. Placement decides where
+    the gates are, so the layout stops after the clock tree to read them (``layout``)."""
+    return [
+        {"target": f"{name}/GCLK", "buffer": GATE_BUFFER, "placement": [round(x, 3), round(y, 3)]}
+        for name, x, y in gates
+    ]
+
+
 def clock_pin_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> list[dict[str, Any]]:
     """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer before the clock pin of each of the
     accelerator's macros (``views`` by instance), placed just off the macro's edge where
@@ -547,16 +619,59 @@ def clock_pin_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> li
         at = _pin_at(p, view, SRAM_CLOCK_PIN)
         if at is None:
             raise SocError(f"{view.cell} has no {SRAM_CLOCK_PIN} pin")
-        x, y = at
-        off = place.HALO_UM + CLOCK_PIN_GAP_UM
-        y = p.y - off if y - p.y < view.height / 2 else p.y + view.height + off
-        out.append(
-            {
-                "target": f"{p.instance}/{SRAM_CLOCK_PIN}",
-                "buffer": CLOCK_PIN_BUFFER,
-                "placement": [round(x, 3), round(y, 3)],
-            }
-        )
+        out.append(_beside(p, view, SRAM_CLOCK_PIN, at, CLOCK_PIN_BUFFER))
+    return out
+
+
+def _beside(
+    p: place.Placed, view: MacroView, pin: str, at: tuple[float, float], buffer: str
+) -> dict[str, Any]:
+    """An ``INSERT_ECO_BUFFERS`` entry for ``buffer`` at ``pin`` of the placed macro ``p``
+    (the pin at ``at``), just past the halo off the macro's edge where the pin is."""
+    x, y = at
+    off = place.HALO_UM + CLOCK_PIN_GAP_UM
+    y = p.y - off if y - p.y < view.height / 2 else p.y + view.height + off
+    return {
+        "target": f"{p.instance}/{pin}",
+        "buffer": buffer,
+        "placement": [round(x, 3), round(y, 3)],
+    }
+
+
+# What drives a bank's output wire from beside the macro (0.6 pF limit, about ten times
+# the most a routed bank output carried).
+BANK_OUTPUT_BUFFER = "sg13g2_buf_2"
+BANK_OUTPUT_PIN = "A_DOUT["
+
+
+def bank_output_buffers(
+    fp: place.Floorplan, views: Mapping[str, MacroView]
+) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer after each output bit of X-HEEP's bank
+    macros (``views`` by instance), placed just off the macro's edge beside the pin.
+
+    A bank's 32 output bits run side by side on Metal3 for about 230 um, and the global
+    router's estimate, which the repairs work against, has the layers' capacitance from
+    the LEF without the coupling between neighbours: on the SmolLM2 SoC routed at 36 MHz,
+    the 256 bank outputs carried a median 1.19 times and at most 2.39 times their
+    estimate, over the same length of wire (bank_m6's A_DOUT[4]: 0.0288 pF estimated,
+    0.0687 pF routed, against the macro's 0.064 pF). A design-wide limit would buffer
+    every heavy net of X-HEEP, and OpenSTA does not apply a limit set on the macros' pins
+    to them. With a buffer beside the pin, the macro drives a few um and the buffer the
+    wire."""
+    out: list[dict[str, Any]] = []
+    for p in fp.macros:
+        if not p.instance.startswith(f"{soc.MCU_INST}."):
+            continue
+        view = views[p.instance]
+        for mp in view.pins:
+            if not mp.name.startswith(BANK_OUTPUT_PIN):
+                continue
+            at = _pin_at(p, view, mp.name)
+            if at is not None:
+                out.append(_beside(p, view, mp.name, at, BANK_OUTPUT_BUFFER))
+    if any(p.instance.startswith(f"{soc.MCU_INST}.") for p in fp.macros) and not out:
+        raise SocError(f"X-HEEP's bank macros have no {BANK_OUTPUT_PIN}...] pins")
     return out
 
 
@@ -564,10 +679,12 @@ def with_floorplan(
     cfg: dict[str, Any], prep: Prepared, cell_um2: float, work: Path
 ) -> tuple[dict[str, Any], place.Floorplan]:
     """``cfg`` with a floorplan for ``cell_um2`` of standard cells: the die, the macros
-    where ChipLeap puts them, their power grid (``pdn.tcl``) and the buffers at the
-    accelerator's macros' clock pins (``clock_pin_buffers``)."""
+    where ChipLeap puts them, their power grid (``pdn.tcl``) and the buffers beside the
+    accelerator's macros' clock pins and X-HEEP's banks' outputs (``clock_pin_buffers``,
+    ``bank_output_buffers``)."""
     fp = floorplan(prep.instances, prep.views, cell_um2)
     by_inst = dict(prep.instances)
+    by_instance = {i: prep.views[c].view for i, c in prep.instances}
     placements = [
         grid.Placement(p.instance, prep.views[by_inst[p.instance]].view, p.x, p.y, p.orient)
         for p in fp.macros
@@ -584,9 +701,10 @@ def with_floorplan(
         "DIE_AREA": [0, 0, *fp.die],
         "CORE_AREA": list(fp.core),
         "MACROS": macros,
-        "INSERT_ECO_BUFFERS": clock_pin_buffers(
-            fp, {i: prep.views[c].view for i, c in prep.instances}
-        ),
+        "INSERT_ECO_BUFFERS": [
+            *clock_pin_buffers(fp, by_instance),
+            *bank_output_buffers(fp, by_instance),
+        ],
     }
     netlists = sorted((work / "runs" / "chipleap").glob("*-yosys-synthesis/*.nl.v"))
     if netlists:
@@ -693,10 +811,31 @@ def place_and_route(
     if synth <= 0:
         raise SocError("LibreLane's synthesis reported no standard-cell area")
     full, _ = with_floorplan(cfg, prep, synth, work)
+    metrics, gds = layout(work, full)
+    return routed(design, work, pdk, clock, prep.instances, synth, metrics, gds)
+
+
+def layout(work: Path, full: dict[str, Any]) -> tuple[dict[str, Any], Path | None]:
+    """The layout, resumed after synthesis, in two parts: up to the clock tree, then the
+    rest from the buffers inserted after it (``ECO_BUFFERS``), with a buffer after each
+    clock gate where placement put the gate (``gate_buffers``) besides those beside the
+    accelerator's macros. The final metrics and GDS."""
     # Without the second antenna repair (``late_antenna_repair``): the SoC's evidence was
     # routed without it, and it is turned on once a SoC run with it has been checked.
-    metrics, gds = pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S)
-    return routed(design, work, pdk, clock, prep.instances, synth, metrics, gds)
+    pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, to=CTS, timeout_s=TIMEOUT_S)
+    run = work / "runs" / "chipleap"
+    state = pnr.step_state(run, CTS)
+    if state is None:
+        raise SocError("LibreLane left no state after the clock tree")
+    try:
+        def_path = Path(json.loads(state.read_text()).get("def") or "")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise SocError(f"LibreLane's state after the clock tree: {exc}") from None
+    if not def_path.is_file() or not def_path.resolve().is_relative_to(run.resolve()):
+        raise SocError("LibreLane's state after the clock tree names no DEF in its run")
+    gates = clock_gates(def_path.read_text(errors="replace"))
+    full = {**full, "INSERT_ECO_BUFFERS": [*full["INSERT_ECO_BUFFERS"], *gate_buffers(gates)]}
+    return pnr.run_librelane(work, full, resume_from=ECO_BUFFERS, timeout_s=TIMEOUT_S)
 
 
 def routed(
