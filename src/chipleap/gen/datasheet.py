@@ -109,6 +109,12 @@ def _clock(d: Design) -> str:
     from chipleap.model.evaluate import soc_limit_mhz
 
     limit = soc_limit_mhz(d, get_tech(d.tech))
+    if d.accel_mhz:
+        soc = f"{min(d.freq_mhz, limit) if limit else d.freq_mhz:.1f}"
+        return (
+            f"{d.accel_mhz:g} MHz on accel_clk_i, the accelerator's own; X-HEEP's side of its "
+            f"crossings on clk_i at {soc} MHz"
+        )
     if limit is None or limit >= d.freq_mhz:
         return f"{d.freq_mhz:g} MHz"
     return (
