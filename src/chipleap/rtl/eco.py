@@ -64,6 +64,7 @@ from chipleap.verify.pnr import (
     begin_second_part,
     for_librelane,
     klayout_drc,
+    klayout_gds,
     klayout_report,
     parse,
     parse_run,
@@ -698,14 +699,28 @@ def apply_eco(project: Project, changes: list[EcoChange]) -> EcoResult:
         raise EcoError(f"macros: {exc}") from None
     sealed_metrics = _read(sealed, run / "final" / "metrics.json")
     report = klayout_report(run)
+    # The GDS the sealed run's KLayout DRC read, for the PDK's macros under other names;
+    # one the record does not hold unchanged is not read, and the PDK's names alone count.
+    checked = klayout_gds(report) if report else None
+    if checked is not None:
+        try:
+            checked = sealed.check(checked)
+        except SealError:
+            checked = None
     try:
         before = parse(
             sealed_metrics,
             mhz,
             None,
-            klayout_drc(sealed_metrics, report and _check(sealed, report, "DRC report"), held),
+            klayout_drc(
+                sealed_metrics,
+                report and _check(sealed, report, "DRC report"),
+                held,
+                checked,
+                io.pdk_dir(),
+            ),
         )
-        after = parse_run(metrics, mhz, gds, run_dir_of(work), held)
+        after = parse_run(metrics, mhz, gds, run_dir_of(work), held, io.pdk_dir())
         after = with_ihp_antenna(after, io.pdk_dir(), project.top, edit_dir)
     except PnrError as exc:
         raise EcoError(str(exc)) from None

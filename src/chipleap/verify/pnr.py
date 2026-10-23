@@ -340,12 +340,29 @@ def klayout_report(run: Path) -> Path | None:
     return report if report is not None and report.is_file() else None
 
 
+def klayout_gds(report: Path) -> Path | None:
+    """The GDS a run's KLayout DRC (whose report is ``report``) read: its step's
+    ``state_in.json`` names it; None when that does not."""
+    try:
+        state = json.loads((report.parent.parent / "state_in.json").read_text())
+    except (OSError, ValueError):
+        return None
+    gds = state.get("gds") if isinstance(state, dict) else None
+    return Path(gds) if isinstance(gds, str) and gds else None
+
+
 def klayout_drc(
-    metrics: dict[str, Any], report: Path | None, held: Mapping[str, tuple[str, ...]]
+    metrics: dict[str, Any],
+    report: Path | None,
+    held: Mapping[str, tuple[str, ...]],
+    gds: Path | None = None,
+    pdk: Path | None = None,
 ) -> DrcResult | None:
     """A run's KLayout DRC report read as the chip step reads IHP's (``chipleap.verify.drc``),
-    ``held`` naming the cells of the PDK's own macros; None when the run counted no KLayout
-    violation. The report must hold what LibreLane counted."""
+    ``held`` naming the cells of the PDK's own macros, and with ``gds`` (the GDS the run
+    checked) and ``pdk`` the macros found in the layout too when their names there are not
+    the PDK's (``_by_layout``); None when the run counted no KLayout violation. The report
+    must hold what LibreLane counted."""
     counted = int(_num(metrics, "klayout__drc_error__count"))
     if counted == 0:
         return None
@@ -361,7 +378,7 @@ def klayout_drc(
             f"LibreLane's KLayout DRC counted {counted} violations, its report holds "
             f"{result.total + result.markers}"
         )
-    return result
+    return _by_layout(result, [report], held, gds, pdk, "", "LibreLane's KLayout DRC")
 
 
 def parse_run(
@@ -370,9 +387,12 @@ def parse_run(
     gds: Path | None,
     run: Path,
     held: Mapping[str, tuple[str, ...]],
+    pdk: Path | None = None,
 ) -> PnrResult:
-    """``parse`` with the run's own KLayout DRC report (``klayout_drc``)."""
-    return parse(metrics, clock_mhz, gds, klayout_drc(metrics, klayout_report(run), held))
+    """``parse`` with the run's own KLayout DRC report (``klayout_drc``), the PDK's macros
+    found in ``gds`` with ``pdk`` when the report's names for their cells are not the PDK's."""
+    drc = klayout_drc(metrics, klayout_report(run), held, gds, pdk)
+    return parse(metrics, clock_mhz, gds, drc)
 
 
 ANTENNA_DIR = "antenna"  # beside the run: IHP's antenna deck's report and log
@@ -486,23 +506,40 @@ def ihp_drc(
     for name, text in zip(names, split or (), strict=True):
         rules = maximal.checked(whole, text)
         result.add(_maximal_part(out, top, name, rules, runs[name], held))
-    if not any(PIN_OFFGRID_RE.fullmatch(rule) for rule in result.violations):
-        return result
-    # Off-grid pin markers not in a cell of the PDK's macros as the PDK names them: find
-    # the macros' cells and outlines in the GDS itself (``chipleap.verify.drc``).
+    reports = [report, *(out / f"layout_{top}_{n}.lyrdb" for n in names)]
+    return _by_layout(result, reports, held, gds, pdk, top, "IHP's DRC")
+
+
+def _by_layout(
+    result: DrcResult,
+    reports: list[Path],
+    held: Mapping[str, tuple[str, ...]],
+    gds: Path | None,
+    pdk: Path | None,
+    top: str,
+    what: str,
+) -> DrcResult:
+    """``result`` (``reports`` read with ``held``), or, when off-grid pin markers counted
+    in it may be in the PDK's macros under other names, ``reports`` read again with the
+    macros as the GDS has them: their cells under the GDS's names and their outlines in
+    the top cell (``chipleap.verify.drc.macro_layout``; ``top`` empty for the GDS's own).
+    Without the GDS or the PDK, ``result`` as it is."""
+    pins = any(PIN_OFFGRID_RE.fullmatch(rule) for rule in result.violations)
     macros = {m for ms in held.values() for m in ms}
+    if not pins or not macros or gds is None or pdk is None:
+        return result
     sizes = {s.cell: (s.width_um, s.height_um) for s in sram.catalog(pdk) if s.cell in macros}
     try:
         found = macro_layout(gds.read_bytes(), top, sizes)
     except (layer.MacroImportError, OSError) as exc:
-        raise PnrError(f"IHP's DRC: the GDS's macros: {exc}") from None
+        raise PnrError(f"{what}: the GDS's macros: {exc}") from None
     every = {**held, **found.cells}
     again = DrcResult()
-    for f in [report, *(out / f"layout_{top}_{n}.lyrdb" for n in names)]:
+    for f in reports:
         try:
-            read_lyrdb(f, again, every, found.outlines, top)
+            read_lyrdb(f, again, every, found.outlines, found.top)
         except (DrcReportError, OSError) as exc:
-            raise PnrError(f"IHP's DRC report: {exc}") from None
+            raise PnrError(f"{what} report: {exc}") from None
     return again
 
 
@@ -1224,7 +1261,7 @@ def place_and_route(
         ((s.cell, layer.pdk_macro_cells(pdk, s.cell, sram.LIBRARY)) for s in plan.cells()),
         (top,),
     )
-    result = replace(parse_run(metrics, clock, gds, run, held), synth_cell_um2=synth_area(run))
+    result = replace(parse_run(metrics, clock, gds, run, held, pdk), synth_cell_um2=synth_area(run))
     result = with_ihp_antenna(timed(result), pdk, top, workdir)
     counts: dict[str, int] = {}
     for _, cell in plan.instances():
