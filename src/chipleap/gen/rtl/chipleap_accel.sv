@@ -1146,8 +1146,8 @@ module chipleap_accel_core #(
     logic [31:0] tbase;  // word address of activation row t while streaming
     // PE registers, row-major (r * C + c), packed: Verilator 5.020 (Ubuntu 24.04's) rejects a
     // nonblocking assignment to an unpacked array inside a loop it does not unroll
-    // (BLKLOOPINIT), which a large array's loops are. Their elements are unsigned; every use
-    // takes one as a signed operand or adds it at full width.
+    // (BLKLOOPINIT), which a large array's loops are. A packed element is unsigned: the sums
+    // take theirs as signed, so synthesis merges each add into its multiplier as before.
     logic [R*C-1:0][7:0] wq;
     logic [R*C-1:0][7:0] aq;
     logic [R*C-1:0][31:0] pq;
@@ -1227,9 +1227,13 @@ module chipleap_accel_core #(
           tstream <= TW'(cd.tm + 32'(R + C));
         end else if (running) begin
           if (loading) begin
-            for (int c = 0; c < int'(C); c++)
-              wq[int'(t[RI-1:0])*C+c] <= (32'(c) < cd.tn) ?
-                  w_at(32'(c), blk * R + 32'(t)) : 8'sd0;
+            // Row t's weights, decoded to each row's registers: a write at an index that
+            // varies would be a shifter across the whole packed array in synthesis.
+            for (int c = 0; c < int'(C); c++) begin
+              logic signed [7:0] wl;
+              wl = (32'(c) < cd.tn) ? w_at(32'(c), blk * R + 32'(t)) : 8'sd0;
+              for (int r = 0; r < int'(R); r++) if (int'(t[RI-1:0]) == r) wq[r*C+c] <= wl;
+            end
             if (32'(t) + 1 == 32'(R)) begin
               loading <= 1'b0;
               t <= '0;
@@ -1241,7 +1245,8 @@ module chipleap_accel_core #(
                 logic signed [7:0] ain;
                 ain = (c == 0) ? feed_q[r] : aq[r*C+c-1];
                 aq[r*C+c] <= ain;
-                pq[r*C+c] <= ((r == 0) ? 32'sd0 : pq[(r-1)*C+c]) + 32'(mul8(ain, wq[r*C+c]));
+                pq[r*C+c] <= ((r == 0) ? 32'sd0 : signed'(pq[(r-1)*C+c]))
+                    + 32'(mul8(ain, wq[r*C+c]));
               end
             for (int c = 0; c < int'(C); c++) begin
               logic [31:0] m;
@@ -1284,8 +1289,8 @@ module chipleap_accel_core #(
     logic [31:0] t, tend;
     // PE registers, row-major (r * C + c), packed: Verilator 5.020 (Ubuntu 24.04's) rejects a
     // nonblocking assignment to an unpacked array inside a loop it does not unroll
-    // (BLKLOOPINIT), which a large array's loops are. Their elements are unsigned; every use
-    // takes one as a signed operand or adds it at full width.
+    // (BLKLOOPINIT), which a large array's loops are. A packed element is unsigned: the sums
+    // take theirs as signed, so synthesis merges each add into its multiplier as before.
     logic [R*C-1:0][7:0] aq;
     logic [R*C-1:0][7:0] wq;
     logic [R*C-1:0][31:0] pacc;
@@ -1345,7 +1350,7 @@ module chipleap_accel_core #(
               win = (r == 0) ? wfeed_q[c] : wq[(r-1)*C+c];
               aq[r*C+c] <= ain;
               wq[r*C+c] <= win;
-              pacc[r*C+c] <= pacc[r*C+c] + 32'(mul8(ain, win));
+              pacc[r*C+c] <= signed'(pacc[r*C+c]) + 32'(mul8(ain, win));
             end
           if (t + 1 == tend) running <= 1'b0;
           t <= t + 1;
