@@ -531,6 +531,11 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # the detailed router resolves it, and DRC is the judge.
         "GRT_ALLOW_CONGESTION": True,
         "PDN_CFG": "dir::pdn.tcl",
+        # IHP's DRC deck runs after LibreLane, in parallel parts (``pnr.with_ihp_drc``),
+        # with its extra rules: LibreLane 3.0.14's KLayout DRC of the 36 MHz SoC, the main
+        # deck alone at 8 threads, took 2 h 0 min (3.0.0.dev44's 3 h 48 min), and ChipLeap's
+        # run of both decks at 16 threads 1 h 37 min.
+        "RUN_KLAYOUT_DRC": False,
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
         # The repairs keep SETUP_MARGINS_NS of estimated setup slack, after CTS and after
@@ -879,8 +884,9 @@ def routed(
 ) -> SocResult:
     """What the SoC LibreLane laid out in ``work`` measures, from its final metrics and
     GDS: its names merged once (``chipleap.rtl.pnr.check_merged``), the PDK
-    macros' own pin markers set apart, IHP's antenna deck on the GDS, as every layout
-    ChipLeap signs off gets it (``chipleap.verify.pnr.with_ihp_antenna``), and the
+    macros' own pin markers set apart, IHP's DRC deck in parallel parts
+    (``chipleap.verify.pnr.with_ihp_drc``) and its antenna deck on the GDS, as every
+    layout ChipLeap signs off gets it (``chipleap.verify.pnr.with_ihp_antenna``), and the
     measures against the model's."""
     from chipleap.rtl.pnr import check_merged
 
@@ -901,5 +907,6 @@ def routed(
         macros=placed,
         macro_um2=sum(area[cell] for _, cell in placed),
     )
+    result = pnr.with_ihp_drc(result, pdk, soc.TOP, work, held)
     result = pnr.with_ihp_antenna(result, pdk, soc.TOP, work)
     return SocResult(result, placed, *model_areas_um2(design))
