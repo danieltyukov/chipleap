@@ -21,13 +21,21 @@ from chipleap.hw.tech import (
     accel_bank_kge,
     accel_logic_kge,
     get_tech,
+    soc_signoff_mhz,
 )
 from chipleap.model.accel import Bandwidth, TilingError, job_timing
 from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workload
 
-# Logic outside the CPU, memories and accelerator: debug module, DMA, boot ROM, power
-# manager, timers, interrupt controllers, UART, SPI, I2C, GPIO, pad control.
-XHEEP_BASE_KGE = 110.0
+# X-HEEP's logic outside the CPU, its bus, the memories and the accelerator, as ChipLeap
+# configures it (chipleap.gen.xheep): the debug module with its SPI slave, the DMA, the
+# flash's SPI host and controller, boot ROM, power manager, timers, interrupt controllers,
+# GPIO, UART and pad control. Measured on the SmolLM2 SoC with Yosys and ABC against
+# IHP SG13G2's typical liberty, the hierarchy kept: 208.4 kGE of X-HEEP's 288.0, besides
+# the CPU (33.9), the accelerator (39.6) and the one-to-many bus (6.1). With X-HEEP's
+# default peripherals (two more SPI hosts, I2C, I2S, a DMA with two master ports) it was
+# 401.8 kGE.
+XHEEP_BASE_KGE = 208.4
+ONE_TO_M_BUS_KGE = 6.1
 # Area entries that make up the generated accelerator IP (see Evaluation.ip_area).
 IP_AREA_KEYS = ("accelerator logic", "accelerator buffers", "axi adapter")
 # Firmware code, data and stack kept in the first banks.
@@ -84,6 +92,15 @@ class Evaluation:
     warnings: list[str]
     bandwidth: dict[str, float]  # bytes per second of each data path
     severity: int = 0  # weighted violations, see Issues
+    # The clock the SoC runs at, the CPU, its bus and the accelerator alike: the design's,
+    # or less where X-HEEP's SoC cannot meet it (soc_limit_mhz). 0 means the design's.
+    clock_mhz: float = 0.0
+    soc_limit_mhz: float | None = None  # what X-HEEP's SoC meets, where it was measured
+    accel_limit_mhz: float | None = None  # what the accelerator meets on its own
+
+    @property
+    def soc_mhz(self) -> float:
+        return self.clock_mhz or self.design.freq_mhz
 
     @property
     def feasible(self) -> bool:
@@ -497,6 +514,23 @@ def _ihp_buffer_mm2(a: Accel) -> float:
     return total / 1e6
 
 
+def bank_mm2(kib: float, tech: Technology) -> float:
+    """One of X-HEEP's memory banks: on IHP SG13G2 the PDK's macros of 32-bit words with
+    a bit mask that hold it (X-HEEP writes bytes), as the SoC's layout builds it
+    (``chipleap.gen.soc``); other nodes use ``Technology.sram_mm2``."""
+    if tech.key == "ihp-sg13g2":
+        return _ihp_bank_mm2(kib)
+    return tech.sram_mm2(kib)
+
+
+@lru_cache(maxsize=256)
+def _ihp_bank_mm2(kib: float) -> float:
+    from chipleap.macro.sram import IHP_1P, choose
+
+    words = int(kib * 1024) // 4
+    return choose(IHP_1P, words, 32).area_um2 / 1e6 if words > 0 else 0.0
+
+
 def area_breakdown(
     d: Design, tech: Technology, cpu: CPUModel, mem: ExternalMemory | None
 ) -> dict[str, float]:
@@ -504,9 +538,9 @@ def area_breakdown(
     area["cpu"] = tech.logic_mm2(cpu.kge)
     masters = 4 + 2 + (d.accel.ports + 1 if d.accel else 0)
     slaves = d.banks + d.il_banks + 6
-    bus_kge = 8.0 if d.bus == "onetoM" else 0.6 * masters * slaves
+    bus_kge = ONE_TO_M_BUS_KGE if d.bus == "onetoM" else 0.6 * masters * slaves
     area["soc logic"] = tech.logic_mm2(XHEEP_BASE_KGE + bus_kge)
-    area["sram"] = d.banks * tech.sram_mm2(d.bank_kib) + d.il_banks * tech.sram_mm2(d.il_bank_kib)
+    area["sram"] = d.banks * bank_mm2(d.bank_kib, tech) + d.il_banks * bank_mm2(d.il_bank_kib, tech)
     if d.accel:
         a = d.accel
         area["accelerator logic"] = tech.logic_mm2(accel_kge(a, tech))
@@ -520,6 +554,18 @@ def area_breakdown(
     return area
 
 
+def soc_limit_mhz(design: Design, tech: Technology) -> float | None:
+    """The clock X-HEEP's SoC meets after routing at the slow corner, on a node where it was
+    measured (``chipleap.hw.tech.soc_signoff_mhz``, from the macros of the design's banks);
+    None on the standalone platform and other nodes."""
+    if design.platform != "xheep" or not tech.soc_timing:
+        return None
+    from chipleap.macro.sram import IHP_1P, choose
+
+    kibs = [design.bank_kib] + ([design.il_bank_kib] if design.il_banks else [])
+    return soc_signoff_mhz(choose(IHP_1P, int(k * 1024) // 4, 32).macro.cell for k in kibs)
+
+
 def evaluate(
     workload: Workload, design: Design, *, firmware_kib: float = DEFAULT_FIRMWARE_KIB
 ) -> Evaluation:
@@ -527,9 +573,20 @@ def evaluate(
     tech = get_tech(design.tech)
     cpu = get_cpu(design.cpu)
     mem = get_memory(design.ext_mem)
-    f = design.freq_mhz * 1e6
     violations = Issues()
     warnings: list[str] = []
+    # The CPU, its bus and the accelerator share X-HEEP's clock: the design's, unless the
+    # SoC cannot meet it.
+    soc_limit = soc_limit_mhz(design, tech)
+    clock = min(design.freq_mhz, soc_limit) if soc_limit else design.freq_mhz
+    f = clock * 1e6
+    if soc_limit and design.freq_mhz > soc_limit:
+        warnings.append(
+            f"the SoC runs at {clock:.1f} MHz, not {design.freq_mhz:g}: X-HEEP reads a bank and "
+            f"crosses its bus in one cycle, which closes timing at about {soc_limit:.1f} MHz "
+            f"on {tech.name} after routing, at the slow corner"
+        )
+    accel_limit = None
 
     if design.freq_mhz > tech.max_freq_mhz:
         violations.add(
@@ -539,7 +596,7 @@ def evaluate(
     elif design.accel and tech.accel_timing:
         a = design.accel
         read = bank_read_ns(a, tech)
-        limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows, read)
+        limit = accel_limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows, read)
         if design.freq_mhz > limit + 1e-9:
             buffers = f" and its buffers in SRAM macros that read in {read:.1f} ns" if read else ""
             violations.add(
@@ -661,4 +718,7 @@ def evaluate(
         severity=violations.severity,
         warnings=warnings,
         bandwidth=bandwidth,
+        clock_mhz=clock,
+        soc_limit_mhz=soc_limit,
+        accel_limit_mhz=accel_limit,
     )

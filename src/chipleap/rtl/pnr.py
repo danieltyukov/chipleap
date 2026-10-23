@@ -102,7 +102,16 @@ def sdc(project: Project) -> str:
             "set clock_inputs {}",
             "set data_inputs [all_inputs]",
         ]
-    lines += [
+    lines += io_lines(ref, period)
+    return "\n".join(lines) + "\n"
+
+
+def io_lines(ref: str, period: float) -> list[str]:
+    """The rest of LibreLane's base SDC, after the clocks: inputs and outputs timed against
+    clock ``ref`` of ``period`` ns, the PDK's driving cells (the clock's on
+    ``$clock_inputs``, the rest on ``$data_inputs``), load, uncertainty, transition and
+    derating, and ideal or propagated clocks."""
+    return [
         f"set io_delay [expr {period:g} * $::env(IO_DELAY_CONSTRAINT) / 100]",
         f"set_input_delay $io_delay -clock [get_clocks {ref}] $data_inputs",
         f"set_output_delay $io_delay -clock [get_clocks {ref}] [all_outputs]",
@@ -140,7 +149,6 @@ def sdc(project: Project) -> str:
         "    set_propagated_clock [all_clocks]",
         "}",
     ]
-    return "\n".join(lines) + "\n"
 
 
 def _copy_into(project: Project, path: Path, src: Path) -> str:
@@ -233,14 +241,15 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
     around them and their power, written into ``workdir``. An SRAM gets the macro grid
     over it; a package whose supply pins reach an edge gets them strapped to the rails,
     as in a chip (``chipleap.chip.pdn``)."""
-    from chipleap.chip import pdn
+    from chipleap.chip import merge, pdn
     from chipleap.chip.floorplan import Placed
     from chipleap.macro.layer import MacroImportError
 
     try:
         views, by_sram, cell = macros.views(project, workdir)
         macros.check_modules(project, builddir.work_dir(workdir, "modules"), sorted(views))
-    except (macros.MacroStepError, MacroImportError) as exc:
+        merge.check_macros(views.values())
+    except (macros.MacroStepError, MacroImportError, merge.MergeError) as exc:
         raise PnrError(f"macros: {exc}") from exc
     sizes = {
         m.flat: place.Macro(

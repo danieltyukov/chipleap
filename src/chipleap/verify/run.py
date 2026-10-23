@@ -15,19 +15,23 @@ import re
 import statistics
 import subprocess
 import tempfile
+import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from chipleap.gen.rtl import rtl_params
 from chipleap.gen.xheep import EXT_LARGE, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import accel_bank_kge, accel_logic_kge, get_tech
-from chipleap.model.evaluate import buffer_mm2
+from chipleap.model.evaluate import buffer_mm2, soc_limit_mhz
 from chipleap.rtl import builddir
 from chipleap.verify import backends, pnr, sim, synth, xheep
 from chipleap.verify.remote import Remote
 from chipleap.verify.result import StepResult
 from chipleap.verify.tools import clean_env, verilator
+
+if TYPE_CHECKING:
+    from chipleap.verify.soc import SocResult
 
 
 def consistency(design: Design, bundle: Path) -> StepResult:
@@ -263,6 +267,135 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     return StepResult("pnr", "pass" if met and clean else "fail", msg, data)
 
 
+def corner_slacks(metrics: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """The worst setup and hold slack at each corner LibreLane signed off at."""
+    out: dict[str, dict[str, float]] = {}
+    for key, value in metrics.items():
+        for kind in ("setup", "hold"):
+            prefix = f"timing__{kind}__ws__corner:"
+            if key.startswith(prefix) and isinstance(value, (int, float)):
+                out.setdefault(key[len(prefix) :], {})[kind] = round(float(value), 3)
+    return dict(sorted(out.items()))
+
+
+def place_route_soc(
+    design: Design,
+    bundle: Path,
+    checkout: Path | None,
+    fetch: bool,
+    clock_mhz: float | None = None,
+) -> StepResult:
+    """The whole SoC, X-HEEP with the accelerator and every memory in IHP's macros, placed
+    and routed as one block in LibreLane (``chipleap.verify.soc``), at the design's clock
+    or ``clock_mhz``."""
+    from chipleap.chip import io
+    from chipleap.verify import soc
+
+    if design.platform != "xheep":
+        return StepResult("soc", "skipped", "not an X-HEEP design (standalone AXI4 IP)")
+    if design.accel is None:
+        return StepResult("soc", "skipped", "no accelerator in this design")
+    if design.tech != "ihp-sg13g2":
+        return StepResult("soc", "skipped", f"the SoC is laid out on IHP SG13G2, not {design.tech}")
+    co = xheep.find_checkout(checkout)
+    if co is None and fetch:
+        try:
+            co = xheep.fetch()
+        except xheep.XheepError as exc:
+            return StepResult("soc", "skipped", str(exc))
+    if co is None:
+        return StepResult(
+            "soc",
+            "skipped",
+            "no X-HEEP checkout (pass --xheep DIR, set CHIPLEAP_XHEEP_DIR, or use --fetch-xheep)",
+        )
+    pdk = io.pdk_dir()
+    if pdk is None:
+        return StepResult("soc", "skipped", f"no IHP PDK with its SRAM macros ({io.PDK_ENV})")
+    # As in the xheep step, X-HEEP's generator runs the configuration ChipLeap writes from
+    # design.yaml, never the bundle's own file.
+    text, _ = _regenerated_xheep(bundle, design)
+    start = time.monotonic()
+    try:
+        s = soc.place_and_route(
+            design, text, co, builddir.work_dir(bundle, "verify", "soc"), pdk, clock_mhz
+        )
+    except (soc.SocError, pnr.PnrError) as exc:
+        msg = str(exc).splitlines()[0]
+        status = "skipped" if "not installed" in msg else "fail"
+        return StepResult("soc", status, msg, {"error": str(exc)})
+    return soc_step_result(design, s, time.monotonic() - start)
+
+
+def soc_step_result(design: Design, s: SocResult, runtime_s: float) -> StepResult:
+    """The soc step's result from what the routed SoC measures."""
+    r = s.pnr
+    clock = r.clock_mhz
+    counts: dict[str, int] = {}
+    for _, cell in s.macros:
+        counts[cell] = counts.get(cell, 0) + 1
+    macros = ", ".join(f"{n} x {c}" for c, n in sorted(counts.items()))
+    model = s.model_cell_um2 + s.model_macro_um2
+    measured = r.cell_um2 + r.macro_um2
+    limit = soc_limit_mhz(design, get_tech(design.tech))
+    data: dict[str, object] = {
+        "clock_mhz": clock,
+        "design_clock_mhz": design.freq_mhz,
+        "model_soc_limit_mhz": round(limit, 1) if limit else None,
+        "runtime_s": round(runtime_s),
+        "die_um2": round(r.die_um2),
+        "core_um2": round(r.core_um2),
+        "cell_um2": round(r.cell_um2),
+        "utilisation": round(r.utilisation, 3),
+        "cells": r.cells,
+        "setup_slack_typ_ns": round(r.setup_slack_typ_ns, 3),
+        "setup_slack_ns": round(r.setup_slack_ns, 3),
+        "hold_slack_ns": round(r.hold_slack_ns, 3),
+        "slack_by_corner_ns": corner_slacks(r.metrics),
+        "fmax_mhz": round(r.fmax_mhz, 1),
+        "fmax_worst_mhz": round(r.fmax_worst_mhz, 1),
+        "drc_errors": r.drc_errors,
+        "lvs_errors": r.lvs_errors,
+        "antenna_nets": r.antenna_nets,
+        **r.ihp_antenna_data(),
+        "max_slew_violations": r.max_slew_violations,
+        "max_cap_violations": r.max_cap_violations,
+        "max_fanout_violations": r.max_fanout_violations,
+        **({"pin_markers_in_pdk_macros": r.pin_markers} if r.pin_markers else {}),
+        "power_mw": round(r.power_mw, 3),
+        "macros": [{"instance": i, "cell": c} for i, c in s.macros],
+        "macro_um2": round(r.macro_um2),
+        "model_macro_um2": round(s.model_macro_um2),
+        "model_cell_um2": round(s.model_cell_um2),
+        "synth_cell_um2": round(r.synth_cell_um2),
+        "measured_um2": round(measured),
+        "model_um2": round(model),
+        "gds": str(r.gds) if r.gds else None,
+    }
+    met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
+    checks = r.checks()
+    msg = (
+        f"X-HEEP with the accelerator, placed and routed on IHP SG13G2: "
+        f"{r.core_um2 / 1e6:.3f} mm2 core at {r.utilisation * 100:.0f}% utilisation, "
+        f"{r.cells} cells; {clock:g} MHz"
+        f"{'' if clock == design.freq_mhz else f' (the design asks {design.freq_mhz:g})'} "
+        f"{'met' if met else 'missed'} at the slow "
+        f"corner (about {r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the "
+        f"typical one{f'; the model puts the SoC at about {limit:.0f} MHz' if limit else ''}); "
+        f"{checks}; macros {macros}: {r.macro_um2 / 1e6:.3f} mm2, the model "
+        f"{s.model_macro_um2 / 1e6:.3f} mm2; standard cells: the model "
+        f"{s.model_cell_um2 / 1e6:.3f} mm2"
+    )
+    if r.synth_cell_um2 > 0:
+        msg += (
+            f", synthesis {r.synth_cell_um2 / 1e6:.3f} mm2 "
+            f"({(s.model_cell_um2 - r.synth_cell_um2) / r.synth_cell_um2 * 100:+.1f}%), and "
+            f"place and route adds {(r.cell_um2 / r.synth_cell_um2 - 1) * 100:.0f}% "
+            f"({r.cell_um2 / 1e6:.3f} mm2)"
+        )
+    return StepResult("soc", "pass" if met and r.checks_clean else "fail", msg, data)
+
+
 def _count(n: object, noun: str) -> str:
     return f"{n} {noun}" + ("" if n == 1 else "s")
 
@@ -433,6 +566,7 @@ def verify_bundle(
     synth_tech: str = "ihp-sg13g2",
     remote: Remote | None = None,
     pnr_tool: str = "librelane",
+    soc_clock_mhz: float | None = None,
 ) -> list[StepResult]:
     from chipleap.gen.bundle import load_design
 
@@ -460,6 +594,8 @@ def verify_bundle(
             results.append(_place_route_on(design, synth_tech, bundle, remote))
         elif step == "pnr":
             results.append(place_route(design, builddir.work_dir(bundle, "verify", "pnr")))
+        elif step == "soc":
+            results.append(place_route_soc(design, bundle, xheep_dir, fetch_xheep, soc_clock_mhz))
         else:
             raise ValueError(f"unknown verification step {step!r}")
     out = builddir.work_dir(bundle, "verify")
