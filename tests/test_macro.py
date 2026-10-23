@@ -40,7 +40,7 @@ EXPECTED = json.loads((FIXTURES / "expected.json").read_text())
 # The contract both repositories share. aispice pins the same hashes in
 # crates/aispice-core/tests/macro_contract.rs; change both together (CONTRIBUTING.md).
 CONTRACT = {
-    "docs/macro-package.md": "a6e93e8bc36471af1e913e9b0d04a82dbbd030837732db125fb40f39b8449b04",
+    "docs/macro-package.md": "256a3cab336c8d629538ca2cc43023b08681335ce1bcadc2ce56497e0aaef24b",
     "src/chipleap/macro/macro-v1.schema.json": "01fadd5205677b27ef3dcc5a00c086aaf00f2dba63d398d17fc046dd67254327",
     "tests/fixtures/macro/SHA256SUMS": "3170942c1f149c7e5781d5ee0571b9d86debd09ce7c19f647600481c9fc660ae",
 }
@@ -631,14 +631,18 @@ def _inv(data: bytes) -> str:
 def test_identity_covers_every_record_but_the_dates():
     """The package's copy of the inverter differs from the PDK's only in BGNSTR's dates:
     the same identity. A property, the order of its elements or the file's units make
-    another, and the chip's merges compare the same identity."""
+    another. A chip's merges compare layouts (``chipleap.chip.merge.gds_names``), where
+    the order of the elements makes no other."""
     from chipleap.chip.merge import gds_names
+
+    def layout(data: bytes) -> str:
+        return gds_names(data)["sg13g2_inv_1"]
 
     pdk = (STAND_IN / "libs.ref" / "sg13g2_stdcell" / "gds" / "sg13g2_stdcell.gds").read_bytes()
     same = (FIXTURES / "broken/std-cell-identical/tiny_counter.macro/tiny_counter.gds").read_bytes()
     assert pdk.count(b"\x07\xe9") and not same.count(b"\x07\xe9")  # 2025, 2026
     assert _inv(pdk) == _inv(same) != ""
-    assert gds_names(pdk)["sg13g2_inv_1"] == _inv(pdk)
+    assert layout(pdk) == layout(same) != ""
     recs = _records(same)
     start = recs.index(next(r for r in recs if r[2] == 0x06 and r[4:] == b"sg13g2_inv_1"))
     ends = [k for k in range(start, len(recs)) if recs[k][2] == 0x11]  # ENDEL
@@ -646,14 +650,17 @@ def test_identity_covers_every_record_but_the_dates():
     prop = struct.pack(">HBBh", 6, 0x2B, 0x02, 1) + struct.pack(">HBB", 6, 0x2C, 0x06) + b"x\0"
     with_prop = [*recs[: ends[0]], prop, *recs[ends[0] :]]
     assert _inv(b"".join(with_prop)) != _inv(same)
+    assert layout(b"".join(with_prop)) != layout(same)
     # The first two elements swapped.
     first, second = recs[start + 1 : ends[0] + 1], recs[ends[0] + 1 : ends[1] + 1]
     swapped = recs[: start + 1] + second + first + recs[ends[1] + 1 :]
     assert len(swapped) == len(recs) and _inv(b"".join(swapped)) != _inv(same)
+    assert layout(b"".join(swapped)) == layout(same)
     # A second UNITS record, or one after the first structure: no identity at all.
     units = next(r for r in recs if r[2] == 0x03)
     k = recs.index(units)
     assert _inv(b"".join([*recs[: k + 1], units, *recs[k + 1 :]])) == ""
+    assert layout(b"".join([*recs[: k + 1], units, *recs[k + 1 :]])) == ""
     first_str = next(i for i, r in enumerate(recs) if r[2] == 0x05)
     moved = [*recs[:k], *recs[k + 1 : first_str + 1], units, *recs[first_str + 1 :]]
     assert _inv(b"".join(moved)) == ""

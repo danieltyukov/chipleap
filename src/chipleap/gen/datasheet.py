@@ -14,6 +14,7 @@ from chipleap.gen.rtl import DEFAULT_REG_BASE, rtl_params
 from chipleap.gen.xheep import code_section_bytes, ext_window
 from chipleap.hw.design import DATAFLOW_NAMES, Design
 from chipleap.hw.memory import get_memory
+from chipleap.hw.tech import get_tech
 from chipleap.model.accel import ACC_ROWS
 
 
@@ -103,6 +104,25 @@ def reggen_hjson(name: str) -> str:
     )
 
 
+def _clock(d: Design) -> str:
+    """The SoC's clock: the design's, or what X-HEEP's SoC meets where that is less."""
+    from chipleap.model.evaluate import soc_limit_mhz
+
+    limit = soc_limit_mhz(d, get_tech(d.tech))
+    if d.accel_mhz:
+        soc = f"{min(d.freq_mhz, limit) if limit else d.freq_mhz:.1f}"
+        return (
+            f"{d.accel_mhz:g} MHz on accel_clk_i, the accelerator's own; X-HEEP's side of its "
+            f"crossings on clk_i at {soc} MHz"
+        )
+    if limit is None or limit >= d.freq_mhz:
+        return f"{d.freq_mhz:g} MHz"
+    return (
+        f"{limit:.1f} MHz, what X-HEEP's SoC meets on {d.tech} (the accelerator is built for "
+        f"{d.freq_mhz:g} MHz)"
+    )
+
+
 def datasheet(
     d: Design,
     *,
@@ -145,7 +165,7 @@ def datasheet(
         "| Item | Value |",
         "|---|---|",
         f"| Process | {d.tech} |",
-        f"| Clock | {d.freq_mhz:g} MHz |",
+        f"| Clock | {_clock(d)} |",
         f"| CPU | {d.cpu} |",
         f"| Bus | {d.bus} |",
         f"| SRAM | {d.banks} x {d.bank_kib} KiB continuous"

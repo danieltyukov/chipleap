@@ -446,7 +446,7 @@ def generate_soc(
 
 def verify_soc(
     out_dir: str,
-    steps: str = "consistency,lint,sim,synth,xheep",
+    steps: str = "consistency,lint,sim,cdc,synth,xheep",
     fetch_xheep: bool = False,
     sim_tool: str = "verilator",
     synth_tool: str = "yosys",
@@ -1078,7 +1078,8 @@ def build_server(log_dir: str | None = None) -> Any:
     @server.tool(
         description="Verify a bundle: Verilator lint, randomized simulation against a "
         "golden model with a cycle cross-check, synthesis, X-HEEP config validation. Steps: "
-        "consistency,lint,sim,synth,xheep. sim_tool: verilator (default), xcelium, vcs, "
+        "consistency,lint,sim,cdc,synth,xheep; pnr places and routes the accelerator and soc "
+        "X-HEEP with the accelerator (hours). sim_tool: verilator (default), xcelium, vcs, "
         "questa or verilator-sv; synth_tool: yosys (default), genus or dc; synth_tech: a "
         "technology key to map to. Commercial tools run where the user configured them "
         "(here, or on the server in the user's CHIPLEAP_REMOTE)."
@@ -1086,7 +1087,7 @@ def build_server(log_dir: str | None = None) -> Any:
     @_stops_its_runs
     def verify_soc(
         out_dir: str,
-        steps: str = "consistency,lint,sim,synth,xheep",
+        steps: str = "consistency,lint,sim,cdc,synth,xheep",
         fetch_xheep: bool = False,
         sim_tool: str = "verilator",
         synth_tool: str = "yosys",

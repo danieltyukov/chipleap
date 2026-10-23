@@ -16,18 +16,28 @@ from chipleap.hw.cpu import CPUModel, get_cpu
 from chipleap.hw.design import Accel, Design
 from chipleap.hw.memory import MEMORIES, ExternalMemory, get_memory
 from chipleap.hw.tech import (
+    ACCEL_CDC_KGE,
+    ACCEL_CDC_PORT_KGE,
     AXI_ADAPTER_KGE,
     Technology,
     accel_bank_kge,
     accel_logic_kge,
     get_tech,
+    soc_signoff_mhz,
 )
-from chipleap.model.accel import Bandwidth, TilingError, job_timing
+from chipleap.model.accel import Bandwidth, TilingError, crossed, job_timing
 from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workload
 
-# Logic outside the CPU, memories and accelerator: debug module, DMA, boot ROM, power
-# manager, timers, interrupt controllers, UART, SPI, I2C, GPIO, pad control.
-XHEEP_BASE_KGE = 110.0
+# X-HEEP's logic outside the CPU, its bus, the memories and the accelerator, as ChipLeap
+# configures it (chipleap.gen.xheep): the debug module with its SPI slave, the DMA, the
+# flash's SPI host and controller, boot ROM, power manager, timers, interrupt controllers,
+# GPIO, UART and pad control. Measured on the SmolLM2 SoC with Yosys and ABC against
+# IHP SG13G2's typical liberty, the hierarchy kept: 208.4 kGE of X-HEEP's 288.0, besides
+# the CPU (33.9), the accelerator (39.6) and the one-to-many bus (6.1). With X-HEEP's
+# default peripherals (two more SPI hosts, I2C, I2S, a DMA with two master ports) it was
+# 401.8 kGE.
+XHEEP_BASE_KGE = 208.4
+ONE_TO_M_BUS_KGE = 6.1
 # Area entries that make up the generated accelerator IP (see Evaluation.ip_area).
 IP_AREA_KEYS = ("accelerator logic", "accelerator buffers", "axi adapter")
 # Firmware code, data and stack kept in the first banks.
@@ -84,6 +94,18 @@ class Evaluation:
     warnings: list[str]
     bandwidth: dict[str, float]  # bytes per second of each data path
     severity: int = 0  # weighted violations, see Issues
+    # The clock the SoC runs at, the CPU, its bus and the accelerator alike: the design's,
+    # or less where X-HEEP's SoC cannot meet it (soc_limit_mhz). 0 means the design's.
+    clock_mhz: float = 0.0
+    soc_limit_mhz: float | None = None  # what X-HEEP's SoC meets, where it was measured
+    accel_limit_mhz: float | None = None  # what the accelerator meets on its own
+    # The accelerator's own clock (Design.accel_mhz), behind its crossings; 0 when it runs
+    # on the SoC's.
+    accel_clock_mhz: float = 0.0
+
+    @property
+    def soc_mhz(self) -> float:
+        return self.clock_mhz or self.design.freq_mhz
 
     @property
     def feasible(self) -> bool:
@@ -142,13 +164,19 @@ class _Ctx:
     tech: Technology
     cpu: CPUModel
     mem: ExternalMemory | None
-    f: float  # Hz
+    f: float  # Hz, the SoC's: the CPU, its bus and its DMA
     bw: Bandwidth  # per accelerator cycle
     cpu_dma_ext: float  # bytes per second the X-HEEP DMA moves from external memory
     ext_limit: str  # what caps the accelerator's external stream: memory or its own ports
     frac_on: dict[str, float]
     sram_pj: float
     e_cpu_cycle: float
+    f_acc: float = 0.0  # Hz, the accelerator's own clock; 0 runs it at f
+
+    @property
+    def fa(self) -> float:
+        """The accelerator's clock in Hz."""
+        return self.f_acc or self.f
 
 
 def _bandwidth(
@@ -286,9 +314,11 @@ def _accel_matmul(op: MatMul, c: _Ctx) -> OpResult | None:
     w_ext_bytes = (t.w_bytes + scale_bytes) * (1 - frac)
     act_ext_bytes = (t.x_bytes + t.y_bytes) * (1 - act_on)
     extra_ext_cycles = scale_bytes * (1 - frac) / c.bw.w_ext
-    setup = JOB_SETUP_CYCLES
+    # The CPU programs the job at its own clock: its cycles, in the accelerator's.
+    cpu_per_acc = c.f / c.fa
+    setup = JOB_SETUP_CYCLES / cpu_per_acc
     cycles = t.total + extra_ext_cycles + setup
-    time = cycles * op.count / c.f
+    time = cycles * op.count / c.fa
     tech = c.tech
 
     # The generated PEs multiply 8 x 8 whatever the weight format.
@@ -301,12 +331,12 @@ def _accel_matmul(op: MatMul, c: _Ctx) -> OpResult | None:
         + (t.x_bytes + t.w_bytes + t.buffer_reads) * buf_e
         + onchip * c.sram_pj
         + ext_bytes * 8 * (c.mem.pj_per_bit if c.mem else 0.0)
-        + setup * c.e_cpu_cycle
-        + (t.total - setup) * c.e_cpu_cycle * CPU_IDLE_FRACTION
+        + setup * cpu_per_acc * c.e_cpu_cycle
+        + (t.total - setup) * cpu_per_acc * c.e_cpu_cycle * CPU_IDLE_FRACTION
     ) * op.count
 
     def secs(x: float) -> float:
-        return x * op.count / c.f
+        return x * op.count / c.fa
 
     act_io = t.load_x + t.store
     parts = {
@@ -497,6 +527,23 @@ def _ihp_buffer_mm2(a: Accel) -> float:
     return total / 1e6
 
 
+def bank_mm2(kib: float, tech: Technology) -> float:
+    """One of X-HEEP's memory banks: on IHP SG13G2 the PDK's macros of 32-bit words with
+    a bit mask that hold it (X-HEEP writes bytes), as the SoC's layout builds it
+    (``chipleap.gen.soc``); other nodes use ``Technology.sram_mm2``."""
+    if tech.key == "ihp-sg13g2":
+        return _ihp_bank_mm2(kib)
+    return tech.sram_mm2(kib)
+
+
+@lru_cache(maxsize=256)
+def _ihp_bank_mm2(kib: float) -> float:
+    from chipleap.macro.sram import IHP_1P, choose
+
+    words = int(kib * 1024) // 4
+    return choose(IHP_1P, words, 32).area_um2 / 1e6 if words > 0 else 0.0
+
+
 def area_breakdown(
     d: Design, tech: Technology, cpu: CPUModel, mem: ExternalMemory | None
 ) -> dict[str, float]:
@@ -504,12 +551,13 @@ def area_breakdown(
     area["cpu"] = tech.logic_mm2(cpu.kge)
     masters = 4 + 2 + (d.accel.ports + 1 if d.accel else 0)
     slaves = d.banks + d.il_banks + 6
-    bus_kge = 8.0 if d.bus == "onetoM" else 0.6 * masters * slaves
+    bus_kge = ONE_TO_M_BUS_KGE if d.bus == "onetoM" else 0.6 * masters * slaves
     area["soc logic"] = tech.logic_mm2(XHEEP_BASE_KGE + bus_kge)
-    area["sram"] = d.banks * tech.sram_mm2(d.bank_kib) + d.il_banks * tech.sram_mm2(d.il_bank_kib)
+    area["sram"] = d.banks * bank_mm2(d.bank_kib, tech) + d.il_banks * bank_mm2(d.il_bank_kib, tech)
     if d.accel:
         a = d.accel
-        area["accelerator logic"] = tech.logic_mm2(accel_kge(a, tech))
+        cdc = ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * a.ports if d.accel_mhz else 0.0
+        area["accelerator logic"] = tech.logic_mm2(accel_kge(a, tech) + cdc)
         area["accelerator buffers"] = buffer_mm2(a, tech)
         if d.platform == "standalone":
             area["axi adapter"] = tech.logic_mm2(AXI_ADAPTER_KGE)
@@ -520,6 +568,18 @@ def area_breakdown(
     return area
 
 
+def soc_limit_mhz(design: Design, tech: Technology) -> float | None:
+    """The clock X-HEEP's SoC meets after routing at the slow corner, on a node where it was
+    measured (``chipleap.hw.tech.soc_signoff_mhz``, from the macros of the design's banks);
+    None on the standalone platform and other nodes."""
+    if design.platform != "xheep" or not tech.soc_timing:
+        return None
+    from chipleap.macro.sram import IHP_1P, choose
+
+    kibs = [design.bank_kib] + ([design.il_bank_kib] if design.il_banks else [])
+    return soc_signoff_mhz(choose(IHP_1P, int(k * 1024) // 4, 32).macro.cell for k in kibs)
+
+
 def evaluate(
     workload: Workload, design: Design, *, firmware_kib: float = DEFAULT_FIRMWARE_KIB
 ) -> Evaluation:
@@ -527,20 +587,34 @@ def evaluate(
     tech = get_tech(design.tech)
     cpu = get_cpu(design.cpu)
     mem = get_memory(design.ext_mem)
-    f = design.freq_mhz * 1e6
     violations = Issues()
     warnings: list[str] = []
+    # The CPU, its bus and the accelerator share X-HEEP's clock: the design's, unless the
+    # SoC cannot meet it.
+    soc_limit = soc_limit_mhz(design, tech)
+    clock = min(design.freq_mhz, soc_limit) if soc_limit else design.freq_mhz
+    f = clock * 1e6
+    if soc_limit and design.freq_mhz > soc_limit:
+        warnings.append(
+            f"the SoC runs at {clock:.1f} MHz, not {design.freq_mhz:g}: X-HEEP reads a bank and "
+            f"crosses its bus in one cycle, which closes timing at about {soc_limit:.1f} MHz "
+            f"on {tech.name} after routing, at the slow corner"
+        )
+    accel_limit = None
+    # The accelerator's clock: its own (behind its crossings), or the design's, which the
+    # accelerator's paths are timed at even where the SoC runs slower.
+    accel_mhz = design.accel_mhz or design.freq_mhz
 
-    if design.freq_mhz > tech.max_freq_mhz:
+    if max(design.freq_mhz, accel_mhz) > tech.max_freq_mhz:
         violations.add(
-            f"{design.freq_mhz:g} MHz is above the {tech.max_freq_mhz:g} MHz practical at "
-            f"{tech.name}"
+            f"{max(design.freq_mhz, accel_mhz):g} MHz is above the {tech.max_freq_mhz:g} MHz "
+            f"practical at {tech.name}"
         )
     elif design.accel and tech.accel_timing:
         a = design.accel
         read = bank_read_ns(a, tech)
-        limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows, read)
-        if design.freq_mhz > limit + 1e-9:
+        limit = accel_limit = tech.clock_limit_mhz(a.dataflow, a.cols, a.ports, a.rows, read)
+        if accel_mhz > limit + 1e-9:
             buffers = f" and its buffers in SRAM macros that read in {read:.1f} ns" if read else ""
             violations.add(
                 f"the {a.dataflow} {a.rows}x{a.cols} accelerator with {a.ports} port"
@@ -566,6 +640,11 @@ def evaluate(
 
     frac_on, used = _place(workload, design, mem, firmware_kib, violations)
     bw, cpu_dma, ext_limit = _bandwidth(design, mem, f, tech.max_io_mts)
+    f_acc = design.accel_mhz * 1e6
+    if f_acc and design.accel:
+        # On its own clock the accelerator sees the bus's rates and latencies through its
+        # crossings (chipleap.model.accel.crossed).
+        bw = crossed(bw, f_acc / f, design.accel.ports)
     e_cpu = cpu.kge * tech.cpu_pj_per_kge_cycle
     ctx = _Ctx(
         design,
@@ -579,6 +658,7 @@ def evaluate(
         frac_on,
         tech.bank_energy_per_byte(design.bank_kib),
         e_cpu,
+        f_acc,
     )
 
     results: list[OpResult] = []
@@ -641,9 +721,10 @@ def evaluate(
             "interleaved banks: on-chip reads cannot use every port"
         )
 
+    fa = f_acc or f
     bandwidth = {
-        "on-chip": bw.x * f,
-        "external": bw.w_ext * f if mem else 0.0,
+        "on-chip": bw.x * fa,
+        "external": bw.w_ext * fa if mem else 0.0,
     }
     return Evaluation(
         design=design,
@@ -661,4 +742,8 @@ def evaluate(
         severity=violations.severity,
         warnings=warnings,
         bandwidth=bandwidth,
+        clock_mhz=clock,
+        soc_limit_mhz=soc_limit,
+        accel_limit_mhz=accel_limit,
+        accel_clock_mhz=design.accel_mhz,
     )

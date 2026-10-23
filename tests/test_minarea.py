@@ -469,6 +469,38 @@ def test_a_second_part_that_stops_is_not_read_from_the_first_parts_final(
     assert not (run / "final").exists() and (run / pnr.ROUTED_FINAL / "metrics.json").is_file()
 
 
+def test_a_first_part_that_stops_names_the_step_it_stopped_in(tmp_path, monkeypatch):
+    """OpenROAD crashed in the repair after clock-tree synthesis: the error says so,
+    not that detailed routing failed."""
+    (tmp_path / "librelane").write_text("#!/bin/sh\n")
+    (tmp_path / "librelane").chmod(0o755)
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(tmp_path / "librelane"))
+
+    def fake(cmd, workdir, log, timeout, limit, env):
+        run = workdir / "runs" / "chipleap"
+        run.mkdir(parents=True)
+        (run / "flow.log").write_text(
+            "Running 'OpenROAD.CTS' at 'runs/chipleap/31-openroad-cts'…\n"
+            "Running 'OpenROAD.ResizerTimingPostCTS' at "
+            "'runs/chipleap/33-openroad-resizertimingpostcts'…\n"
+            "[RSZ-0064] Unable to repair all hold checks within margin.\n"
+        )
+        log.write_text("Signal 11 received\n")
+        return 1
+
+    monkeypatch.setattr(pnr, "_librelane", fake)
+    (tmp_path / "pnr").mkdir()
+    with pytest.raises(pnr.PnrError) as err:
+        pnr.run_librelane(tmp_path / "pnr", {})
+    first = str(err.value).splitlines()[0]
+    assert first == (
+        "LibreLane stopped in OpenROAD.ResizerTimingPostCTS, before detailed routing "
+        "finished (exit 1):"
+    )
+    assert "Signal 11" in str(err.value)
+    assert pnr.last_step(tmp_path / "nowhere") == ""
+
+
 def test_a_second_part_that_ends_on_an_error_is_not_read(tmp_path, monkeypatch):
     def second(run, log):
         _finishes({"timing__setup__ws": 0.5})(run, log)
@@ -604,6 +636,80 @@ def test_a_final_older_than_the_second_part_is_refused(tmp_path):
     # A run whose first part's final/ is already set aside is not one the first part made.
     with pytest.raises(pnr.PnrError, match="is there already"):
         pnr.begin_second_part(run)
+
+
+def test_run_librelane_stops_after_a_step_then_resumes_through_routing(tmp_path, monkeypatch):
+    calls = []
+    tool = tmp_path / "librelane"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(tool))
+
+    def fake(cmd, workdir, log, timeout, limit, env):
+        calls.append((cmd[cmd.index("--run-tag") + 2 :], log.name))
+        run = workdir / "runs" / "chipleap"
+        if "Yosys.Synthesis" in cmd:
+            step = run / "02-yosys-synthesis"
+            step.mkdir(parents=True)
+            (step / "state_out.json").write_text("{}")
+        elif "OpenROAD.DetailedRouting" in cmd:
+            step = run / "45-openroad-detailedrouting"
+            step.mkdir(parents=True)
+            (tmp_path / "tech.lef").write_text(TECH)
+            (step / "chipleap_accel.def").write_text(
+                _def(_net("ok", "\n      + ROUTED Metal2 ( 5000 5000 ) ( * 7000 )"))
+            )
+            (step / "state_out.json").write_text(
+                json.dumps({"def": str(step / "chipleap_accel.def")})
+            )
+            (run / "resolved.json").write_text(
+                json.dumps({"TECH_LEFS": {"nom_*": str(tmp_path / "tech.lef")}})
+            )
+        else:
+            (run / "final").mkdir()
+            (run / "final" / "metrics.json").write_text('{"timing__setup__ws": 0.5}')
+        log.write_text("")
+        return 0
+
+    monkeypatch.setattr(pnr, "_librelane", fake)
+    work = tmp_path / "pnr"
+    work.mkdir()
+    assert pnr.run_librelane(work, {}, to="Yosys.Synthesis") == ({}, None)
+    metrics, _ = pnr.run_librelane(work, {}, resume_from="Checker.YosysUnmappedCells")
+    assert metrics == {"timing__setup__ws": 0.5}
+    assert calls == [
+        (
+            ["--overwrite", "--to", "Yosys.Synthesis", "config.json"],
+            "librelane-yosys-synthesis.log",
+        ),
+        (
+            [
+                "--from",
+                "Checker.YosysUnmappedCells",
+                "--to",
+                "OpenROAD.DetailedRouting",
+                "config.json",
+            ],
+            "librelane-route.log",
+        ),
+        (["--from", "Odb.RemoveRoutingObstructions", "config.json"], "librelane.log"),
+    ]
+
+
+def test_run_librelane_fails_when_the_first_part_stops_early(tmp_path, monkeypatch):
+    tool = tmp_path / "librelane"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(tool))
+
+    def fake(cmd, workdir, log, timeout, limit, env):
+        log.write_text("synthesis failed\n")
+        return 0
+
+    monkeypatch.setattr(pnr, "_librelane", fake)
+    (tmp_path / "pnr").mkdir()
+    with pytest.raises(pnr.PnrError, match=r"stopped before Yosys\.Synthesis"):
+        pnr.run_librelane(tmp_path / "pnr", {}, to="Yosys.Synthesis")
 
 
 def test_def_to_odb_follows_routing_in_a_step_list_or_as_a_substitution():

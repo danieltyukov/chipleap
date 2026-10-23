@@ -75,10 +75,21 @@ def check(bundle: Path, design: Design) -> list[str]:
     )
     if standalone:
         read("rtl/chipleap_accel_axi.sv")
+    own = bool(design.accel_mhz)
+    if own:
+        read("rtl/chipleap_accel_cdc.sv")
     for rel in wrappers:
         text = read(rel)
         if text is None:
             continue
+        # An accelerator on its own clock is instantiated behind its crossings, with that
+        # clock as a port; one on X-HEEP's clock is not.
+        if not standalone and own != bool(re.search(r"\bchipleap_accel_cdc\s*#", text)):
+            problems.append(
+                f"{rel}: the accelerator is "
+                + ("not behind its clock crossings" if own else "behind clock crossings")
+                + f", design.yaml says accel_mhz is {design.accel_mhz:g}"
+            )
         for name, value in want.items():
             m = re.search(rf"\.{name}\(([^)]*)\)", text)
             if not m or m.group(1).strip() != str(value):

@@ -152,7 +152,7 @@ def layout_reason(accel: Accel, srams: Iterable[Sram]) -> str | None:
     return unsupported(accel) or too_flat(accel, srams)
 
 
-def _bank(
+def bank_macros(
     lines: list[str], prefix: str, bank: Bank, aba: int, bits: int, sig: tuple[str, ...]
 ) -> None:
     """The macros of one bank, ``prefix_m<k>``: ``deep`` stacked on the address's top bits,
@@ -218,9 +218,10 @@ def _bank(
         lines.append(f"  assign {sig[3]} = {prefix}_q0[{bits - 1}:0];")
 
 
-def top_sv(banks: Banks) -> str:
+def top_sv(banks: Banks, max_outstanding: int | None = None) -> str:
     """``chipleap_accel_sram``: the ports of ``chipleap_accel`` for this build, the core
-    with ``SRAM_BUF`` and the macros of every bank."""
+    with ``SRAM_BUF`` and the macros of every bank. ``max_outstanding`` sets the core's
+    reads in flight per port (behind clock crossings, as many as they hold)."""
     p = rtl_params(banks.accel)
     b, nab, nwb, aba, wba = banks.bank_bits, banks.nab, banks.nwb, banks.aba, banks.wba
     lines = [
@@ -271,6 +272,7 @@ def top_sv(banks: Banks) -> str:
                 ("ACC_ROWS", p.acc_rows),
             )
         ),
+        *([f"    .MAX_OUTSTANDING({max_outstanding}),"] if max_outstanding else []),
         "    .SRAM_BUF(1)",
         "  ) u_core (",
         *(
@@ -324,7 +326,7 @@ def top_sv(banks: Banks) -> str:
             f"abank_addr[{(s + 1) * aba - 1}:{s * aba}]",
             f"abank_rdata[{(s + 1) * b - 1}:{s * b}]",
         )
-        _bank(lines, f"abuf_s{s}", banks.abuf, aba, b, sig)
+        bank_macros(lines, f"abuf_s{s}", banks.abuf, aba, b, sig)
     for k in range(nwb):
         s, lane = divmod(k, banks.accel.rows)
         sig = (
@@ -333,6 +335,6 @@ def top_sv(banks: Banks) -> str:
             f"wbank_addr[{(k + 1) * wba - 1}:{k * wba}]",
             f"wbank_rdata[{(k + 1) * b - 1}:{k * b}]",
         )
-        _bank(lines, f"wbuf_s{s}_l{lane}", banks.wbuf, wba, b, sig)
+        bank_macros(lines, f"wbuf_s{s}_l{lane}", banks.wbuf, wba, b, sig)
     lines.append("endmodule")
     return "\n".join(lines) + "\n"

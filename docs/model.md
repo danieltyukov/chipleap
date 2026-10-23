@@ -6,11 +6,12 @@ This page lists what ChipLeap models, every number it uses and where each comes 
 
 `chipleap.model.evaluate.evaluate(workload, design)`:
 
-1. Places data: firmware, then live activations, then the KV cache, then weights go into on-chip SRAM until it is full. Whatever is left goes to external memory.
-2. Works out the bandwidth of each data path (on-chip SRAM, external memory, the CPU's DMA).
-3. Times every operator: matrix multiplies on the accelerator with the tile schedule below (or on the CPU when there is no accelerator or its PEs are too narrow), element-wise operators and requantization on the CPU.
-4. Adds up energy (MACs, buffers, SRAM, external memory, CPU, leakage) and area (CPU, SoC logic, bus, SRAM macros, accelerator, memory interface).
-5. Checks feasibility and returns violations in words.
+1. Picks the clock: the design's, or on an X-HEEP SoC on IHP SG13G2 what the SoC meets, when that is lower ([the SoC's clock](#the-socs-clock)). The CPU, its bus and the accelerator share it.
+2. Places data: firmware, then live activations, then the KV cache, then weights go into on-chip SRAM until it is full. Whatever is left goes to external memory.
+3. Works out the bandwidth of each data path (on-chip SRAM, external memory, the CPU's DMA).
+4. Times every operator: matrix multiplies on the accelerator with the tile schedule below (or on the CPU when there is no accelerator or its PEs are too narrow), element-wise operators and requantization on the CPU.
+5. Adds up energy (MACs, buffers, SRAM, external memory, CPU, leakage) and area (CPU, SoC logic, bus, SRAM macros, accelerator, memory interface).
+6. Checks feasibility and returns violations in words.
 
 Each operator records which component bounds it (compute, external memory, accelerator ports, on-chip memory, control), and the time shares add up to the step time. Weights streamed from external memory count against the accelerator's ports instead of the memory when the ports, at 32 bits per cycle each, take in less than the memory can sustain: then more ports or a faster clock helps, and a faster memory does not. That is what the agent reads when it names a bottleneck.
 
@@ -83,14 +84,69 @@ Element-wise operators, requantization of accelerator results, and matrix multip
 
 | Key | Core | kGE | Cycles per MAC (int8 / int4 / int2) | Element-wise factor |
 |---|---|---|---|---|
-| `cv32e20` | CV32E20 (2-stage, RV32IMC) | 25 | 6 / 8 / 9 | 1.6 |
+| `cv32e20` | CV32E20 (2-stage, RV32IMC) | 33.9 | 6 / 8 / 9 | 1.6 |
 | `cv32e40x` | CV32E40X (4-stage, RV32IMC) | 45 | 3.5 / 5 / 6 | 1 |
 | `cv32e40p` | CV32E40P with Xpulp | 65 | 0.6 / 1 / 1.2 | 0.6 |
 | `cv32e40px` | CV32E40PX with Xpulp and CV-X-IF | 70 | 0.6 / 1 / 1.2 | 0.6 |
 
-Element-wise cycles per element on CV32E40X, multiplied by the factor above: norm 6, softmax 18, SiLU or GELU 10, ReLU 2.5, RoPE 8, add 3, requantize 4, pool 2, copy 0.5 (the DMA moves the data). These are estimates for hand-written fixed-point kernels; the CV32E40P figures assume the Xpulp 4-way int8 dot product, hardware loops and post-increment loads (`corev_pulp`). The core areas are approximate public figures. They are the least certain inputs of the model and the easiest to replace with your own measurements.
+Element-wise cycles per element on CV32E40X, multiplied by the factor above: norm 6, softmax 18, SiLU or GELU 10, ReLU 2.5, RoPE 8, add 3, requantize 4, pool 2, copy 0.5 (the DMA moves the data). These are estimates for hand-written fixed-point kernels; the CV32E40P figures assume the Xpulp 4-way int8 dot product, hardware loops and post-increment loads (`corev_pulp`). CV32E20's area is measured in the SmolLM2 SoC, by the same synthesis as X-HEEP's logic (below); the other cores' areas are approximate public figures. They are the least certain inputs of the model and the easiest to replace with your own measurements.
 
 Accelerator jobs cost the CPU 80 cycles each to program and to take the completion interrupt. While the accelerator runs, the CPU waits in WFI at 10 % of its active-cycle energy.
+
+## The SoC's clock
+
+The CPU, its bus and the accelerator share X-HEEP's clock. On IHP SG13G2 the model runs them at the design's clock or at what X-HEEP's SoC meets after routing, whichever is lower, and reports that clock, the SoC's limit and the accelerator's own limit apart (`chipleap explore` and `chipleap evaluate`, and the datasheet).
+
+The SoC does in one cycle what the accelerator alone never does, across a die of millimetres:
+
+- It reads a bank. The bank's macro puts the word out its read time after the clock edge (`chipleap.macro.sram.IHP_1P_READ_NS`, as for the accelerator's buffers: 7.25 ns for the 1024 x 32 at the slow corner), and the crossbar takes it to the CPU's load path or into the accelerator's buffer macro.
+- It crosses from one subsystem to another. In the routed SoC the slowest paths run from cve2's instruction register through its decoder, its ALU's adder and the bus into another subsystem's registers: the DMA's transfer pointers, or the accelerator's programming registers.
+
+So the model takes the SoC's period as the slower of the two (`chipleap.hw.tech.soc_signoff_mhz`):
+
+    period = max(read time of the bank's macro + SOC_READ_PATH_NS, SOC_BUS_PATH_NS)
+
+Both terms are measured on the SmolLM2 SoC (CV32E20, the one-to-many bus, one 32 KiB bank of eight 1024 x 32 macros, the GEMV 1 x 8 accelerator) laid out with `chipleap verify --steps soc --soc-clock 36` at 6d026c0, after detailed routing and extraction, at the slow corner (1.08 V, 125 C) with the 5 % derate the step's constraints apply, by `scripts/fit_soc_clock.py`: SOC_READ_PATH_NS (18.63 ns) is the period the slowest path from a bank needs, less the 1024 x 32's read time, and SOC_BUS_PATH_NS (27.15 ns) the period the slowest other path needs, leaving out the accelerator's own paths, which its limit covers. The SmolLM2 SoC's limit is then 36.8 MHz, set by the other paths: its slowest bank read needs 25.87 ns. The macro of each of the design's banks gives its read time (the 1024 x 32 for banks of 4 KiB and more, 512 x 32 for 2 KiB, 256 x 32 for 1 KiB), so smaller banks shorten the read but not the rest.
+
+Most of a slow path is not logic. On the SmolLM2 SoC each of the worst carries 2.7 to 4.2 ns of hold repair's delay cells and 7.6 to 9.2 ns of the buffers that repair puts on long and loaded wires. X-HEEP gates its clock on IHP's one integrated clock gate, a weak cell, and OpenROAD's CTS does not balance the gated trees against the ungated flip-flops, so the gated ones get their clock 0.6 to 0.7 ns later at the slow corner. Hold repair pads the paths that are short against that skew and the 0.25 ns uncertainty, about 25,000 delay cells, and it may put them on any path whose estimated setup slack allows it, which on these long paths is 4 to 5 ns more than routing leaves. So the slower the clock a layout is made for, the longer the period it needs. Every layout of the SmolLM2 SoC, after routing, at the slow corner (the period needed is the clock's period less the worst setup slack):
+
+| Layout clock | Settings | Setup slack | Period needed | Hold slack |
+|---|---|---|---|---|
+| 50 MHz | antenna repair with a 100 % margin, 10 iterations | -3.629 ns (1,054 endpoints) | 23.63 ns (42.3 MHz) | -0.050 ns |
+| 50 MHz | repairs' wire length 150 um | -4.699 ns (2,526 endpoints) | 24.70 ns (40.5 MHz) | +0.049 ns |
+| 45 MHz | both | -3.162 ns (1,102 endpoints) | 25.38 ns (39.4 MHz) | -0.065 ns |
+| 40 MHz | as the 36 MHz one below | -1.030 ns (20 endpoints) | 26.03 ns (38.4 MHz) | +0.104 ns |
+| 36 MHz | the accelerator's margins, no clock-pin buffers | -0.219 ns (11 endpoints) | 28.00 ns (35.7 MHz) | +0.006 ns |
+| 36 MHz (the evidence) | clock-pin buffers, setup margins 6 and 5 ns | +0.627 ns | 27.15 ns (36.8 MHz) | +0.070 ns |
+
+All six were DRC, LVS and antenna clean; the five before the evidence had four slew violations each, at the accelerator's macros' clock pins, and the first 50 MHz and the 40 MHz layouts one capacitance violation each, at a bank's output. Those five are from before two changes to the step: a buffer beside each accelerator macro's clock pin, and repairs that keep 6 ns of estimated setup slack after the clock tree and 5 ns after global routing, where the accelerator's keep 0.8 and 1.6 ns ([verification.md](verification.md)). The limit is the clock a layout met, not a promise for a faster one: whether the evidence's settings meet 38 or 40 MHz has not been tried.
+
+The terms move little between layouts at 36 MHz. The evidence's other runs, with the buffers a trial run can add (`CHIPLEAP_SOC_BUFFERS`), and five variants routed from one 36 MHz placement ([verification.md](verification.md)):
+
+| 36 MHz layout | Setup slack | Period needed | Slowest bank read |
+|---|---|---|---|
+| the evidence | +0.627 ns | 27.15 ns | 25.87 ns |
+| with the clock gates' buffers | +0.429 ns | 27.35 ns | 25.07 ns |
+| with those and the bank outputs' buffers | +1.271 ns | 26.51 ns | 24.92 ns |
+| five variants from one placement | +0.076 to +0.545 ns | 27.23 to 27.70 ns | 25.39 to 26.23 ns |
+
+So a 36 MHz layout of this SoC needs 26.5 to 27.7 ns (36.1 to 37.7 MHz), always set by the bus's other paths.
+
+The first estimate of this limit, 17.64 ns (56.7 MHz), was the slowest bank read after the repair that follows global routing, in a layout at 90 MHz, without the derate. That is no basis for a clock. The repairs work against the global router's estimate of each wire, and on the SoC's long wires the extraction after detailed routing puts 14 to 20 % more capacitance on them: at 50 MHz an SRAM output net repaired to 0.0576 pF came out 0.0657 pF, a clock net's slew went from 0.607 to 0.728 ns, and the slow corner's worst setup slack went from +0.54 ns after global routing to -3.63 ns after routing, a period of 23.63 ns. The model's limit is what the routed layout needs.
+
+## The accelerator's own clock
+
+`accel_mhz` in a design puts the accelerator on a clock of its own, behind clock domain crossings at its bus interface ([verification.md](verification.md#the-accelerator-on-its-own-clock)). The CPU, its bus and its DMA stay on the SoC's clock above, and the accelerator's operators are timed at `accel_mhz`. The accelerator's clock limit (`chipleap.hw.tech.Technology.clock_limit_mhz`) then applies to `accel_mhz`, not to the design's clock.
+
+Every word still crosses at the bus's rate, so the rates the bus gives, in bytes per bus cycle, become rates per accelerator cycle divided by `k`, the accelerator's cycles per bus cycle. They are capped at a word per read port, and one for stores, per accelerator cycle. A request and its response each pass two synchronizer flip-flops of the clock they enter, so a response that comes `L` bus cycles after its grant reaches the accelerator after
+
+    ceil(k (L + CDC_BUS_CYCLES) + CDC_ACCEL_CYCLES)
+
+of its cycles (`chipleap.model.accel.crossed`). Both terms are fitted to 1,040 jobs simulated in Verilator without stalls: five accelerators, sixteen pairs of clocks with `k` from 0.39 to 4, each at a random phase. With CDC_BUS_CYCLES = 1.25 and CDC_ACCEL_CYCLES = 3, every simulated count is within 5.4 % of the model's, 0.1 % on average. The CPU's 80 cycles to program and start a job (JOB_SETUP_CYCLES) are counted at the SoC's clock.
+
+The crossings add ACCEL_CDC_KGE = 8.43 kGE (the register handshake, the write port's FIFOs, the reset and interrupt synchronizers) and ACCEL_CDC_PORT_KGE = 6.76 kGE per read port (its two FIFOs of eight 32-bit words) to the accelerator's logic. They are measured with Yosys on IHP SG13G2: 15.53 kGE with one port, 21.46 with two and 35.64 with four, and the line through them is within 2.3 % of each.
+
+On the SmolLM2 example at the SoC's 42.3 MHz, an accelerator at 90 MHz gives 1.36 token/s against 1.33 on the SoC's clock. The crossings add 0.158 mm2. The gain is small because the accelerator's weights reach it over X-HEEP's bus at the SoC's clock: the faster clock shortens its compute and its fixed cycles, not the stream that bounds it.
 
 ## Placement and feasibility
 
@@ -118,8 +174,8 @@ Per step:
 Core area, excluding pads:
 
 - CPU: kGE x NAND2 area / 0.7 placement utilisation.
-- SoC logic: 110 kGE for X-HEEP's debug module, DMA, boot ROM, power manager, timers, interrupt controllers and peripherals, plus the bus (8 kGE one-to-many, 0.6 kGE per master and slave pair for NtoM).
-- SRAM: each bank from the largest macros available, as `macros x periphery + KiB x array`.
+- SoC logic: 208.4 kGE for X-HEEP as ChipLeap configures it ([xheep.md](xheep.md)): the debug module with its SPI slave (33 kGE), the DMA (35 kGE), the flash's SPI host and controller (68 kGE), GPIO, UART, timers, interrupt controllers, boot ROM, power manager and pad control; plus the bus (6.1 kGE one-to-many, 0.6 kGE per master and slave pair for NtoM). Measured on the SmolLM2 SoC with Yosys and ABC against IHP SG13G2's typical liberty, the hierarchy kept, the CPU, the accelerator and the bus taken out: 208.4 kGE of 288.0. With X-HEEP's default peripherals (two more SPI hosts at 62 kGE each, the I2C, the I2S, a DMA with two master ports) it was 401.8 kGE, 409.6 with the bus. LibreLane's synthesis of the same SoC, which maps for area, comes out 12 % smaller (253.8 kGE in all), so the step that lays the SoC out reads the model about that much high.
+- SRAM: on IHP SG13G2 each of X-HEEP's banks is the PDK's single-port macros of 32-bit words with a bit mask that hold it (`chipleap.model.evaluate.bank_mm2`), as the SoC's layout builds it (X-HEEP writes bytes, and the one macro without a mask, 8192 x 32, cannot): a 32 KiB bank is eight 1024 x 32 macros, 1.121 mm2, where the density formula gave 0.947 mm2. Other nodes build each bank from the largest macros available, as `macros x periphery + KiB x array`.
 - Accelerator logic: `accel_logic_kge`, fitted to Yosys synthesis of the generated RTL on SG13G2 (below): 24.9 kGE of control, registers and store engine, 2.8 kGE per OBI read port (its address generator, request and response queue), and per dataflow a cost per MAC plus a cost per lane, column or array edge. Weight width does not enter, because the PEs multiply 8 x 8 and only the unpacking depends on it. On IHP SG13G2 a GEMV engine whose buffers are banks of macros (next item) also has the banks' interface (`accel_bank_kge`): the macros' write path and the registers that read each chunk a cycle ahead, 5.5 kGE plus 0.10 kGE per MAC, plus 1.0 kGE with a double buffer.
 - Accelerator buffers: SRAM macros. On IHP SG13G2 they are IHP's own single-port macros (`chipleap.macro.sram.IHP_1P`, the PDK's outlines, no PDK needed): a GEMV engine with COLS of 4, 8 or 16 gets exactly the banks the layout places for a one-port build (`chipleap.gen.banks`: per slot of a double buffer, and per lane for the weights, COLS bytes wide), whatever its number of ports, since more ports read the same words; any other build gets each slot of each buffer in macros of 32-bit words. So does a GEMV engine whose banks' two rows of macros would leave a core more than four times as wide as tall, such as the 1 x 16 with a double buffer (eight 784 um macros, a core of 3249 x 438 um): it did not route, so place and route keeps flop buffers, and the model prices and times it as a build without banks, with no bank interface and the flop-buffer build's clock. Both decide by one function, `chipleap.gen.banks.layout_reason`, and the evaluation names the reason in its warnings. A slot costs the macro that holds it: the SmolLM2 example's 1 KiB slots of 64-bit words take 256x64 macros, half empty, 0.373 mm2 for 4 KiB of buffers where the density formula gives 0.186 mm2. Other nodes use `macros x periphery + KiB x array` per buffer.
 - AXI4 adapter (standalone platform only): 0.54 kGE, synthesized on SG13G2 with the core as a black box; the same for 1 to 16 ports, because the read ports are wiring. With it, the accelerator is what `Evaluation.ip_area` reports as the generated IP; every other entry is the host system the model assumes (docs/platforms.md).

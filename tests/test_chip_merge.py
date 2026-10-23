@@ -181,6 +181,195 @@ def test_gds_names_carry_their_contents():
     )
 
 
+def shared_cell(g, via: str, *, reorder: bool = False, presentation: bool = False):
+    """A library cell ``shared`` as two macros' generators write it: a rectangle, a
+    label and a via placed twice, the via's structure named ``via``. ``reorder`` writes
+    the elements in another order and the rectangle from another vertex the other way
+    round; ``presentation`` gives the label a font and justification."""
+    import struct
+
+    rect = (
+        g._rec(0x08, 0x00)
+        + g._rec(0x0D, 0x02, g._i16(8))
+        + g._rec(0x0E, 0x02, g._i16(0))
+        + g._rec(
+            0x10,
+            0x03,
+            g._i32(10, 0, 10, 20, 0, 20, 0, 0, 10, 0)
+            if reorder
+            else g._i32(0, 0, 10, 0, 10, 20, 0, 20, 0, 0),
+        )
+        + g._rec(0x11, 0x00)
+    )
+    label = (
+        g._rec(0x0C, 0x00)
+        + g._rec(0x0D, 0x02, g._i16(63))
+        + g._rec(0x16, 0x02, g._i16(0))
+        + (g._rec(0x17, 0x01, struct.pack(">H", 5)) if presentation else b"")
+        + g._rec(0x10, 0x03, g._i32(5, 5))
+        + g._rec(0x19, 0x06, g._str("pmos"))
+        + g._rec(0x11, 0x00)
+    )
+    cell = g.Cell("shared")
+    refs = g.Cell("_").sref(via, 2, 2).sref(via, 8, 18, angle=90).body
+    cell.body = refs + label + rect if reorder else rect + label + refs
+    return [g.Cell(via).rect(g.METAL1, 0, 0, 4, 4).rect(g.METAL2, 0, 0, 4, 4), cell]
+
+
+def test_one_layout_written_two_ways_is_one_definition():
+    """IHP's SRAM macros each hold the same library cells, written in another order, with
+    labels in another font and vias their generator named per macro: one layout, which
+    either macro's copy gives the chip."""
+    g = gen()
+    a = merge.gds_names(g.gds("a", shared_cell(g, "via_CDNS_755")))
+    b = merge.gds_names(g.gds("b", shared_cell(g, "via_CDNS_686", reorder=True, presentation=True)))
+    assert a["shared"] == b["shared"] and a["via_CDNS_755"] == b["via_CDNS_686"]
+    sources = [merge.Source("macro package a", a), merge.Source("macro package b", b)]
+    merge.unique(sources, False, "GDS cell")
+    # Not the same records: macro/v1's identity, which a package's copy of a PDK cell
+    # must match, tells them apart.
+    from chipleap.macro.gds import structure_identities
+
+    raw_a = dict(structure_identities(g.gds("a", shared_cell(g, "via_CDNS_755"))))
+    raw_b = dict(structure_identities(g.gds("b", shared_cell(g, "via_CDNS_686"))))
+    assert raw_a[b"shared"] != raw_b[b"shared"]
+
+
+def test_the_same_name_over_another_layout_is_refused():
+    g = gen()
+    a = merge.gds_names(g.gds("a", shared_cell(g, "via_x")))
+    # The via under the cell differs: the cell differs, whatever the via's name.
+    other = shared_cell(g, "via_y")
+    other[0] = g.Cell("via_y").rect(g.METAL1, 0, 0, 4, 4).rect(g.METAL2, 0, 0, 4, 5)
+    b = merge.gds_names(g.gds("b", other))
+    assert a["shared"] != b["shared"]
+    with pytest.raises(MergeError, match="GDS cell shared is defined by macro package b"):
+        merge.unique(
+            [merge.Source("macro package a", a), merge.Source("macro package b", b)],
+            False,
+            "GDS cell",
+        )
+    # So does a label, a layer or the place of a via.
+    for change in (
+        lambda c: c.text(g.METAL1_TEXT, 1, 1, "x"),
+        lambda c: c.rect((9, 0), 0, 0, 10, 20),
+        lambda c: c.sref("via_x", 3, 2),
+    ):
+        cells = shared_cell(g, "via_x")
+        change(cells[1])
+        assert merge.gds_names(g.gds("c", cells))["shared"] != a["shared"]
+
+
+def test_two_layouts_whose_parts_run_together_are_told_apart():
+    """Each part of a layout's identity is hashed with its kind and length. Without that,
+    these two cells hash the same bytes: the first's outline has a fifth vertex whose
+    coordinates are the bytes of a property record that the second has after its outline."""
+    import struct
+
+    g = gen()
+    prop = g._rec(0x2C, 0x06, b"abc\n")
+    fifth = struct.unpack(">ii", b"\n" + prop[:-1])
+
+    def boundary(xy: tuple[int, ...], after_xy: bytes = b"") -> bytes:
+        return (
+            g._rec(0x08, 0x00)
+            + g._rec(0x0D, 0x02, g._i16(8))
+            + g._rec(0x0E, 0x02, g._i16(0))
+            + g._rec(0x10, 0x03, g._i32(*xy))
+            + after_xy
+            + g._rec(0x11, 0x00)
+        )
+
+    five = boundary((0, 0, 0, 10, 10, 10, 10, 0, *fifth, 0, 0))
+    four = boundary((0, 0, 0, 10, 10, 10, 10, 0, 0, 0), after_xy=prop)
+
+    def run_together(element: bytes) -> bytes:
+        """The element's parts one after the other, as ChipLeap hashed them before."""
+        out, pos = b"", 0
+        while pos < len(element):
+            r = element[pos : pos + struct.unpack(">H", element[pos : pos + 2])[0]]
+            pos += len(r)
+            out += b"OUTLINE " + merge._outline(r) + b"\n" if r[2] == 0x10 else r
+        return out
+
+    assert five != four and run_together(five) == run_together(four)
+    ids = []
+    for body in (five, four):
+        cell = g.Cell("c")
+        cell.body = body
+        ids.append(merge.gds_names(g.gds("l", [cell]))["c"])
+    assert ids[0] != ids[1]
+
+
+def test_a_record_gdsii_does_not_have_is_refused():
+    g = gen()
+    cell = g.Cell("c").rect(g.METAL1, 0, 0, 1, 1)
+    cell.body += g._rec(0x3C, 0x00)
+    with pytest.raises(MergeError, match="unknown record type 0x3c"):
+        merge.gds_names(g.gds("l", [cell]))
+
+
+def test_a_structure_that_contains_itself_is_an_error():
+    g = gen()
+    data = g.gds("l", [g.Cell("a").sref("b", 0, 0), g.Cell("b").sref("a", 0, 0)])
+    with pytest.raises(MergeError, match="contains itself"):
+        merge.gds_names(data)
+    twice = [g.Cell("a").rect(g.METAL1, 0, 0, 1, 1), g.Cell("a").rect(g.METAL1, 0, 0, 2, 1)]
+    with pytest.raises(MergeError, match="defined twice in one file"):
+        merge.gds_names(g.gds("l", twice))
+
+
+def macro_view(tmp_path: Path, cell: str, cells, subckts: str) -> MacroView:
+    g = gen()
+    d = tmp_path / cell
+    d.mkdir()
+    (d / f"{cell}.gds").write_bytes(g.gds(cell, [*cells, g.Cell(cell).sref(cells[-1].name, 0, 0)]))
+    (d / f"{cell}.cdl").write_text(subckts)
+    v = view(cell)
+    return MacroView(**{**v.__dict__, "gds": d / f"{cell}.gds", "spice": d / f"{cell}.cdl"})
+
+
+def test_the_macros_are_checked_before_librelane_runs(tmp_path):
+    """Two macros with one cell of the same name over another layout stop the flow before
+    LibreLane runs, not after its layout; the same layout passes."""
+    g = gen()
+    sub = ".SUBCKT shared a\n.ENDS\n"
+    one = macro_view(tmp_path, "ram_a", shared_cell(g, "via_1"), sub)
+    same = macro_view(tmp_path, "ram_b", shared_cell(g, "via_2", reorder=True), sub)
+    merge.check_macros([one, same, one])
+    other = shared_cell(g, "via_3")
+    other[1].rect(g.METAL2, 0, 0, 1, 1)
+    differs = macro_view(tmp_path, "ram_c", other, sub)
+    with pytest.raises(MergeError, match="GDS cell shared is defined by macro package ram_c"):
+        merge.check_macros([one, differs])
+    netlist = macro_view(tmp_path, "ram_d", shared_cell(g, "via_4"), ".SUBCKT SHARED a b\n.ENDS\n")
+    with pytest.raises(MergeError, match="subcircuit SHARED is defined by macro package ram_d"):
+        merge.check_macros([one, netlist])
+
+
+def test_ihps_srams_merge_where_their_cells_are_the_same():
+    """On IHP's own macros: the SoC's 1024 x 32 and 256 x 64 share 72 cells, all the same
+    layout; the 512 x 32 has its own RSC_IHPSG13_CDLYX1 (its outline on another layer), so
+    it cannot go into a chip with any other of them."""
+    from chipleap.chip import io
+
+    pdk = io.pdk_dir()
+    if pdk is None:
+        pytest.skip("no IHP PDK")
+    ref = pdk / "libs.ref" / "sg13g2_sram"
+
+    def macro(cell: str) -> MacroView:
+        gds, cdl = ref / "gds" / f"{cell}.gds", ref / "cdl" / f"{cell}.cdl"
+        return MacroView(**{**view(cell).__dict__, "gds": gds, "spice": cdl})
+
+    big, buf = macro("RM_IHPSG13_1P_1024x32_c2_bm_bist"), macro("RM_IHPSG13_1P_256x64_c2_bm_bist")
+    shared = set(merge.gds_names(big.gds.read_bytes())) & set(merge.gds_names(buf.gds.read_bytes()))
+    assert "RM_IHPSG13_1P_BITKIT_CELL_SUB" in shared and len(shared) == 72
+    merge.check_macros([big, buf])
+    with pytest.raises(MergeError, match="RM_IHPSG13_1P_512x32_c2_bm_bist"):
+        merge.check_macros([big, macro("RM_IHPSG13_1P_512x32_c2_bm_bist")])
+
+
 # The predicted names
 
 
