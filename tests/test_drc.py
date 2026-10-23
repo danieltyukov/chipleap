@@ -106,3 +106,88 @@ def test_place_and_route_reads_the_runs_klayout_report_the_same_way(tmp_path):
     # A clean run is not read at all; routing and Magic still count as they did.
     clean = parse_run({"route__drc_errors": 2}, 50.0, None, tmp_path / "none", held)
     assert clean.drc_errors == 2 and not clean.pin_markers
+
+
+def _sref(cell: str, x: int, y: int) -> bytes:
+    import struct
+
+    from test_chip_macros import name, record
+
+    return (
+        record(0x0A, 0)
+        + record(0x12, 6, name(cell))
+        + record(0x10, 3, struct.pack(">2i", x, y))
+        + record(0x11, 0)
+    )
+
+
+def test_place_and_route_finds_two_kinds_of_sram_under_the_names_the_gds_gives_them(
+    tmp_path, monkeypatch
+):
+    """A layout with two kinds of SRAM: each carries its own copy of the driver cell, so
+    the stream-out renames the second (KLayout adds ``$1``, Magic prefixes two characters)
+    and LibreLane's report names the renamed cell, which the PDK's names alone miss.
+    With the GDS the run checked, the markers in either copy, and one the report puts in
+    the top cell inside a macro, are set apart; the design's own still counts."""
+    from chipleap.macro import sram
+    from test_chip_macros import box, gds
+
+    small, large = "RM_IHPSG13_1P_256x64_c2_bm_bist", "RM_IHPSG13_1P_1024x64_c2_bm_bist"
+    renamed = f"{BLDRV}$1"
+    layout = tmp_path / "accel.gds"
+    layout.write_bytes(
+        gds(
+            {
+                BLDRV: box(0, 0, 10, 10),
+                renamed: box(0, 0, 20, 10),
+                small: _sref(BLDRV, 0, 0),
+                large: _sref(renamed, 0, 0),
+                "own": box(0, 0, 5, 5),
+                "accel": _sref(small, 0, 0) + _sref(large, 100_000, 0) + _sref("own", 0, 0),
+            }
+        )
+    )
+    sizes = {small: (40.0, 20.0), large: (80.0, 40.0)}
+    monkeypatch.setattr(
+        sram,
+        "catalog",
+        lambda pdk: [sram.Sram(c, 256, 64, w, h, True) for c, (w, h) in sizes.items()],
+    )
+    held = drc.pdk_cells([(small, (small, BLDRV)), (large, (large, BLDRV))], ("accel",))
+    run = tmp_path / "runs" / "chipleap"
+    step = run / "67-klayout-drc"
+    point = "edge-pair: (120.001,10;120.001,10)/(120.001,10;120.001,10)"
+    step.mkdir(parents=True)
+    (step / "reports").mkdir()
+    (step / "reports" / "drc.klayout.lyrdb").write_text(
+        "<report-database><items>"
+        + "".join(
+            f"<item><category>{r}</category><cell>{c}</cell><values><value>{v}</value></values></item>"
+            for r, c, v in [
+                ("metal1_pin_Offgrid", f"{BLDRV}:r0", "box: (1,1;2,2)"),
+                ("metal1_pin_Offgrid", f"{renamed}:r0", "box: (1,1;2,2)"),
+                ("metal1_pin_Offgrid", f"{renamed}:m90", "box: (1,1;2,2)"),
+                ("metal1_pin_Offgrid", "accel", point),
+                ("metal1_pin_Offgrid", "own", "box: (1,1;2,2)"),
+            ]
+        )
+        + "</items></report-database>"
+    )
+    (step / "state_in.json").write_text(f'{{"gds": "{layout}"}}')
+    metrics = {"klayout__drc_error__count": 5}
+    # The PDK's names alone: the renamed copy's markers and the top cell's count.
+    assert parse_run(metrics, 50.0, layout, run, held).drc_errors == 4
+    r = parse_run(metrics, 50.0, layout, run, held, tmp_path)
+    assert r.drc_errors == 1 and not r.clean
+    assert {(m["cell"], m["count"]) for m in r.pin_markers} == {
+        (BLDRV, 1),
+        (renamed, 2),
+        (large, 1),
+    }
+    assert next(m for m in r.pin_markers if m["cell"] == renamed)["macros"] == [large]
+    # The GDS the DRC read, as its step names it, for the ECO's check of the sealed run.
+    from chipleap.verify.pnr import klayout_gds
+
+    assert klayout_gds(step / "reports" / "drc.klayout.lyrdb") == layout
+    (step / "state_in.json").write_text("{}")
+    assert klayout_gds(step / "reports" / "drc.klayout.lyrdb") is None

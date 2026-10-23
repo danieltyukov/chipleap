@@ -398,9 +398,8 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
         held = macros.pdk_cells(project)
     except macros.MacroStepError as exc:
         raise PnrError(f"macros: {exc}") from exc
-    r = parse_run(
-        metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds, work / "runs" / RUN_TAG, held
-    )
+    mhz = clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS
+    r = parse_run(metrics, mhz, gds, work / "runs" / RUN_TAG, held, io.pdk_dir())
     r = with_ihp_antenna(r, io.pdk_dir(), project.top, work)
     if not project.macros:
         return r
