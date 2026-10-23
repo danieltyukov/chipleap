@@ -9,12 +9,14 @@ is set apart: reported with its rule, cell and count, and left out of the verdic
 same rule in any other cell, and every other rule inside the macro, counts.
 
 A layout's GDS need not name the macros' cells as the PDK does: LibreLane's stream-out of
-the SoC prefixed every cell inside its SRAMs with two characters (``EA_RM_IHPSG13_1P_BLDRV``)
-and kept only the macros' own names. And a report need not keep the hierarchy: IHP's
-runner in deep mode (KLayout 0.30.4) put all 8,192 off-grid pin markers of the SoC's 12
-SRAMs in its top cell, as points. So the cells only the PDK's macros place are read from
-the checked GDS itself (``macro_layout``), and a marker in the top cell that lies inside a
-placed macro's outline is that macro's.
+the SoC, with two kinds of SRAM, prefixed every cell inside them with two characters
+(``EA_RM_IHPSG13_1P_BLDRV``) and kept only the macros' own names. And a report need not
+keep the hierarchy: IHP's runner (``run_drc.py``, one table at a time, deep mode, KLayout
+0.30.4 and 0.30.7 alike) put the off-grid pin markers of the SoC's 12 SRAMs in its top
+cell, 8,192 points, where LibreLane 3.0.14's single run of the deck reported the same
+markers as 32 in the renamed cells. So the cells only the PDK's macros place are read
+from the checked GDS itself (``macro_layout``), and a marker in the top cell that lies
+inside a placed macro's outline is that macro's.
 """
 
 from __future__ import annotations

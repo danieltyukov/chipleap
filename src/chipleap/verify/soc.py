@@ -531,9 +531,10 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # the detailed router resolves it, and DRC is the judge.
         "GRT_ALLOW_CONGESTION": True,
         "PDN_CFG": "dir::pdn.tcl",
-        # IHP's DRC deck runs after LibreLane, in parallel parts (``pnr.with_ihp_drc``):
-        # LibreLane's KLayout DRC of the SoC took 3 h 48 min of a 7 h run, at 1.25 CPUs
-        # on average of its 8 threads.
+        # IHP's DRC deck runs after LibreLane, in parallel parts (``pnr.with_ihp_drc``),
+        # with its extra rules: LibreLane 3.0.14's KLayout DRC of the 36 MHz SoC, the main
+        # deck alone at 8 threads, took 2 h 0 min (3.0.0.dev44's 3 h 48 min), and ChipLeap's
+        # run of both decks at 16 threads 1 h 37 min.
         "RUN_KLAYOUT_DRC": False,
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
