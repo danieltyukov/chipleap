@@ -32,6 +32,7 @@ PLATFORM_NAMES = {
     "standalone": "standalone accelerator IP with AXI4 interfaces, for any host",
 }
 IL_BANK_COUNTS = (0, 2, 4, 8)
+BUFFERS = ("auto", "flops")
 MAX_BANKS = 16
 
 
@@ -81,6 +82,10 @@ class Accel:
     abuf_kib: int = 8
     wbuf_kib: int = 4
     double_buffer: bool = True
+    # What the activation and weight buffers are in a layout: "auto" puts them in the PDK's
+    # SRAM macros where the build can take them (chipleap.gen.banks), "flops" keeps them
+    # in flip-flops however small the build.
+    buffers: str = "auto"
 
     @property
     def macs(self) -> int:
@@ -101,6 +106,8 @@ class Accel:
             v = getattr(self, name)
             if not _pow2(v) or v > 256:
                 raise DesignError(f"accel.{name} must be a power of two from 1 to 256")
+        if self.buffers not in BUFFERS:
+            raise DesignError(f"accel.buffers must be one of {', '.join(BUFFERS)}")
 
 
 GPIO_PINS = (0, 8, 24, 32)
@@ -310,6 +317,8 @@ class Design:
         d.pop("notes")
         if self.accel is None:
             d["accel"] = None
+        elif self.accel.buffers == "auto":
+            d["accel"].pop("buffers")  # as every design before the field
         # The default peripherals are left out, so design files written before they could
         # be chosen read the same.
         if self.peripherals == Peripherals():
@@ -353,6 +362,7 @@ class Design:
             parts.append(
                 f"{a.dataflow} {a.rows}x{a.cols} int{a.w_bits}, {a.ports} port"
                 + ("s" if a.ports > 1 else "")
+                + (", flop buffers" if a.buffers == "flops" else "")
                 + (f" @ {self.accel_mhz:g} MHz" if self.accel_mhz else "")
             )
         else:
