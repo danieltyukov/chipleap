@@ -122,8 +122,14 @@ def test_standalone_area_separates_the_ip_from_the_host():
     assert sa.ip_area == pytest.approx(ip + sa.area_mm2["axi adapter"])
     assert xh.ip_area == pytest.approx(ip)
     assert sa.total_area == pytest.approx(xh.total_area + sa.area_mm2["axi adapter"])
-    assert sa.throughput == xh.throughput
     assert sa.metrics()["ip_area_mm2"] == pytest.approx(sa.ip_area)
+    # X-HEEP's SoC closes timing below 100 MHz on IHP SG13G2; the standalone IP's host is
+    # not modelled, so its accelerator runs at the design's clock. Below the SoC's limit
+    # the two are the same.
+    assert xh.soc_mhz < 100 and sa.soc_mhz == 100 and sa.throughput > xh.throughput
+    below = float(int(xh.soc_limit_mhz) - 1)
+    slow = wl, XHEEP.with_(freq_mhz=below), STANDALONE.with_(freq_mhz=below)
+    assert evaluate(slow[0], slow[1]).throughput == evaluate(slow[0], slow[2]).throughput
 
 
 def test_spec_platform():

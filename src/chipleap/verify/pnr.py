@@ -484,6 +484,9 @@ def run_librelane(
     cfg: dict[str, Any],
     tag: str = "chipleap",
     *,
+    to: str | None = None,
+    resume_from: str | None = None,
+    timeout_s: float = 10800,
     late_antenna_repair: bool = False,
 ) -> tuple[dict[str, Any], Path | None]:
     """Write ``cfg`` to ``workdir/config.json`` and run LibreLane on it in ``workdir``.
@@ -494,6 +497,11 @@ def run_librelane(
     (``chipleap.verify.minarea``): the router leaves one now and then, and it would fail
     signoff. The patched layout goes back into LibreLane's database through
     ``OpenROAD.DEFtoODB`` and the rest of the flow runs on it, signoff included.
+
+    With ``to`` (a step before detailed routing) the run stops after that step and
+    returns no metrics; with ``resume_from`` it goes on in the same run from that step,
+    with the state the run's last step left and the configuration given now.
+    ``CHIPLEAP_PNR_TIMEOUT`` (seconds) bounds the run, ``timeout_s`` when it is unset.
 
     With ``late_antenna_repair``, antennas are repaired again after the timing repair
     (``with_late_antenna_repair``). The accelerator, an RTL project and a chip ask for it
@@ -513,27 +521,40 @@ def run_librelane(
         cfg = with_late_antenna_repair(cfg)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
     base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", tag]
-    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    first = ["--from", resume_from] if resume_from else ["--overwrite"]
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", timeout_s))
     start = time.monotonic()
+    run = workdir / "runs" / tag
+    if to is not None:
+        log = workdir / f"librelane-{_step_dir(to)}.log"
+        code = _librelane(
+            [*base, *first, "--to", to, "config.json"], workdir, log, limit, limit, env
+        )
+        if code != 0 or step_state(run, to) is None:
+            raise PnrError(f"LibreLane stopped before {to} (exit {code}):\n{_tail(log)}")
+        return {}, None
     route_log = workdir / "librelane-route.log"
     code = _librelane(
-        [*base, "--overwrite", "--to", DETAILED_ROUTING, "config.json"],
+        [*base, *first, "--to", DETAILED_ROUTING, "config.json"],
         workdir,
         route_log,
         limit,
         limit,
         env,
     )
-    run = workdir / "runs" / tag
     try:
         librelane_ran(run, pdk_root)
     except ValueError as exc:
         raise PnrError(str(exc)) from None
     routed = step_state(run, DETAILED_ROUTING)
     if routed is None:
-        raise PnrError(
-            f"LibreLane did not finish detailed routing (exit {code}):\n{_tail(route_log)}"
+        stopped = last_step(run)
+        where = (
+            f"stopped in {stopped}, before detailed routing finished"
+            if stopped
+            else "did not finish detailed routing"
         )
+        raise PnrError(f"LibreLane {where} (exit {code}):\n{_tail(route_log)}")
     rest, state_in = patch_min_area(workdir, run, routed, cfg)
     log = workdir / "librelane.log"
     args = [*base, "--from", rest]
@@ -562,9 +583,26 @@ def _librelane(
         raise PnrError(_timed_out(exc, log)) from None
 
 
+def _step_dir(step_id: str) -> str:
+    return step_id.replace(".", "-").lower()
+
+
+_RUNNING_RE = re.compile(r"^Running '([^']+)' at ", re.MULTILINE)
+
+
+def last_step(run: Path) -> str:
+    """The step LibreLane started last in ``run``, from its ``flow.log``, which every
+    invocation in the run appends to; empty when the log names none."""
+    try:
+        found = _RUNNING_RE.findall((run / "flow.log").read_text(errors="replace"))
+    except OSError:
+        return ""
+    return found[-1] if found else ""
+
+
 def step_state(run: Path, step_id: str) -> Path | None:
     """The state a step of the run left, by its directory (``45-openroad-detailedrouting``)."""
-    name = step_id.replace(".", "-").lower()
+    name = _step_dir(step_id)
     dirs = sorted(run.glob(f"*-{name}"), key=lambda p: int(p.name.split("-")[0]))
     state = dirs[-1] / "state_out.json" if dirs else None
     return state if state is not None and state.is_file() else None
@@ -682,7 +720,8 @@ MACRO_WIRE_UM = 300
 # SmolLM2 accelerator at 100 MHz the repair left hold at +0.20 ns by its estimate, and
 # detailed routing took two macros' A_REN to -0.059 ns at the fast corner. With 0.15 ns
 # hold closed at +0.109 ns with 62 more hold cells (3397), and setup at the slow corner
-# kept +0.155 ns.
+# kept +0.155 ns. With 0.10 the same two pins stayed at -0.058 ns, and 0.20 broke setup
+# (-0.164 ns): a point tuned on that design at 100 MHz, not a general constant.
 MACRO_HOLD_MARGIN_NS = 0.15
 MACRO_REPAIR = {
     "RUN_POST_GRT_DESIGN_REPAIR": True,

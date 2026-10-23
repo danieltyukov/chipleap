@@ -8,7 +8,15 @@ from chipleap import __version__
 from chipleap.explore.engine import Candidate, ExploreResult, Step
 from chipleap.model.bounds import Requirements
 from chipleap.model.evaluate import Evaluation
-from chipleap.report.text import OP_HEADERS, headline, ip_note, md_table, num, op_rows
+from chipleap.report.text import (
+    OP_HEADERS,
+    clock_note,
+    headline,
+    ip_note,
+    md_table,
+    num,
+    op_rows,
+)
 
 
 def evaluation_dict(ev: Evaluation, ops: bool = True) -> dict[str, Any]:
@@ -19,6 +27,12 @@ def evaluation_dict(ev: Evaluation, ops: bool = True) -> dict[str, Any]:
         "unit": ev.workload.unit,
         "feasible": ev.feasible,
         "metrics": {k: round(v, 6) for k, v in ev.metrics().items()},
+        "clock_mhz": {
+            "design": ev.design.freq_mhz,
+            "soc": round(ev.soc_mhz, 2),
+            "soc_limit": round(ev.soc_limit_mhz, 2) if ev.soc_limit_mhz else None,
+            "accelerator_limit": round(ev.accel_limit_mhz, 2) if ev.accel_limit_mhz else None,
+        },
         "bottleneck": ev.bound,
         "time_share": {k: round(v, 4) for k, v in ev.bound_share().items()},
         "area_mm2": {k: round(v, 5) for k, v in ev.area_mm2.items()},
@@ -126,7 +140,7 @@ def explore_markdown(r: ExploreResult) -> str:
         "",
         f"Recommended: **{b.design.summary()}**, weights {b.point.weights}.",
         "",
-        f"{headline(ev)}. Main bottleneck: {ev.bound}.",
+        f"{headline(ev)}. Main bottleneck: {ev.bound}. Clock: {clock_note(ev)}.",
         "",
         *([ip_note(ev), ""] if ip_note(ev) else []),
         "Meets every target and budget in the spec."

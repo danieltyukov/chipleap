@@ -1,8 +1,10 @@
 """X-HEEP configuration for a design point, in X-HEEP's Python configuration format.
 
 The output follows ``configs/general.py`` in the X-HEEP repository: the CPU, bus and RAM
-banks come from the design, everything else (peripherals, interrupts, address map) is
-X-HEEP's default. ``chipleap verify --xheep DIR`` loads the file with X-HEEP's own
+banks come from the design; the peripherals are X-HEEP's default without those nothing in
+ChipLeap's model uses (``REMOVED``), and the DMA has the one master port the model's
+4 bytes per cycle needs. The interrupts, address map and pads (``configs/pad_cfg.py``)
+are X-HEEP's default. ``chipleap verify --xheep DIR`` loads the file with X-HEEP's own
 ``load_config`` and runs its ``build()`` and ``validate()`` checks.
 """
 
@@ -16,6 +18,13 @@ from chipleap.hw.design import Design
 EXT_DEFAULT = (0xC0000000, 0x40000000)
 EXT_LARGE = (0x80000000, 0x80000000)
 DEFAULT_CODE_BYTES = 0xE800  # X-HEEP's default code section, enough for FreeRTOS
+
+
+# X-HEEP's user peripherals ChipLeap leaves out: no part of the model uses them, and the
+# SPI hosts are most of X-HEEP's logic (each about 62 kGE on IHP SG13G2, the I2C 24 kGE).
+# X-HEEP's pads keep their pins, which its MCU template wires whatever it has; the SoC's
+# top ties them off (``chipleap.gen.soc.ABSENT_PINS``).
+REMOVED = ("SPI_host", "I2C", "SPI2", "I2S")
 
 
 def code_section_bytes(d: Design) -> int:
@@ -70,12 +79,8 @@ def xheep_config(d: Design, ext_bytes: float = 0.0, spec_name: str = "") -> str:
         ")",
         "from peripherals.user_peripherals import (",
         "    RV_plic,",
-        "    SPI_host,",
         "    GPIO,",
-        "    I2C,",
         "    RV_timer,",
-        "    SPI2,",
-        "    I2S,",
         "    UART,",
         ")",
         "from linker_script.linker_script import LinkerScript",
@@ -119,8 +124,10 @@ def xheep_config(d: Design, ext_bytes: float = 0.0, spec_name: str = "") -> str:
     base.add_peripheral(Bootrom(0x00010000))
     base.add_peripheral(SPI_flash(0x00020000, 0x00008000))
     base.add_peripheral(W25Q128JW_Controller(0x00029000, 0x00007000, cache="{flash_cache}"))
+    # One master port: the model's DMA moves 4 bytes per cycle. Two channels, so a transfer
+    # in and one out can be queued.
     base.add_peripheral(
-        DMA(address=0x30000, length=0x10000, num_channels=4, num_master_ports=2,
+        DMA(address=0x30000, length=0x10000, num_channels=2, num_master_ports=1,
             num_channels_per_master_port=2)
     )
     base.add_peripheral(Power_manager(0x00040000))
@@ -130,13 +137,10 @@ def xheep_config(d: Design, ext_bytes: float = 0.0, spec_name: str = "") -> str:
     base.add_peripheral(Ext_peripheral(0x00070000))
     base.add_peripheral(Pad_control(0x00080000))
     base.add_peripheral(GPIO_ao(0x00090000))
+    # X-HEEP's SPI host, I2C, SPI2 and I2S are left out; the others keep their addresses.
     user.add_peripheral(RV_plic(0x00000000))
-    user.add_peripheral(SPI_host(0x00010000))
     user.add_peripheral(GPIO(0x00020000))
-    user.add_peripheral(I2C(0x00030000))
     user.add_peripheral(RV_timer(0x00040000))
-    user.add_peripheral(SPI2(0x00050000))
-    user.add_peripheral(I2S(0x00070000))
     user.add_peripheral(UART(0x00080000))
     system.add_peripheral_domain(base)
     system.add_peripheral_domain(user)

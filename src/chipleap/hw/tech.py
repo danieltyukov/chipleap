@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -157,6 +158,43 @@ def accel_signoff_mhz(
     return 1000.0 / period
 
 
+# X-HEEP's SoC on SG13G2 (``chipleap verify --steps soc``) does in one cycle what the
+# accelerator alone never does, across a die of millimetres:
+# - it reads a bank: the bank's macro puts the word out a clock-to-output after the clock
+#   edge, and the crossbar takes it to the CPU's load path or the accelerator's buffer;
+# - its bus grants a master in the cycle it asks: the CPU's request leaves its decoder and
+#   load-store unit, passes the crossbar's arbiter, and the grant it leaves another master
+#   (the accelerator's write port) ends in that master's registers.
+# Those paths set the SoC's clock, whatever the accelerator meets on its own. They are
+# measured after detailed routing and extraction, at the slow corner with the 5 % derate,
+# on the SmolLM2 SoC (cv32e20, one-to-many bus, one 32 KiB bank of eight 1024 x 32 macros)
+# laid out at SOC_EVIDENCE_MHZ (docs/model.md, "The SoC's clock"): the period the slowest
+# path from a bank needs, without its macro's read time (SOC_READ_PATH_NS), and the
+# period the slowest other path needs (SOC_BUS_PATH_NS). The model takes the read time of
+# the macro that holds each of the design's banks, as the accelerator's does
+# (chipleap.macro.sram.IHP_1P_READ_NS: the 1024 x 32 for banks of 4 KiB and more, the
+# 256 x 32 and 512 x 32 for 1 and 2 KiB).
+# The estimate after global routing is no basis: extraction after routing put 14 to 20 %
+# more capacitance on these wires, and at 50 MHz the slow corner went from +0.54 ns after
+# global routing to -3.63 ns after routing. The evidence layout met 36 MHz with +0.627 ns
+# at the slow corner; its slowest path, cve2 into another subsystem's registers, sets the
+# limit (scripts/fit_soc_clock.py), and its slowest bank read needs 25.87 ns.
+SOC_EVIDENCE_MHZ = 36.0
+SOC_READ_PATH_NS = 18.63
+SOC_BUS_PATH_NS = 27.15
+
+
+def soc_signoff_mhz(bank_cells: Iterable[str]) -> float:
+    """The clock X-HEEP's SoC meets on SG13G2 at the slow corner, with its banks in the
+    macros ``bank_cells``: the slower of a bank's read (the slowest macro's read time and
+    the measured rest, ``SOC_READ_PATH_NS``) and the bus's other paths
+    (``SOC_BUS_PATH_NS``)."""
+    from chipleap.macro.sram import IHP_1P_READ_NS
+
+    read = max(IHP_1P_READ_NS[c] for c in bank_cells)
+    return 1000.0 / max(read + SOC_READ_PATH_NS, SOC_BUS_PATH_NS)
+
+
 def accel_logic_kge(dataflow: str, rows: int, cols: int, ports: int) -> float:
     """Logic of the generated accelerator, without its activation and weight buffers.
 
@@ -200,6 +238,8 @@ class Technology:
     # The accelerator's clock is capped by its measured slow-corner timing (accel_signoff_mhz),
     # not only by max_freq_mhz. True for the node the timing model was measured on.
     accel_timing: bool = False
+    # X-HEEP's SoC clock is capped by its measured slow-corner timing (soc_signoff_mhz).
+    soc_timing: bool = False
     note: str = ""
     # Files the synthesis and layout backends use, for technologies added with
     # ``chipleap tech add``. Paths are on ``host`` when it is set (a design server), so a
@@ -289,6 +329,7 @@ TECHNOLOGIES: dict[str, Technology] = {
             max_io_mts=155,
             measured=True,
             accel_timing=True,
+            soc_timing=True,
             note=(
                 "Gate, flop and SRAM areas and SRAM energies from the IHP SG13G2 liberty "
                 "files; MAC areas from Yosys synthesis; logic energy scaled from Horowitz 2014."
