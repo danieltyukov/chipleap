@@ -55,8 +55,6 @@ XHEEP_BLOCK_KGE = {
     "i2s": 8.22,
     "pdm2pcm": 0.0,
 }
-# The flash controller's cache, which X-HEEP has on the NtoM bus only.
-XHEEP_FLASH_CACHE_KGE = 0.0
 # The DMA: a + b per channel + c per master port.
 XHEEP_DMA_KGE = (1.09, 17.0, 0.0)
 # The user domain's address decoder and register demultiplexer: a + b per peripheral.
@@ -604,8 +602,6 @@ def xheep_parts_kge(d: Design) -> dict[str, float]:
     peripherals the design has with the user domain's bus that reaches them."""
     p = d.peripherals
     parts = dict(XHEEP_FIXED_KGE)
-    if d.bus == "NtoM":
-        parts["flash SPI host"] += XHEEP_FLASH_CACHE_KGE
     a, per_ch, per_port = XHEEP_DMA_KGE
     parts["DMA"] = a + per_ch * p.dma_channels + per_port * p.dma_ports
     parts["memory subsystem"] = XHEEP_BANK_KGE * (d.banks + d.il_banks)

@@ -64,3 +64,18 @@ def test_xheep_renders_the_peripherals_a_spec_asks_for(tmp_path, peripherals):
     assert r.ok, r.log
     mcu = (tmp_path / "out/hw/core-v-mini-mcu/core_v_mini_mcu.sv").read_text()
     assert ("input logic spi_slave_sck_i" in mcu) == peripherals.spi_slave
+
+
+def test_the_flash_controller_has_no_cache_on_the_ntom_bus(tmp_path):
+    """On NtoM X-HEEP may give the flash controller a 16 KiB cache, an SRAM of its own
+    through ``sram_wrapper`` that the SoC's layout has no macros for; ChipLeap leaves it
+    out on both buses."""
+    design = Design(bus="NtoM", banks=2, accel=Accel("gemv", 1, 8, 8, ports=1))
+    cfg = tmp_path / "cfg.py"
+    cfg.write_text(xheep_config(design))
+    checkout = xheep.find_checkout()
+    assert checkout is not None
+    r = xheep.render(cfg, checkout, keep=tmp_path / "out")
+    assert r.ok, r.log
+    ao = (tmp_path / "out/hw/core-v-mini-mcu/ao_peripheral_subsystem.sv").read_text()
+    assert ".CACHE_EN(0)" in ao
