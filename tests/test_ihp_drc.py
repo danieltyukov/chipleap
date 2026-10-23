@@ -5,6 +5,7 @@ that must finish to count."""
 from __future__ import annotations
 
 import os
+import struct
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -313,3 +314,117 @@ def test_signoff_needs_the_deck(tmp_path, monkeypatch):
         P.with_ihp_drc(ROUTED, None, "top", tmp_path, HELD)
     with pytest.raises(P.PnrError, match="left no GDS"):
         P.with_ihp_drc(replace(ROUTED, gds=None), tmp_path, "top", tmp_path, HELD)
+
+
+# The PDK macros' markers in the checked GDS: cells it renames, and a report in the top cell.
+
+
+def _sref(cell: str, x: int, y: int, angle: float = 0.0) -> bytes:
+    from test_chip_macros import name, real8, record
+
+    out = record(0x0A, 0) + record(0x12, 6, name(cell))
+    if angle:
+        out += record(0x1A, 1, b"\x00\x00") + record(0x1C, 5, real8(angle))
+    return out + record(0x10, 3, struct.pack(">2i", x, y)) + record(0x11, 0)
+
+
+def _layout() -> bytes:
+    """A top placing macro M twice (at (100, 50) um as drawn, and at (300, 0) um turned by
+    90 degrees) and a cell of its own; M's driver is renamed EA_DRV, and a cell M places
+    is placed by the top's own cell too."""
+    from test_chip_macros import box, gds
+
+    return gds(
+        {
+            "EA_DRV": box(0, 0, 10, 10),
+            "M": _sref("EA_DRV", 0, 0) + _sref("shared", 0, 0),
+            "own": _sref("shared", 0, 0),
+            "shared": box(0, 0, 5, 5),
+            "top": _sref("M", 100_000, 50_000)
+            + _sref("M", 300_000, 0, angle=90.0)
+            + _sref("own", 0, 0),
+        }
+    )
+
+
+def test_the_gds_names_the_cells_only_the_macros_place_and_where_each_macro_is():
+    from chipleap.verify.drc import macro_layout
+
+    found = macro_layout(_layout(), "top", {"M": (20.0, 10.0)})
+    assert found.cells == {"M": ("M",), "EA_DRV": ("M",)}
+    assert found.outlines == [
+        ("M", pytest.approx((100.0, 50.0, 120.0, 60.0))),
+        ("M", pytest.approx((290.0, 0.0, 300.0, 20.0))),
+    ]
+
+
+def _items(path: Path, items: list[tuple[str, str, str]]) -> Path:
+    path.write_text(
+        "<report-database><items>"
+        + "".join(
+            f"<item><category>{rule}</category><cell>{cell}</cell><values>"
+            f"<value>{shape}</value></values></item>"
+            for rule, cell, shape in items
+        )
+        + "</items></report-database>"
+    )
+    return path
+
+
+def test_off_grid_pin_markers_inside_a_placed_macro_are_set_apart_wherever_reported(tmp_path):
+    from chipleap.verify.drc import DrcResult, macro_layout, read_lyrdb
+
+    point = "edge-pair: ({x},{y};{x},{y})/({x},{y};{x},{y})"
+    report = _items(
+        tmp_path / "r.lyrdb",
+        [
+            # Reported in the top cell, as points: inside either placed M, and outside both.
+            ("metal1_pin_Offgrid", "top", point.format(x=110.001, y=55.0)),
+            ("metal1_pin_Offgrid", "top", point.format(x=295.001, y=19.0)),
+            ("metal1_pin_Offgrid", "top", point.format(x=150.001, y=55.0)),
+            # Hierarchical, in the renamed driver and in the layout's own cell.
+            ("metal1_pin_Offgrid", "EA_DRV:r0", "box: (1,1;2,2)"),
+            ("metal1_pin_Offgrid", "shared", "box: (1,1;2,2)"),
+            # Another rule inside a macro still counts.
+            ("M1.b", "top", point.format(x=110.0, y=55.0)),
+        ],
+    )
+    found = macro_layout(_layout(), "top", {"M": (20.0, 10.0)})
+    r = DrcResult()
+    read_lyrdb(report, r, found.cells, found.outlines, "top")
+    assert r.violations == {"metal1_pin_Offgrid": 2, "M1.b": 1}
+    assert r.pin_markers == {("metal1_pin_Offgrid", "M"): 2, ("metal1_pin_Offgrid", "EA_DRV"): 1}
+    # Without the GDS, only the PDK's own names are known.
+    plain = DrcResult()
+    read_lyrdb(report, plain, {"DRV": ("M",)})
+    assert plain.markers == 0 and plain.total == 6
+
+
+def test_the_step_reads_the_gds_for_markers_it_cannot_place_by_name(tmp_path, monkeypatch):
+    from chipleap.macro import sram
+
+    monkeypatch.setattr(antenna, "unavailable", lambda pdk: "")
+    monkeypatch.setenv("LIBRELANE_MAX_CORES", "2")
+    pdk = _pdk(tmp_path)
+    gds = tmp_path / "layout.gds"
+    gds.write_bytes(_layout())
+    monkeypatch.setattr(sram, "catalog", lambda p: [sram.Sram("M", 256, 64, 20.0, 10.0, True)])
+
+    def fake(pdk, out_dir, inputs, decks, cmds, timeout):
+        _items(
+            out_dir / "layout_top_full.lyrdb",
+            [
+                (
+                    "metal1_pin_Offgrid",
+                    "top",
+                    "edge-pair: (110.001,55;110.001,55)/(110.001,55;110.001,55)",
+                )
+            ],
+        )
+        return {P.DRC_MAIN: (1, "")}
+
+    monkeypatch.setattr(chip_run, "ihp_runs", fake)
+    r = P.with_ihp_drc(replace(ROUTED, gds=gds), pdk, "top", tmp_path, {"DRV": ("M",)})
+    assert r.clean and r.pin_markers == [
+        {"rule": "metal1_pin_Offgrid", "cell": "M", "macros": ["M"], "count": 1}
+    ]

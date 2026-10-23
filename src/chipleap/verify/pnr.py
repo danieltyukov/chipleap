@@ -35,9 +35,11 @@ from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
 from chipleap.verify import antenna, launch, maximal, minarea
 from chipleap.verify.drc import (
+    PIN_OFFGRID_RE,
     DrcReportError,
     DrcResult,
     describe_markers,
+    macro_layout,
     pdk_cells,
     read_lyrdb,
 )
@@ -432,7 +434,24 @@ def ihp_drc(
         raise PnrError(f"IHP's DRC exited {code} with {result.total} violations in its report")
     for name, text in zip(names, split or (), strict=True):
         result.add(_maximal_part(out, top, name, text, runs[name], held))
-    return result
+    if not any(PIN_OFFGRID_RE.fullmatch(rule) for rule in result.violations):
+        return result
+    # Off-grid pin markers not in a cell of the PDK's macros as the PDK names them: find
+    # the macros' cells and outlines in the GDS itself (``chipleap.verify.drc``).
+    macros = {m for ms in held.values() for m in ms}
+    sizes = {s.cell: (s.width_um, s.height_um) for s in sram.catalog(pdk) if s.cell in macros}
+    try:
+        found = macro_layout(gds.read_bytes(), top, sizes)
+    except (layer.MacroImportError, OSError) as exc:
+        raise PnrError(f"IHP's DRC: the GDS's macros: {exc}") from None
+    every = {**held, **found.cells}
+    again = DrcResult()
+    for f in [report, *(out / f"layout_{top}_{n}.lyrdb" for n in names)]:
+        try:
+            read_lyrdb(f, again, every, found.outlines, top)
+        except (DrcReportError, OSError) as exc:
+            raise PnrError(f"IHP's DRC report: {exc}") from None
+    return again
 
 
 def _drc_report(report: Path, held: Mapping[str, tuple[str, ...]]) -> DrcResult:
