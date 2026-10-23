@@ -134,6 +134,7 @@ TEMPLATE_KEYS = {
     "RUN_POST_GRT_DESIGN_REPAIR": "bool",
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": "number",
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": "number",
+    "IO_EXCLUDE_PIN_REGION": "text",
     # Every project's layout (chipleap.verify.pnr.port_diodes).
     "DIODE_ON_PORTS": "text",
     "DIODE_CELL": "text",
