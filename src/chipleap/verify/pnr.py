@@ -782,9 +782,8 @@ def run_librelane(
 
     With ``late_antenna_repair``, antennas are repaired again after the timing repair
     (``with_late_antenna_repair``). The accelerator, an RTL project and a chip ask for it
-    (an ECO adds it to its own step list). The SoC step does not yet: the runs its
-    results stand on were routed without it, and it turns it on once a SoC run with it
-    has been checked."""
+    (an ECO adds it to its own step list), and the SoC step from LibreLane 3.0.14 on; on
+    3.0.0.dev44 the SoC keeps the flow #20's evidence was routed with."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
