@@ -37,7 +37,7 @@ sys.path.insert(0, "util/xheep_gen")
 import load_config
 cfg = sys.argv[1]
 x = load_config.load_cfg_file(PurePath(cfg))
-pads = load_config.load_pad_cfg(PurePath("configs/pad_cfg.py"), x)
+pads = load_config.load_pad_cfg(PurePath(sys.argv[2]), x)
 x.set_padring(pads)
 x.build()
 x.validate()
@@ -101,9 +101,20 @@ def _python() -> str:
     return given if given and os.environ.get("CHIPLEAP_XHEEP_PYTHON") else sys.executable
 
 
-def validate(config: Path, checkout: Path) -> XheepResult:
+# X-HEEP's own pad configuration, relative to its checkout, for a design that has no
+# other (``chipleap.gen.xheep.pad_config``).
+DEFAULT_PADS = "configs/pad_cfg.py"
+
+
+def _pads(pads: Path | None) -> str:
+    return str(pads.resolve()) if pads is not None else DEFAULT_PADS
+
+
+def validate(config: Path, checkout: Path, pads: Path | None = None) -> XheepResult:
+    """X-HEEP's ``load_config``, ``build()`` and ``validate()`` on ``config`` with the pad
+    configuration ``pads`` (X-HEEP's default without one)."""
     out = subprocess.run(
-        [_python(), "-c", _VALIDATE, str(config.resolve())],
+        [_python(), "-c", _VALIDATE, str(config.resolve()), _pads(pads)],
         cwd=checkout,
         env=clean_env(),
         capture_output=True,
@@ -121,8 +132,11 @@ def validate(config: Path, checkout: Path) -> XheepResult:
     return XheepResult(True, "validate", json.loads(line), log=out.stdout)
 
 
-def render(config: Path, checkout: Path, keep: Path | None = None) -> XheepResult:
-    """Render X-HEEP's templates for ``config`` into a scratch copy."""
+def render(
+    config: Path, checkout: Path, keep: Path | None = None, pads: Path | None = None
+) -> XheepResult:
+    """Render X-HEEP's templates for ``config`` and the pad configuration ``pads`` (X-HEEP's
+    default without one) into a scratch copy."""
     work = Path(tempfile.mkdtemp(prefix="chipleap-xheep-")) if keep is None else keep
     templates = []
     for top in ("hw", "sw", "tb"):
@@ -140,7 +154,7 @@ def render(config: Path, checkout: Path, keep: Path | None = None) -> XheepResul
         "--config",
         str(config.resolve()),
         "--pads_cfg",
-        "configs/pad_cfg.py",
+        _pads(pads),
         "--outtpl",
         " ".join(templates),
     ]

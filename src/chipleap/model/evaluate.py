@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from functools import lru_cache
 
 from chipleap.hw.cpu import CPUModel, get_cpu
-from chipleap.hw.design import Accel, Design
+from chipleap.hw.design import Accel, Design, Peripherals
 from chipleap.hw.memory import MEMORIES, ExternalMemory, get_memory
 from chipleap.hw.tech import (
     ACCEL_CDC_KGE,
@@ -41,16 +41,63 @@ from chipleap.model.accel import (
 )
 from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workload
 
-# X-HEEP's logic outside the CPU, its bus, the memories and the accelerator, as ChipLeap
-# configures it (chipleap.gen.xheep): the debug module with its SPI slave, the DMA, the
-# flash's SPI host and controller, boot ROM, power manager, timers, interrupt controllers,
-# GPIO, UART and pad control. Measured on the SmolLM2 SoC with Yosys and ABC against
-# IHP SG13G2's typical liberty, the hierarchy kept: 208.4 kGE of X-HEEP's 288.0, besides
-# the CPU (33.9), the accelerator (39.6) and the one-to-many bus (6.1). With X-HEEP's
-# default peripherals (two more SPI hosts, I2C, I2S, a DMA with two master ports) it was
-# 401.8 kGE.
-XHEEP_BASE_KGE = 208.4
-ONE_TO_M_BUS_KGE = 6.1
+# X-HEEP's logic outside the CPU, the memories and the accelerator, per block, in kGE on
+# IHP SG13G2: Yosys and ABC against its typical liberty with the hierarchy kept, on the
+# SmolLM2 SoC with X-HEEP configured six ways, and checked on three configurations the fit
+# never saw (scripts/calibrate_xheep.py, docs/model.md). A hierarchical synthesis optimizes
+# no logic across a module's boundary, so each block's area is that of its instances'
+# subtree, the same in every configuration that has it (within 0.8 %). The prices
+# reproduce the SmolLM2 SoC's measured total exactly, since its layout and its clock were
+# fitted with it: what it has is priced from it, the lines below go through it, and a
+# block it lacks is the mean of the configurations that have it.
+#
+# Every X-HEEP ChipLeap configures has these: X-HEEP's SPI host for the flash with its
+# controller, the debug module with its JTAG port, and the always-on domain's other blocks
+# (SoC control, boot ROM, power manager, timers 0 and 1, fast interrupt controller and the
+# domain's bus) with the user domain's bus bridge.
+XHEEP_FIXED_KGE = {
+    "flash SPI host": 68.34,
+    "debug module": 13.61,
+    "always-on": 6.17 + 4.94 + 11.54,
+}
+# The blocks the design's peripherals choose (chipleap.hw.design.Peripherals).
+XHEEP_BLOCK_KGE = {
+    "spi_slave": 18.98,  # the debug module's SPI slave
+    "ao_gpio": 10.17,  # always-on GPIO, pins 0 to 7
+    "user_gpio": 10.17,  # GPIO, pins 8 to 31 (the same 32-pin block)
+    "user_timer": 6.18,  # timers 2 and 3
+    "plic": 11.17,
+    "uart": 9.75,
+    "spi_host": 61.71,
+    "spi2": 61.75,
+    "i2c": 24.47,
+    "i2s": 8.23,
+    "pdm2pcm": 25.90,
+}
+# The DMA: a + b per channel + c per master port. The same channels on more ports measure
+# slightly smaller (four channels: 71.00 kGE on one port, 70.41 on two).
+XHEEP_DMA_KGE = (-0.129, 17.962, -0.694)
+# The user domain's address decoder and register demultiplexer: a + b per peripheral.
+XHEEP_PERIPH_BUS_KGE = (0.259, 0.376)
+# The memory subsystem's logic per bank (its clock gates and request muxes).
+XHEEP_BANK_KGE = 0.536
+# The one-to-many bus: a + b per master. The NtoM crossbar: per master and slave pair.
+ONE_TO_M_BUS_KGE = (1.094, 0.632)
+NTOM_PAIR_KGE = 0.493
+# What each block is called in a report.
+XHEEP_LABELS = {
+    "spi_slave": "debug SPI slave",
+    "ao_gpio": "GPIO 0-7",
+    "user_gpio": "GPIO 8-31",
+    "user_timer": "timers 2-3",
+    "plic": "PLIC",
+    "uart": "UART",
+    "spi_host": "SPI host",
+    "spi2": "SPI2",
+    "i2c": "I2C",
+    "i2s": "I2S",
+    "pdm2pcm": "PDM2PCM",
+}
 # Area entries that make up the generated accelerator IP (see Evaluation.ip_area).
 IP_AREA_KEYS = ("accelerator logic", "accelerator buffers", "axi adapter")
 # Firmware code, data and stack kept in the first banks.
@@ -112,6 +159,8 @@ class Evaluation:
     clock_mhz: float = 0.0
     soc_limit_mhz: float | None = None  # what X-HEEP's SoC meets, where it was measured
     accel_limit_mhz: float | None = None  # what the accelerator meets on its own
+    # area_mm2["soc logic"] block by block: X-HEEP's peripherals, DMA and bus.
+    soc_logic_mm2: dict[str, float] = field(default_factory=dict)
     # The accelerator's own clock (Design.accel_mhz), behind its crossings; 0 when it runs
     # on the SoC's.
     accel_clock_mhz: float = 0.0
@@ -559,15 +608,87 @@ def _ihp_bank_mm2(kib: float) -> float:
     return choose(IHP_1P, words, 32).area_um2 / 1e6 if words > 0 else 0.0
 
 
+def xheep_user_peripherals(p: Peripherals) -> list[str]:
+    """The blocks of X-HEEP's user domain the peripherals ``p`` put there."""
+    return [
+        name
+        for name, on in (
+            ("plic", p.plic),
+            ("spi_host", p.spi_hosts >= 1),
+            ("user_gpio", p.user_gpio),
+            ("i2c", p.i2c),
+            ("user_timer", p.timers > 2),
+            ("spi2", p.spi_hosts >= 2),
+            ("pdm2pcm", p.pdm2pcm),
+            ("i2s", p.i2s),
+            ("uart", p.uart),
+        )
+        if on
+    ]
+
+
+def xheep_parts_kge(d: Design) -> dict[str, float]:
+    """X-HEEP's logic outside the CPU, the bus and the memories, block by block, in kGE on
+    IHP SG13G2 (``XHEEP_FIXED_KGE``, ``XHEEP_BLOCK_KGE``): what every X-HEEP has, the DMA
+    for its channels and master ports, the memory subsystem for its banks, and the
+    peripherals the design has with the user domain's bus that reaches them."""
+    p = d.peripherals
+    parts = dict(XHEEP_FIXED_KGE)
+    a, per_ch, per_port = XHEEP_DMA_KGE
+    parts["DMA"] = a + per_ch * p.dma_channels + per_port * p.dma_ports
+    parts["memory subsystem"] = XHEEP_BANK_KGE * (d.banks + d.il_banks)
+    chosen = xheep_user_peripherals(p)
+    if p.ao_gpio:
+        chosen.insert(0, "ao_gpio")
+    if p.spi_slave:
+        chosen.insert(0, "spi_slave")
+    for name in chosen:
+        parts[XHEEP_LABELS[name]] = XHEEP_BLOCK_KGE[name]
+    b0, b1 = XHEEP_PERIPH_BUS_KGE
+    parts["peripheral bus"] = b0 + b1 * len(xheep_user_peripherals(p))
+    return parts
+
+
+def xheep_kge(d: Design) -> float:
+    """X-HEEP's logic outside the CPU, the bus and the memories, in kGE on IHP SG13G2."""
+    return sum(xheep_parts_kge(d).values())
+
+
+def bus_masters(d: Design) -> int:
+    """Masters of X-HEEP's system bus: the CPU's instruction and data ports, the debug
+    module, a read, a write and an address port per DMA master port, and the
+    accelerator's read ports and its write port."""
+    return 3 + 3 * d.peripherals.dma_ports + (d.accel.ports + 1 if d.accel else 0)
+
+
+def bus_slaves(d: Design) -> int:
+    """Slaves of X-HEEP's system bus: its error slave, each bank, the debug module, the two
+    peripheral domains, the flash window and the external slave window."""
+    return d.banks + d.il_banks + 6
+
+
+def bus_kge(d: Design) -> float:
+    """X-HEEP's system bus in kGE on IHP SG13G2 (``ONE_TO_M_BUS_KGE``, ``NTOM_PAIR_KGE``)."""
+    if d.bus == "onetoM":
+        a, per_master = ONE_TO_M_BUS_KGE
+        return a + per_master * bus_masters(d)
+    return NTOM_PAIR_KGE * bus_masters(d) * bus_slaves(d)
+
+
+def soc_logic_mm2(d: Design, tech: Technology) -> dict[str, float]:
+    """X-HEEP's logic besides the CPU block by block, in mm2 at the technology's
+    placement utilisation: what ``area_breakdown`` sums as "soc logic"."""
+    parts = {k: tech.logic_mm2(v) for k, v in xheep_parts_kge(d).items()}
+    parts["bus"] = tech.logic_mm2(bus_kge(d))
+    return parts
+
+
 def area_breakdown(
     d: Design, tech: Technology, cpu: CPUModel, mem: ExternalMemory | None
 ) -> dict[str, float]:
     area: dict[str, float] = {}
     area["cpu"] = tech.logic_mm2(cpu.kge)
-    masters = 4 + 2 + (d.accel.ports + 1 if d.accel else 0)
-    slaves = d.banks + d.il_banks + 6
-    bus_kge = ONE_TO_M_BUS_KGE if d.bus == "onetoM" else 0.6 * masters * slaves
-    area["soc logic"] = tech.logic_mm2(XHEEP_BASE_KGE + bus_kge)
+    area["soc logic"] = tech.logic_mm2(xheep_kge(d) + bus_kge(d))
     area["sram"] = d.banks * bank_mm2(d.bank_kib, tech) + d.il_banks * bank_mm2(d.il_bank_kib, tech)
     if d.accel:
         a = d.accel
@@ -790,5 +911,6 @@ def evaluate(
         clock_mhz=clock,
         soc_limit_mhz=soc_limit,
         accel_limit_mhz=accel_limit,
+        soc_logic_mm2=soc_logic_mm2(design, tech),
         accel_clock_mhz=design.accel_mhz,
     )

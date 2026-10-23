@@ -8,6 +8,7 @@
   report.html|md       explorer report with the agent's decisions (after explore)
   explore.json         machine-readable results and the full decision log
   xheep/<name>.py      X-HEEP configuration (make mcu-gen X_HEEP_CFG=...); xheep only
+  xheep/<name>_pads.py X-HEEP pad configuration, for a design without the debug SPI slave
   rtl/                 accelerator SystemVerilog, the X-HEEP adapter or the AXI4 wrapper,
                        FuseSoC core, register description (reggen hjson)
   sw/chipleap_driver.h firmware driver with the tile planner
@@ -26,7 +27,7 @@ from chipleap import __version__
 from chipleap.explore.engine import Candidate, ExploreResult
 from chipleap.gen.datasheet import datasheet, reggen_hjson
 from chipleap.gen.rtl import write_rtl
-from chipleap.gen.xheep import ext_window, xheep_config
+from chipleap.gen.xheep import ext_window, pad_config, pads_file, xheep_config
 from chipleap.hw.design import Design, DesignError
 from chipleap.model.accel import direct_outstanding
 from chipleap.report.data import explore_dict, explore_markdown
@@ -91,6 +92,8 @@ def _readme(c: Candidate | None, design: Design, spec: Spec | None) -> str:
     )
     if not standalone:
         lines.append(f"| `xheep/{design.name}.py` | X-HEEP configuration |")
+        if pad_config(design) is not None:
+            lines.append(f"| `xheep/{pads_file(design)}` | X-HEEP pad configuration |")
     if design.accel and standalone:
         lines += [
             "| `rtl/` | Accelerator RTL, AXI4 wrapper, FuseSoC core, register hjson |",
@@ -122,7 +125,12 @@ def _readme(c: Candidate | None, design: Design, spec: Spec | None) -> str:
             "In an X-HEEP checkout:",
             "",
             "```sh",
-            f"make mcu-gen X_HEEP_CFG=<path to this bundle>/xheep/{design.name}.py",
+            f"make mcu-gen X_HEEP_CFG=<path to this bundle>/xheep/{design.name}.py"
+            + (
+                f" PADS_CFG=<path to this bundle>/xheep/{pads_file(design)}"
+                if pad_config(design) is not None
+                else ""
+            ),
             "```",
             "",
         ]
@@ -163,6 +171,8 @@ def write_bundle(
         workload = ev.workload.description
     if design.platform != "standalone":
         put(f"xheep/{design.name}.py", xheep_config(design, ext_bytes, spec.name if spec else ""))
+        if (pads := pad_config(design)) is not None:
+            put(f"xheep/{pads_file(design)}", pads)
     put(
         "DATASHEET.md",
         datasheet(

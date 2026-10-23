@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from chipleap.gen.rtl import rtl_params
 from chipleap.gen.soc import ACCEL_CLOCK
-from chipleap.gen.xheep import EXT_LARGE, xheep_config
+from chipleap.gen.xheep import EXT_LARGE, pad_config, pads_file, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import (
     ACCEL_CDC_KGE,
@@ -624,16 +624,21 @@ def check_xheep(bundle: Path, design: Design, checkout: Path | None, fetch: bool
     # checks the configuration ChipLeap generates from design.yaml, never the bundle's own
     # file, which could have come from anywhere. The consistency step reports drift.
     text, same = _regenerated_xheep(bundle, design)
+    pads_text = pad_config(design)
     with tempfile.TemporaryDirectory(prefix="chipleap-xheep-cfg-") as tmp:
         cfg = Path(tmp) / f"{design.name}.py"
         cfg.write_text(text)
-        v = xheep.validate(cfg, co)
+        pads = None
+        if pads_text is not None:
+            pads = Path(tmp) / pads_file(design)
+            pads.write_text(pads_text)
+        v = xheep.validate(cfg, co, pads)
         if not v.ok:
             errors = [ln for ln in v.log.splitlines() if "Error" in ln.split(":")[0]]
             reason = errors[-1].split("ERROR:")[-1].split(":", 1)[-1].strip() if errors else ""
             msg = "X-HEEP rejected the configuration" + (f": {reason}" if reason else "")
             return StepResult("xheep", "fail", msg, {"log": v.log})
-        r = xheep.render(cfg, co)
+        r = xheep.render(cfg, co, pads=pads)
     data = {
         "checkout": str(co),
         "validate": v.summary,

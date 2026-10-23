@@ -302,6 +302,16 @@ def explore_html(r: ExploreResult, cloud: Sequence[Candidate] = ()) -> str:
         (k, v, AREA_COLORS[i % len(AREA_COLORS)])
         for i, (k, v) in enumerate(sorted(ev.area_mm2.items(), key=lambda kv: -kv[1]))
     ]
+    soc_parts = [
+        (k, v, AREA_COLORS[i % len(AREA_COLORS)])
+        for i, (k, v) in enumerate(sorted(ev.soc_logic_mm2.items(), key=lambda kv: -kv[1]))
+    ]
+    soc_bar = (
+        "<p>The SoC's logic besides the CPU, block by block: X-HEEP's peripherals, its DMA "
+        "and its bus.</p>\n" + stacked_bar(soc_parts, unit=" mm2")
+        if soc_parts and b.design.platform == "xheep"
+        else ""
+    )
     energy_parts = [
         (k, v / 1e9, AREA_COLORS[i % len(AREA_COLORS)])
         for i, (k, v) in enumerate(sorted(ev.energy_pj_by.items(), key=lambda kv: -kv[1]))
@@ -355,6 +365,7 @@ out of {r.evaluated} evaluated in {r.seconds:.1f} s. Marker size follows area. G
 <h2>Area and energy</h2>
 <p>Core area, excluding pads.</p>
 {stacked_bar(area_parts, unit=" mm2")}
+{soc_bar}
 <p>Energy per step.</p>
 {stacked_bar(energy_parts, unit=" mJ")}
 <h2>Design</h2>
