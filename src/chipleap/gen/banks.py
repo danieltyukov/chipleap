@@ -28,6 +28,8 @@ TOP = "chipleap_accel_sram"
 
 def unsupported(accel: Accel) -> str | None:
     """Why ``accel``'s buffers cannot be SRAM macros, or None when they can."""
+    if accel.buffers == "flops":
+        return "the design keeps its buffers in flip-flops (accel.buffers: flops)"
     if accel.dataflow != "gemv":
         return f"the {accel.dataflow} dataflow reads its buffers element by element"
     if accel.ports != 1:

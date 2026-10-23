@@ -136,12 +136,12 @@ def test_the_model_times_the_accelerator_at_its_own_clock_and_prices_its_crossin
 
 
 def test_the_accelerators_clock_limit_applies_to_its_own_clock():
-    # A GEMV 1 x 32, whose adder tree closes timing at about 88 MHz.
+    # A GEMV 1 x 32, whose adder tree closes timing at about 87 MHz.
     big = SMOLLM2.with_accel(cols=32)
     limit = _evaluate(big).accel_limit_mhz
     assert limit and 85 < limit < 90
     over = _evaluate(big.with_(accel_mhz=95.0))
-    assert any("closes timing at about 88 MHz" in v for v in over.violations), over.violations
+    assert any("closes timing at about 87 MHz" in v for v in over.violations), over.violations
     # The SoC asks more than the accelerator meets, but the accelerator has its own clock.
     under = _evaluate(big.with_(freq_mhz=95.0, accel_mhz=80.0))
     assert not any("closes timing" in v for v in under.violations), under.violations

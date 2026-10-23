@@ -103,57 +103,62 @@ ACCEL_DELAY_NS: dict[str, float] = {"gemv": 4.35, "ws": 3.77, "os": 3.53}
 ACCEL_DELAY_WIDE_NS = 0.51  # per doubling of GEMV columns beyond eight
 ACCEL_DELAY_PORTS_NS = (3.23, 0.052)  # the port logic: a + b x ports
 FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical corner
-# After placement and routing with LibreLane at the slow corner (1.08 V, 125 C), every
-# design at 100 MHz with 16-word buffers:
+# After placement and routing with LibreLane 3.0.14 at the slow corner (1.08 V, 125 C), every
+# design at 100 MHz with 16-word buffers in flip-flops:
 # - The single-port GEMV 1 x 8, weight-stationary 4 x 4 and output-stationary 4 x 4 designs
-#   met 100 MHz at 9.0 to 9.3 ns. Their worst paths were the GEMV engine's row counter, the
-#   weight-stationary accumulator update, and a port's address step and the output-stationary
-#   operand feed. ACCEL_ROUTED_NS is the worst of them.
-# - A synthesized datapath longer than the GEMV 1 x 8 engine's (a wider adder tree) is scaled
-#   from that period in proportion: ACCEL_SIGNOFF_FACTOR is ACCEL_ROUTED_NS over the GEMV
-#   delay above plus flop overhead.
+#   met 100 MHz at 9.30, 8.91 and 8.55 ns (the output-stationary 4 x 8 at 8.33 ns). The
+#   GEMV engine's worst paths are its reset input into the flip-flops' recovery checks; its
+#   worst path between flip-flops took 9.03 ns. ACCEL_ROUTED_NS is the worst of the three.
+# - A GEMV adder tree wider than eight columns, whose synthesized datapath is longer than the
+#   1 x 8 engine's, routes in proportion to that datapath and its flop overhead: the 1 x 16
+#   engine took 10.20 ns, 1.920 times it, and the 1 x 32 11.53 ns, 1.981 times.
+#   ACCEL_SIGNOFF_FACTOR is the larger. It used to be ACCEL_ROUTED_NS over the GEMV 1 x 8's
+#   datapath; on 3.0.14 that ratio (1.938) would put the 1 x 32 at 88.7 MHz, where it met
+#   86.7.
 # - A GEMV engine slows with its lanes, which make it larger: the 2 x 8 engine with four
-#   ports took 9.63 ns (weight unpacking), and the 4 x 8 one with two 9.69 ns (the dot
-#   product) and, routed again from the same logic, 10.23 ns (the accumulator row select
-#   into the accumulators): routing alone moved it by 0.54 ns. ACCEL_LANE_NS per doubling
-#   of lanes bounds them from above.
-# - More ports make the engine larger and its wires longer: the GEMV 1 x 8 engine took
-#   9.11 ns with one port, 10.09 ns with eight (weight unpacking, then the DMA's setup of
-#   each port's start address at 9.74 ns) and 10.41 ns with sixteen (at 35 % core
-#   utilisation; the activation read address into an operand register). ACCEL_PORT_NS is
-#   the line a + b x ports through one and eight ports; sixteen lie 0.8 ns under it. Each
-#   port has an address generator of its own, so the DMA no longer hands words to the ports
-#   one after another; with that chain the GEMV 2 x 8 engine with four ports took 14.02 ns,
-#   and now 9.63 ns.
+#   ports took 9.60 ns, under the port line below, and the 4 x 8 with two 9.96 ns.
+#   ACCEL_LANE_NS per doubling of lanes bounds the 4 x 8 from above.
+# - More ports make the engine larger and its wires longer. The GEMV 1 x 8 engine took
+#   9.30 ns with one port, 10.82 ns with eight (between flip-flops, through 6.4 ns of
+#   repeaters across the engine and a 0.65 ns hold buffer) and 11.05 ns with sixteen (a read
+#   port's data input into the engine through weak buffers, placed at 35 % core utilisation).
+#   ACCEL_PORT_NS is the line a + b x ports through one and eight ports; sixteen lie 1.5 ns
+#   under it. On 3.0.0.dev44 the engine took 9.11, 10.09 and 10.41 ns, sixteen 0.8 ns under
+#   that flow's line. Each port has an address generator of its own, so the DMA no longer
+#   hands words to the ports one after another; with that chain the GEMV 2 x 8 engine with
+#   four ports took 14.02 ns on 3.0.0.dev44.
 # - The core reads its tile descriptor from a register loaded a cycle ahead, not through a
 #   select by the buffer slot. With the select, the slot's net and its buffer tree led into
 #   the GEMV engine's operand registers and accumulators, and set the period of the 4 x 8
 #   engine with two ports (10.27 ns) and the 1 x 8 with eight (11.18 ns) and sixteen
-#   (11.25 ns).
+#   (11.25 ns) on 3.0.0.dev44.
 # The model is at or above every routed period, so it errs on the safe side.
 # docs/verification.md lists the routed designs.
-ACCEL_ROUTED_NS = 9.33
-ACCEL_SIGNOFF_FACTOR = ACCEL_ROUTED_NS / (ACCEL_DELAY_NS["gemv"] + FLOP_OVERHEAD_NS)
-ACCEL_LANE_NS = 0.46
-ACCEL_PORT_NS = (8.966, 0.1413)
+ACCEL_ROUTED_NS = 9.303
+ACCEL_SIGNOFF_FACTOR = 1.981
+ACCEL_LANE_NS = 0.329
+ACCEL_PORT_NS = (9.087, 0.2169)
 # A GEMV engine whose buffers are IHP's SRAM macros (chipleap.gen.banks, routed with
-# LibreLane at the slow corner, 100 MHz):
+# LibreLane 3.0.14 at the slow corner, 100 MHz):
 # - It registers each bank word in the cycle after its read, so the macro's read time
-#   (chipleap.macro.sram.IHP_1P_READ_NS: 5.0 ns at 256 words, 7.0 to 7.3 ns at 1024, 8.8
+#   (chipleap.macro.sram.IHP_1P_READ_NS: 5.0 to 5.3 ns at 256 words, 7.0 to 7.3 ns at 1024, 8.8
 #   to 9.4 ns at 2048 and more) bounds its period, with what follows the read: the word's
 #   select and weight unpacking into the operand registers, and the wires from the macro
-#   rows. ACCEL_BANK_PATH_NS is the most that took after the liberty's read time: 2.36 ns
-#   in the GEMV 1 x 4 build with 256 x 32 macros, 2.61 ns in the 1 x 8 with 256 x 64,
-#   2.53 ns in the 1 x 8 with 1024 x 64, whose read path (9.81 ns) came within 0.2 ns of
-#   its clock, and 2.64 ns in the 1 x 8 with 2048 x 64, whose read path (8.97 + 2.64 ns)
-#   set its clock at 86.5 MHz.
+#   rows. ACCEL_BANK_PATH_NS is the most that took after the liberty's read time in a
+#   one-lane build whose worst path is the read: 3.80 ns in the GEMV 1 x 4 with 256 x 32
+#   macros, 3.95 ns in the 1 x 8 with 1024 x 64 and 4.03 ns in the 1 x 8 with 2048 x 64,
+#   whose read path (8.99 + 4.03 ns) set its clock at 76.8 MHz. On 3.0.0.dev44 it took 2.36
+#   to 2.64 ns. 3.0.14 applies the PDK's 5 % derate, which dev44 did not, the macro's read
+#   included: in the layouts the read alone took 5.46 ns at 256 words where the liberty has
+#   5.15, and 9.59 ns at 2048 where it has 8.99.
 # - Its logic is spread along the rows of macros, across a die several times the flop
-#   build's, and can route slower than the flop build: the 1 x 4 at 9.31 ns, the 1 x 8 at
-#   9.47 ns and, with 1024-word macros, 9.76 ns in one run and 10.06 ns in another, where
-#   the model has 9.33 ns for each flop build, and the 2 x 8 at 10.07 ns, where it has
-#   9.79 ns. ACCEL_BANK_NS is added to the flop build's period.
-ACCEL_BANK_PATH_NS = 2.65
-ACCEL_BANK_NS = 0.75
+#   build's, and can route slower than the flop build: the 1 x 8 with 256 x 64 macros at
+#   9.85 ns, where the model has 9.30 ns for its flop build, and the 2 x 8 with six
+#   256 x 64 macros at 10.63 ns, on its macros' read (5.48 ns after it, its six macros and
+#   two lanes spreading further than the one-lane builds), where the model has 9.63 ns.
+#   ACCEL_BANK_NS is added to the flop build's period and bounds both.
+ACCEL_BANK_PATH_NS = 4.03
+ACCEL_BANK_NS = 0.998
 
 
 def accel_delay_ns(dataflow: str, cols: int, ports: int) -> float:
@@ -171,8 +176,10 @@ def accel_signoff_mhz(
     """The clock the routed accelerator meets on SG13G2 at the slow corner. ``bank_read_ns``
     is the slowest read of the SRAM macros its buffers are, for a macro-backed GEMV build
     (0 for flop buffers)."""
-    datapath = (accel_delay_ns(dataflow, cols, ports) + FLOP_OVERHEAD_NS) * ACCEL_SIGNOFF_FACTOR
-    datapath = max(ACCEL_ROUTED_NS, datapath)
+    path = accel_delay_ns(dataflow, cols, ports) + FLOP_OVERHEAD_NS
+    datapath = ACCEL_ROUTED_NS
+    if path > ACCEL_DELAY_NS["gemv"] + FLOP_OVERHEAD_NS:
+        datapath = max(datapath, path * ACCEL_SIGNOFF_FACTOR)
     if dataflow == "gemv" and rows > 1:
         datapath += ACCEL_LANE_NS * math.log2(rows)
     a, b = ACCEL_PORT_NS
