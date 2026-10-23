@@ -71,6 +71,11 @@ def assess(spec: Spec, point: Point, ev: Evaluation) -> Assessment:
         violations.append(f"{d.freq_mhz:g} MHz is above the spec limit {spec.max_freq_mhz:g} MHz")
     if point.weights not in spec.allowed_weight_formats():
         violations.append(f"weight format {point.weights} is not allowed by the spec")
+    if d.platform == "xheep":
+        violations += [
+            f"the spec asks for {m}, which the design leaves out"
+            for m in spec.peripherals.missing_from(d.peripherals)
+        ]
 
     misses: list[str] = []
     penalty = 0.0

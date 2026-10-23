@@ -37,6 +37,7 @@ import yaml
 from chipleap.chip import merge
 from chipleap.gen import banks, soc
 from chipleap.gen.rtl import accel_sv
+from chipleap.gen.xheep import absent_pins, pad_config, pads_file
 from chipleap.hw.design import Design
 from chipleap.hw.memory import NONE_KEY
 from chipleap.hw.tech import get_tech
@@ -177,8 +178,9 @@ def _tools_env(fs: Tool, gcc: Tool, tree: Path) -> dict[str, str]:
     return env
 
 
-def render(tree: Path, config: Path, env: dict[str, str]) -> None:
-    """X-HEEP's mcu-gen on its own copy, for ``config``."""
+def render(tree: Path, config: Path, env: dict[str, str], pads: Path | None = None) -> None:
+    """X-HEEP's mcu-gen on its own copy, for ``config`` and the pad configuration ``pads``
+    (X-HEEP's default without one)."""
     _run(
         [
             str(Path(env["PATH"].split(os.pathsep)[0]) / "python"),
@@ -186,7 +188,7 @@ def render(tree: Path, config: Path, env: dict[str, str]) -> None:
             "--config",
             str(config),
             "--pads_cfg",
-            "configs/pad_cfg.py",
+            str(pads) if pads is not None else "configs/pad_cfg.py",
             "--outtpl",
             " ".join(templates(tree)),
         ],
@@ -303,7 +305,10 @@ def generate(
         "chipleap_accel.sv": accel_sv(),
         f"{banks.TOP}.v": banks.top_sv(accel_banks),
         f"{soc.TOP}.sv": soc.top_sv(
-            ports, design.accel.ports, ext_memory=design.ext_mem != NONE_KEY
+            ports,
+            design.accel.ports,
+            ext_memory=design.ext_mem != NONE_KEY,
+            absent=absent_pins(design.peripherals),
         ),
     }
     for name, text in out.items():
@@ -763,8 +768,14 @@ def prepare(
     tree = builddir.work_dir(work, "x-heep", empty=True)
     copy_xheep(checkout, tree)
     cfg = builddir.write_text(work, f"xheep_cfg/{design.name}.py", config_text)
+    pads_text = pad_config(design)
+    pads = (
+        builddir.write_text(work, f"xheep_cfg/{pads_file(design)}", pads_text)
+        if pads_text is not None
+        else None
+    )
     env = _tools_env(fs, gcc, tree)
-    render(tree, cfg, env)
+    render(tree, cfg, env, pads)
     builddir.work_dir(work, "fusesoc", empty=True)
     base, data = edam(work, fs, env)
     files, includes = x_heep_files(data, base, work, design.cpu)

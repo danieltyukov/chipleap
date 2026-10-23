@@ -7,7 +7,7 @@ with a message that says where it is.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +15,13 @@ import yaml
 
 from chipleap.hw.cpu import CPUS
 from chipleap.hw.design import (
+    DMA_PORTS,
+    MAX_DMA_CHANNELS,
     PLATFORMS,
     SPEC_NAME_MAX,
     Design,
     DesignError,
+    Peripherals,
     is_safe_name,
     safe_name,
 )
@@ -57,6 +60,9 @@ class Spec:
     # What gets generated: an X-HEEP SoC, or the accelerator alone as AXI4 IP for any host.
     # The explorer never changes it.
     platform: str = "xheep"
+    # X-HEEP's peripherals the chip needs besides the workload (the ``peripherals``
+    # section), which every design the explorer makes has.
+    peripherals: Peripherals = field(default_factory=Peripherals)
     extra: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
@@ -127,6 +133,10 @@ class Spec:
         out["objective"] = self.objective
         if self.platform != "xheep":
             out["platform"] = self.platform
+        per = asdict(self.peripherals)
+        changed = {k: v for k, v in per.items() if v != asdict(Peripherals())[k]}
+        if changed:
+            out["peripherals"] = changed
         return out
 
 
@@ -150,6 +160,54 @@ def _number(section: dict[str, Any], key: str, where: str) -> float:
     if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
         raise SpecError(f"{where}.{key} must be a positive number")
     return float(v)
+
+
+# The spec's peripherals section: what each key takes. Pins and timers round up to what
+# X-HEEP's blocks give: GPIO in blocks of 8 (always-on) and 24 pins, timers in pairs.
+_FLAGS = ("uart", "i2c", "i2s", "pdm2pcm", "spi_slave")
+_COUNTS = {
+    "gpio": (0, 32),
+    "timers": (0, 4),
+    "spi_hosts": (0, 2),
+    "dma_channels": (1, MAX_DMA_CHANNELS),
+    "dma_ports": (1, max(DMA_PORTS)),
+}
+
+
+def parse_peripherals(sec: Any, where: str = "peripherals") -> Peripherals:
+    """X-HEEP's peripherals a spec asks for; what it does not name keeps its default
+    (``chipleap.hw.design.Peripherals``)."""
+    if sec is None:
+        return Peripherals()
+    if not isinstance(sec, dict):
+        raise SpecError(f"{where} must be a mapping")
+    bad = set(sec) - set(_FLAGS) - set(_COUNTS)
+    if bad:
+        raise SpecError(f"{where}: unknown keys {', '.join(sorted(bad))}")
+    values: dict[str, Any] = {}
+    for key in _FLAGS:
+        if key in sec:
+            if not isinstance(sec[key], bool):
+                raise SpecError(f"{where}.{key} must be true or false")
+            values[key] = sec[key]
+    for key, (lo, hi) in _COUNTS.items():
+        if key in sec:
+            v = sec[key]
+            if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+                raise SpecError(f"{where}.{key} must be a whole number from {lo} to {hi}")
+            values[key] = v
+    if "gpio" in values:
+        values["gpio"] = next(n for n in (0, 8, 24, 32) if n >= values["gpio"])
+    if "timers" in values:
+        values["timers"] = 2 if values["timers"] <= 2 else 4
+    if values.get("dma_ports", 1) not in DMA_PORTS:
+        raise SpecError(f"{where}.dma_ports must be 1, 2 or 4")
+    try:
+        p = Peripherals(**values)
+        p.validate()
+    except DesignError as exc:
+        raise SpecError(f"{where}: {exc}") from exc
+    return p
 
 
 def _name(given: Any, fallback: str) -> str:
@@ -177,6 +235,7 @@ def parse_spec(data: Any, *, name: str = "spec") -> Spec:
         "objective",
         "start",
         "platform",
+        "peripherals",
     }
     unknown = set(data) - known
     if unknown:
@@ -223,12 +282,19 @@ def parse_spec(data: Any, *, name: str = "spec") -> Spec:
     if platform not in PLATFORMS:
         raise SpecError(f"platform must be one of {', '.join(PLATFORMS)}")
 
+    peripherals = parse_peripherals(data.get("peripherals"))
+
     start = None
     if data.get("start") is not None:
+        if not isinstance(data["start"], dict):
+            raise SpecError("start must be a mapping")
+        if "peripherals" in data["start"]:
+            raise SpecError("start: peripherals come from the spec's peripherals section")
         try:
             base = Design().to_dict()
             base["platform"] = platform
             base.update(data["start"])
+            base["peripherals"] = asdict(peripherals)
             start = Design.from_dict(base)
         except (DesignError, TypeError) as exc:
             raise SpecError(f"start: {exc}") from exc
@@ -261,6 +327,7 @@ def parse_spec(data: Any, *, name: str = "spec") -> Spec:
         objective=objective,
         start=start,
         platform=platform,
+        peripherals=peripherals,
     )
     spec.workload()  # surface workload errors now, with their location
     return spec
