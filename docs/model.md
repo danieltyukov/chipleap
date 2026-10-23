@@ -146,24 +146,24 @@ of its cycles (`chipleap.model.accel.crossed`). Both terms are fitted to 1,040 j
 
 The crossings add ACCEL_CDC_KGE = 8.43 kGE (the register handshake, the write port's FIFOs, the reset and interrupt synchronizers) and ACCEL_CDC_PORT_KGE = 6.76 kGE per read port (its two FIFOs of eight 32-bit words) to the accelerator's logic. They are measured with Yosys on IHP SG13G2: 15.53 kGE with one port, 21.46 with two and 35.64 with four, and the line through them is within 2.3 % of each.
 
-The weights do not cross. With external memory the accelerator reads it over its direct path, whose memory ports run on the accelerator's clock (X-HEEP's side crosses into it instead, [xheep.md](xheep.md#external-memory-the-accelerators-direct-path)), so the external stream's rate and latency are taken at `accel_mhz` and are not passed through `crossed`. On the SmolLM2 example at the SoC's 42.3 MHz, an accelerator at 90 MHz gives 1.79 token/s against 1.33 on the SoC's clock: its stream goes from 169 MB/s, four bytes per SoC cycle, to the memory's 248 MB/s. The crossings add 0.158 mm2, and the direct path on the accelerator's clock 0.015 mm2 more than on the SoC's (X-HEEP's side crossing, less the response queues the crossings already size).
+The weights do not cross. With external memory the accelerator reads it over its direct path, whose memory ports run on the accelerator's clock (X-HEEP's side crosses into it instead, [xheep.md](xheep.md#external-memory-the-accelerators-direct-path)), so the external stream's rate and latency are taken at `accel_mhz` and are not passed through `crossed`. On the SmolLM2 example at the SoC's limit of 36.8 MHz, an accelerator at 90 MHz gives 1.70 token/s against 1.15 on the SoC's clock: its stream goes from 147 MB/s, four bytes per SoC cycle, to the memory's 248 MB/s. The crossings add 0.158 mm2, and the direct path on the accelerator's clock 0.015 mm2 more than on the SoC's (X-HEEP's side crossing, less the response queues the crossings already size).
 
 ## Where the weights come from
 
-Decoding a token streams nearly every weight once, so how the weights reach the accelerator decides the rate. For the SmolLM2 example (SmolLM2 135M at int4, 80.35 MB from external memory per token: two channels of octal PSRAM, 248 MB/s; the GEMV 1 x 8 with one read port), at the routed SoC's 35 MHz and the model's SoC limit of 42.3 MHz:
+Decoding a token streams nearly every weight once, so how the weights reach the accelerator decides the rate. For the SmolLM2 example (SmolLM2 135M at int4, 80.35 MB from external memory per token: two channels of octal PSRAM, 248 MB/s; the GEMV 1 x 8 with one read port), at 35 MHz and at the model's SoC limit, 36.8 MHz ([the SoC's clock](#the-socs-clock)):
 
-| Weights reach the accelerator | Stream at 35 MHz | token/s at 35 MHz | token/s at 42.3 MHz |
+| Weights reach the accelerator | Stream at 35 MHz | token/s at 35 MHz | token/s at 36.8 MHz |
 |---|---|---|---|
-| X-HEEP's DMA copies them into a bank, a PSRAM access per word (0.5 B per cycle) | 18 MB/s | 0.21 | 0.25 |
-| the same with a controller that prefetches sequential words and an extra 8 KiB bank (2 B per cycle) | 70 MB/s | 0.69 | 0.84 |
-| the direct path, the accelerator on the SoC's clock (4 B per cycle) | 140 MB/s | 1.10 | 1.33 |
-| the direct path, the accelerator at 90 MHz on its own clock | 248 MB/s | 1.67 | 1.79 |
-| the direct path, the accelerator at 100 MHz | 248 MB/s | 1.68 | 1.80 |
-| the DMA path (2 B per cycle) with the accelerator at 90 MHz | 70 MB/s | 0.72 | 0.87 |
+| X-HEEP's DMA copies them into a bank, a PSRAM access per word (0.5 B per cycle) | 18 MB/s | 0.21 | 0.22 |
+| the same with a controller that prefetches sequential words and an extra 8 KiB bank (2 B per cycle) | 70 MB/s | 0.69 | 0.73 |
+| the direct path, the accelerator on the SoC's clock (4 B per cycle) | 140 MB/s | 1.10 | 1.15 |
+| the direct path, the accelerator at 90 MHz on its own clock | 248 MB/s | 1.67 | 1.70 |
+| the direct path, the accelerator at 100 MHz | 248 MB/s | 1.68 | 1.71 |
+| the DMA path (2 B per cycle) with the accelerator at 90 MHz | 70 MB/s | 0.72 | 0.76 |
 
 The DMA rows are what X-HEEP alone allows, since its bus lets no external master reach the external slave window and serves one transaction per cycle with none outstanding ([xheep.md](xheep.md#external-memory-the-accelerators-direct-path)); they are this model with the accelerator's external stream set to the DMA's rate. The direct rows are the model as it is. The SoC as laid out today has neither the prefetching controller nor the extra bank, so without the direct path it would reach 0.21 token/s.
 
-With the direct path and the accelerator on its own clock, the accelerator's share of a token is the memory's: 324 ms to stream 80.35 MB, 367 ms in all at 35 MHz. What remains is the CPU's work, 233 ms per token at 35 MHz (193 ms at 42.3): RMSNorm, RoPE, softmax, SiLU and the requantization of every accelerator result run on the CV32E20 ([the CPU](#the-cpu)). That is why even the best path reaches 1.67 token/s, not 2: at 2 token/s a token has 500 ms, and the memory's 324 ms and the CPU's 233 ms do not fit, since the model runs the CPU and the accelerator one after the other. A faster memory would help only until the CPU's time is all that is left (4.3 token/s at 35 MHz); moving that work off the CPU, onto the accelerator or a vector unit beside it, is a possible next step that ChipLeap does not model or build today.
+With the direct path and the accelerator on its own clock, the accelerator's share of a token is the memory's: 324 ms to stream 80.35 MB, 367 ms in all at 35 MHz. What remains is the CPU's work, 233 ms per token at 35 MHz (222 ms at 36.8): RMSNorm, RoPE, softmax, SiLU and the requantization of every accelerator result run on the CV32E20 ([the CPU](#the-cpu)). That is why even the best path reaches 1.67 token/s, not 2: at 2 token/s a token has 500 ms, and the memory's 324 ms and the CPU's 233 ms do not fit, since the model runs the CPU and the accelerator one after the other. A faster memory would help only until the CPU's time is all that is left (4.3 token/s at 35 MHz); moving that work off the CPU, onto the accelerator or a vector unit beside it, is a possible next step that ChipLeap does not model or build today.
 
 ## Placement and feasibility
 
