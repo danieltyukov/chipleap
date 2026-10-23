@@ -399,15 +399,17 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     clean = r.checks_clean
     checks = r.checks()
+    hold = f"; hold missed by {-r.hold_slack_ns:.3f} ns" if r.hold_slack_ns < 0 else ""
+    setup = "met" if r.setup_slack_ns >= 0 else "missed"
     if clocks is not None:
         timing = (
             f"the accelerator at {clock:g} MHz and X-HEEP's side at {bus:.4g} MHz "
-            f"{'met' if met else 'missed'} at the slow corner ({group_note(r.groups)})"
+            f"{setup} at the slow corner ({group_note(r.groups)}){hold}"
         )
     else:
         timing = (
-            f"{clock:g} MHz {'met' if met else 'missed'} at the slow corner (about "
-            f"{r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the typical one)"
+            f"{clock:g} MHz {setup} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
+            f"and about {r.fmax_mhz:.0f} MHz at the typical one){hold}"
         )
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "

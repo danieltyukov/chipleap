@@ -11,9 +11,16 @@ import pytest
 from chipleap.rtl import eco as E
 from chipleap.rtl.pnr import SDC_NAME, seal_routed
 from chipleap.rtl.project import EcoChange, load_project
-from chipleap.verify.tools import librelane, openroad
+from chipleap.verify.pnr import signoff
+from chipleap.verify.tools import librelane, librelane_version_key, openroad
 
 FIXTURE = Path(__file__).parent / "fixtures" / "eco_timing"
+
+
+def _librelane_before_3_0_14() -> bool:
+    tool = librelane()
+    return tool.found and librelane_version_key(tool.version) < (3, 0, 14, 2, 0)
+
 
 STEPS = [
     "Yosys.Synthesis",
@@ -388,6 +395,14 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     _, sealed, _, _ = E.base(p)
     good = {"DESIGN_NAME": "counter", "VERILOG_FILES": ["dir::src/counter.v"]}
     assert E._settings(p, good, sealed) == good
+    # Every setting place and route shares passes on.
+    assert E._settings(p, signoff(), sealed) == signoff()
+    # KLayout's DRC threads as IHP's deck reads them: ChipLeap's, which the ECO writes again.
+    threads = {"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": "4"}}
+    assert E._settings(p, threads, sealed) == {"KLAYOUT_DRC_THREADS": 4}
+    # Timing-driven placement as ChipLeap turns it on for LibreLane 3.0.14.
+    placed = {"PL_TIMING_DRIVEN": True}
+    assert E._settings(p, placed, sealed) == placed
     for bad, why in [
         ({"PLACEMENT_SCRIPT": "x.tcl"}, "does not pass on"),
         ({"PRE_GLOBAL_PLACEMENT_HOOK": 1}, "does not pass on"),
@@ -398,6 +413,9 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
         ({"VERILOG_FILES": ["/abs/counter.v"]}, "not a file ChipLeap wrote"),
         ({"VERILOG_FILES": ["dir::src/other.v"]}, "not a file ChipLeap recorded"),
         ({"CLOCK_PERIOD": "10"}, "not a number"),
+        ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": "4", "x": "1"}}, "DEFINES"),
+        ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": 4}}, "DEFINES"),
+        ({"PL_TIMING_DRIVEN": "true"}, "PL_TIMING_DRIVEN"),
     ]:
         with pytest.raises(E.EcoError, match=why):
             E._settings(p, bad, sealed)
@@ -408,6 +426,11 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     not (librelane().found and openroad().found), reason="needs LibreLane, OpenROAD"
 )
 @pytest.mark.skipif(not os.environ.get("CHIPLEAP_RUN_PNR"), reason="set CHIPLEAP_RUN_PNR=1")
+@pytest.mark.skipif(
+    _librelane_before_3_0_14(),
+    reason="the fixture meets timing at place and route on LibreLane 3.0.0.dev44 (+0.133 ns), "
+    "so the test cannot exercise the ECO",
+)
 def test_a_repair_closes_timing_the_routed_run_missed(tmp_path):
     """The fixture is routed without timing repair and misses setup at the slow corner;
     its eco section's repair: setup closes it and signs off clean."""

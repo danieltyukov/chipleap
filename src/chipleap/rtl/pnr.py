@@ -42,6 +42,7 @@ from chipleap.verify.pnr import (
     MACRO_REPAIR,
     PnrError,
     PnrResult,
+    macro_reach,
     parse_run,
     run_librelane,
     signoff,
@@ -321,6 +322,7 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
     )
     return {
         **MACRO_REPAIR,
+        **macro_reach(fp, list(sizes.values())),
         "FP_SIZING": "absolute",
         "DIE_AREA": [0, 0, *fp.die],
         "CORE_AREA": list(fp.core),
@@ -479,6 +481,7 @@ def pnr(project: Project) -> StepResult:
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     clean = r.checks_clean
     checks = r.checks()
+    hold = f"; hold missed by {-r.hold_slack_ns:.3f} ns" if r.hold_slack_ns < 0 else ""
     clk = project.fastest_clock
     clock = f"{r.clock_mhz:g} MHz on {clk.port}" if clk else f"a {r.clock_mhz:g} MHz virtual clock"
     srams = ""
@@ -487,7 +490,8 @@ def pnr(project: Project) -> StepResult:
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.4f} mm2 core at "
         f"{r.utilisation * 100:.0f}% utilisation, {r.cells} cells{srams}; {clock} "
-        f"{'met' if met else 'missed'} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
-        f"and about {r.fmax_mhz:.0f} MHz at the typical one); {checks}"
+        f"{'met' if r.setup_slack_ns >= 0 else 'missed'} at the slow corner (about "
+        f"{r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the typical one){hold}; "
+        f"{checks}"
     )
     return StepResult("pnr", "pass" if met and clean else "fail", msg, pnr_data(project, r))
