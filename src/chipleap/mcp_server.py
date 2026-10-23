@@ -116,6 +116,17 @@ platform: xheep                     # xheep: an X-HEEP SoC (RISC-V) is generated
                                     # standalone: the accelerator alone, AXI4 IP for any
                                     # host (Arm, other RISC-V, FPGA); cpu, bus, banks and
                                     # ext_mem then describe the host the model assumes
+peripherals:                        # X-HEEP's peripherals the chip needs; defaults shown
+  uart: true
+  gpio: 32                          # pins: 0, up to 8 (always-on), up to 24, or 32
+  timers: 4                         # 2 (always-on) or 4
+  spi_hosts: 0                      # 0, 1 or 2
+  i2c: false
+  i2s: false
+  pdm2pcm: false                    # PDM microphone input
+  spi_slave: true                   # the debug module's SPI slave
+  dma_channels: 2
+  dma_ports: 1                      # 1, 2 or 4; channels a multiple of it
 start:                              # optional design the agent starts from
   tech: ihp-sg13g2
 ```

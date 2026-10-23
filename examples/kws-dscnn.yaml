@@ -24,3 +24,8 @@ constraints:
   tech: [ihp-sg13g2, generic-65nm]
   ext_mem: [none]
 objective: energy
+peripherals:             # a PDM microphone in, the keyword out on the always-on GPIO
+  pdm2pcm: true
+  uart: false
+  gpio: 8
+  timers: 2
