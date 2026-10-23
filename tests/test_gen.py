@@ -38,8 +38,10 @@ def test_xheep_config_is_valid_python():
     assert "0xc0000000" in text
 
 
-def test_xheep_flash_cache_needs_the_ntom_bus():
-    assert 'cache="yes"' in xheep_config(DESIGN)
+def test_xheep_flash_controller_has_no_cache_on_either_bus():
+    # On NtoM X-HEEP allows a 16 KiB cache in an SRAM bank of its own, which nothing in
+    # the model reads through and the SoC's layout has no macros for.
+    assert 'cache="no"' in xheep_config(DESIGN) and DESIGN.bus == "NtoM"
     one = Design(bus="onetoM", accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2))
     assert 'cache="no"' in xheep_config(one)
 
