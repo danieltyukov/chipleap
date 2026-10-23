@@ -133,6 +133,9 @@ TEMPLATE_KEYS = {
     "RUN_POST_GRT_DESIGN_REPAIR": "bool",
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": "number",
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": "number",
+    # Every project's layout (chipleap.verify.pnr.port_diodes).
+    "DIODE_ON_PORTS": "text",
+    "DIODE_CELL": "text",
 }
 # The entries of a hard macro in MACROS that name files, and the corners of its liberty.
 MACRO_FILES = ("gds", "lef", "vh", "spice", "nl", "pnl")
