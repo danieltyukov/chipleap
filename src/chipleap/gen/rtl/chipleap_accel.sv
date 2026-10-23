@@ -812,7 +812,8 @@ module chipleap_accel_core #(
     // psum_q, accumulate into work/acc. The operand registers cut the path from the buffer
     // read to the adder tree in two, so the engine closes timing at the slow corner.
     logic signed [7:0] xq[V];
-    logic signed [7:0] wq[L][V];
+    // Packed, as the systolic arrays' PE registers below are (BLKLOOPINIT in Verilator 5.020).
+    logic [L-1:0][V-1:0][7:0] wq;
     logic ov_q, ofirst_q, olast_q;
     logic [$clog2(ACC_ROWS)-1:0] om_q;
     logic signed [31:0] psum_q[L];
@@ -828,7 +829,7 @@ module chipleap_accel_core #(
     localparam int unsigned WW = V >= 4 ? V / 4 : 1;  // words holding V weights at int8
     wire issue = running && issuing;  // a chunk's operands are registered this cycle
     logic signed [7:0] xv[V];  // the chunk's operands, unpacked
-    logic signed [7:0] wv[L][V];
+    logic [L-1:0][V-1:0][7:0] wv;
     logic signed [31:0] dot[L];
 
     if (!SB) begin : g_flop
@@ -1143,10 +1144,13 @@ module chipleap_accel_core #(
     logic [31:0] blk, nblk;
     logic [TW-1:0] t, tstream;
     logic [31:0] tbase;  // word address of activation row t while streaming
-    // PE registers, row-major (r * C + c)
-    logic signed [7:0] wq[R*C];
-    logic signed [7:0] aq[R*C];
-    logic signed [31:0] pq[R*C];
+    // PE registers, row-major (r * C + c), packed: Verilator 5.020 (Ubuntu 24.04's) rejects a
+    // nonblocking assignment to an unpacked array inside a loop it does not unroll
+    // (BLKLOOPINIT), which a large array's loops are. Their elements are unsigned; every use
+    // takes one as a signed operand or adds it at full width.
+    logic [R*C-1:0][7:0] wq;
+    logic [R*C-1:0][7:0] aq;
+    logic [R*C-1:0][31:0] pq;
     logic signed [31:0] acc[ACC_ROWS*C];
     // The activation feed is registered before it enters the array, so the buffer read
     // and its address arithmetic are not in series with the first PE's multiply-add.
@@ -1278,10 +1282,13 @@ module chipleap_accel_core #(
     localparam int unsigned C = COLS;
     logic running;
     logic [31:0] t, tend;
-    // PE registers, row-major (r * C + c)
-    logic signed [7:0] aq[R*C];
-    logic signed [7:0] wq[R*C];
-    logic signed [31:0] pacc[R*C];
+    // PE registers, row-major (r * C + c), packed: Verilator 5.020 (Ubuntu 24.04's) rejects a
+    // nonblocking assignment to an unpacked array inside a loop it does not unroll
+    // (BLKLOOPINIT), which a large array's loops are. Their elements are unsigned; every use
+    // takes one as a signed operand or adds it at full width.
+    logic [R*C-1:0][7:0] aq;
+    logic [R*C-1:0][7:0] wq;
+    logic [R*C-1:0][31:0] pacc;
     // Both edge feeds are registered before they enter the array, so the buffer reads, the
     // weight unpacking and their address arithmetic are not in series with a multiply-add.
     logic signed [7:0] afeed[R];
@@ -1469,6 +1476,7 @@ module chipleap_accel #(
     output logic irq_o
 );
   /* verilator lint_off PINCONNECTEMPTY */  // the banks, unused with the buffers inside
+  /* verilator lint_off WIDTHCONCAT */  // their read data, tied off: over 8k bits in large arrays
   chipleap_accel_core #(
       .DATAFLOW(DATAFLOW),
       .ROWS(ROWS),
@@ -1515,5 +1523,6 @@ module chipleap_accel #(
       .wbank_rdata_i('0),
       .irq_o
   );
+  /* verilator lint_on WIDTHCONCAT */
   /* verilator lint_on PINCONNECTEMPTY */
 endmodule
