@@ -34,10 +34,11 @@ make mcu-gen X_HEEP_CFG=<bundle>/xheep/<name>.py PADS_CFG=<bundle>/xheep/<name>_
 | `rd_req_o[ports]`, `rd_resp_i[ports]` (`obi_req_t`, `obi_resp_t`) | `ext_xbar_master_req_i` / `ext_xbar_master_resp_o`, one master per read port |
 | `wr_req_o`, `wr_resp_i` | one more external master |
 | `irq_o` | a free fast interrupt |
+| `accel_clk_i` | only with `accel_mhz`: the accelerator's own clock, from a clock source of its own; everything else stays on X-HEEP's `clk_i` |
 
 The accelerator reads activations from the SRAM banks and weights from wherever they live. With the NtoM bus and interleaved banks, each read port moves a word per cycle. For weights in external memory, the memory controller sits behind X-HEEP's external slave port(s). It needs as many slave ports as the accelerator has read ports to reach the bandwidth the model assumed, or a wider AXI path through X-HEEP's OBI-to-AXI bridge.
 
-`rtl/chipleap_accel.core` is a FuseSoC core file for the three RTL files; add it to your top level's core alongside `openhwgroup.org:systems:core-v-mini-mcu`.
+With `accel_mhz` the adapter instantiates `chipleap_accel_cdc` (`rtl/chipleap_accel_cdc.sv`), the accelerator behind its clock domain crossings; see [verification.md](verification.md#the-accelerator-on-its-own-clock). `rtl/chipleap_accel.core` is a FuseSoC core file for the RTL files (three, or four with the crossings); add it to your top level's core alongside `openhwgroup.org:systems:core-v-mini-mcu`.
 
 ## Firmware
 

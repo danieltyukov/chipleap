@@ -244,6 +244,9 @@ class Design:
     ext_channels: int = 1
     accel: Accel | None = None
     platform: str = "xheep"
+    # The accelerator's own clock, behind crossings at its bus interface
+    # (chipleap_accel_cdc); 0 runs it on X-HEEP's clock, freq_mhz.
+    accel_mhz: float = 0.0
     peripherals: Peripherals = field(default_factory=Peripherals)
     notes: tuple[str, ...] = field(default=(), compare=False)
 
@@ -290,6 +293,10 @@ class Design:
             self.accel.validate()
             if self.accel.ports > 1 and self.bus != "NtoM":
                 raise DesignError("an accelerator with several ports needs the NtoM bus")
+        if self.accel_mhz < 0:
+            raise DesignError("accel_mhz must be 0 (X-HEEP's clock) or positive")
+        if self.accel_mhz and (self.accel is None or self.platform != "xheep"):
+            raise DesignError("accel_mhz needs an accelerator on the xheep platform")
 
     def with_(self, **changes: Any) -> Design:
         return replace(self, **changes)
@@ -307,6 +314,8 @@ class Design:
         # be chosen read the same.
         if self.peripherals == Peripherals():
             d.pop("peripherals")
+        if not self.accel_mhz:
+            d.pop("accel_mhz")  # on X-HEEP's clock, as every design before the field
         return d
 
     @staticmethod
@@ -344,6 +353,7 @@ class Design:
             parts.append(
                 f"{a.dataflow} {a.rows}x{a.cols} int{a.w_bits}, {a.ports} port"
                 + ("s" if a.ports > 1 else "")
+                + (f" @ {self.accel_mhz:g} MHz" if self.accel_mhz else "")
             )
         else:
             parts.append("no accelerator")

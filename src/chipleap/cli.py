@@ -303,7 +303,7 @@ def _print_steps(results: list[Any], width: int = 6) -> int:
     return 1 if failed else 0
 
 
-BUNDLE_STEPS = "consistency,lint,sim,synth,xheep"
+BUNDLE_STEPS = "consistency,lint,sim,cdc,synth,xheep"
 
 
 def _verify_project(args: argparse.Namespace, path: Path) -> int:
@@ -337,7 +337,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     steps = tuple(s.strip() for s in (args.steps or BUNDLE_STEPS).split(",") if s.strip())
     if "all" in steps:
         # Place and route takes many minutes, so it runs only when asked for.
-        steps = ("consistency", "lint", "sim", "synth", "xheep", "pnr")
+        steps = ("consistency", "lint", "sim", "cdc", "synth", "xheep", "pnr")
     sim_tool = getattr(args, "sim_tool", None) or "verilator"
     if sim_tool in ("icarus", "auto"):
         raise ValueError(
@@ -485,25 +485,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             else liberty_settings_problem() or "open PDK for synthesis (set CHIPLEAP_LIBERTY)",
         ]
     )
-    from chipleap.verify.tools import LIBRELANE_PDK_ENV, librelane_pdk_commit, librelane_pdk_root
+    from chipleap.verify import librelane_pdk
 
+    ll_ok, ll_commit = False, ""
     try:
-        ll_root = librelane_pdk_root()
-        ll_note = (
-            f"LibreLane runs on {ll_root}"
-            if ll_root
-            else f"LibreLane installs the PDK it pins (set {LIBRELANE_PDK_ENV} for another)"
-        )
+        if (given := librelane_pdk.configured_root()) is not None:
+            ll_ok, ll_commit = True, librelane_pdk.commit_of(given / librelane_pdk.PDK)
+            ll_note = f"LibreLane runs on {given} ({librelane_pdk.ENV})"
+        else:
+            ll_commit = librelane_pdk.wanted_commit()
+            managed = librelane_pdk.managed_root(ll_commit)
+            ll_ok = librelane_pdk.installed(managed)
+            why = (
+                "the IHP checkout's commit"
+                if librelane_pdk.checkout()[0] is not None
+                else "ChipLeap's pinned commit, as there is no IHP checkout"
+            )
+            ll_note = (
+                f"LibreLane runs on {managed}, {why}, installed by ChipLeap"
+                if ll_ok
+                else f"{why}, not installed yet: the first place and route installs it in "
+                f"{managed} (about 800 MB); {librelane_pdk.ENV} names another root"
+            )
     except ValueError as exc:
-        ll_root, ll_note = None, str(exc)
-    rows.append(
-        [
-            "LibreLane PDK",
-            "yes" if ll_root else "no",
-            librelane_pdk_commit(ll_root)[:7] if ll_root else "",
-            ll_note,
-        ]
-    )
+        ll_note = str(exc)
+    rows.append(["LibreLane PDK", "yes" if ll_ok else "no", ll_commit[:7], ll_note])
     co = find_checkout()
     rows.append(
         [
@@ -774,7 +780,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="show the diagnosis and alternatives at every step",
         )
         if name == "run":
-            s.add_argument("--verify-steps", default="consistency,lint,sim,synth,xheep")
+            s.add_argument("--verify-steps", default="consistency,lint,sim,cdc,synth,xheep")
             s.add_argument("--xheep", help="X-HEEP checkout")
             s.add_argument("--fetch-xheep", action="store_true")
             s.set_defaults(func=cmd_run)
@@ -802,7 +808,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--steps",
         default=None,
-        help="comma-separated steps; for a bundle consistency,lint,sim,synth,xheep, for a "
+        help="comma-separated steps; for a bundle consistency,lint,sim,cdc,synth,xheep, for a "
         "project lint,sim,coverage,formal,cdc,synth,equiv; pnr (place and route), gls "
         "(gate-level simulation of its netlist), the steps after it (eco, dft, power, "
         "ir_drop, upf) and chip (the whole chip with its pad ring and macros) are opt-in, and "
