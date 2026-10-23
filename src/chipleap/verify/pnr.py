@@ -22,7 +22,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -975,6 +975,85 @@ MACRO_REPAIR = {
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
     "GRT_RESIZER_HOLD_SLACK_MARGIN": MACRO_HOLD_MARGIN_NS,
 }
+# IHP's SRAMs allow 0.064 pF on each output, and the global router's estimate, which the
+# repair after global routing works against, does not see what their output words carry
+# after routing: in the SmolLM2 accelerator's layout (four 256 x 64), the 256 outputs ran
+# side by side on Metal5 along the macros' edges, and their routed wire capacitance was a
+# median 0.83 and at most 2.57 times the estimate. abuf_s1_m0's A_DOUT[63] was estimated
+# at 0.0297 pF and came out 0.0650 pF, the same net 0.0517 pF in a layout whose
+# neighbours ran elsewhere. No repair margin makes up for that without buffering most of
+# the macros' outputs and a few hundred other nets: so each SRAM output gets a buffer
+# beside its pin (SRAM_OUTPUT_BUFFER), inserted after global routing, and the macro
+# drives a few um of wire into it.
+SRAM_OUTPUT_BUFFER = "sg13g2_buf_2"
+GLOBAL_ROUTING = "OpenROAD.GlobalRouting"
+ECO_BUFFERS = "Odb.InsertECOBuffers"
+# How far beyond its halo, from the macro's edge where the pin is, a buffer beside a macro
+# pin is put; the legaliser moves it to the nearest free site.
+BESIDE_GAP_UM = 5.0
+
+
+def macro_pin_at(p: place.Placed, view: layer.MacroView, pin: str) -> tuple[float, float] | None:
+    """The centre of ``pin``'s first shape on the placed macro ``p``, in the core's um."""
+    shapes = [rect for mp in view.pins if mp.name == pin for _, rect in mp.shapes]
+    if not shapes:
+        return None
+    x0, y0, x1, y1 = shapes[0]
+    x, y = (x0 + x1) / 2, (y0 + y1) / 2
+    if p.orient in ("S", "FN"):
+        x = view.width - x
+    if p.orient in ("S", "FS"):
+        y = view.height - y
+    return p.x + x, p.y + y
+
+
+def beside_pin(
+    p: place.Placed, view: layer.MacroView, pin: str, at: tuple[float, float], buffer: str
+) -> dict[str, Any]:
+    """An ``INSERT_ECO_BUFFERS`` entry for ``buffer`` at ``pin`` of the placed macro ``p``
+    (the pin at ``at``), just past the halo off the macro's edge where the pin is."""
+    x, y = at
+    off = place.HALO_UM + BESIDE_GAP_UM
+    y = p.y - off if y - p.y < view.height / 2 else p.y + view.height + off
+    return {
+        "target": f"{p.instance}/{pin}",
+        "buffer": buffer,
+        "placement": [round(x, 3), round(y, 3)],
+    }
+
+
+def sram_output_buffers(
+    placed: Iterable[tuple[place.Placed, layer.MacroView]],
+) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer (``SRAM_OUTPUT_BUFFER``) beside each
+    output pin of the PDK's own macros among ``placed``."""
+    out = []
+    for p, view in placed:
+        if view.source != "pdk":
+            continue
+        for mp in view.pins:
+            if mp.direction == "output" and (at := macro_pin_at(p, view, mp.name)):
+                out.append(beside_pin(p, view, mp.name, at, SRAM_OUTPUT_BUFFER))
+    return out
+
+
+def with_eco_buffers(cfg: dict[str, Any], buffers: list[dict[str, Any]]) -> dict[str, Any]:
+    """``cfg`` with ``buffers`` inserted right after global routing (``ECO_BUFFERS``); the
+    repair after it routes their nets again. Unchanged without any."""
+    if not buffers:
+        return cfg
+    meta = dict(cfg.get("meta") or {"version": 2, "flow": "Classic"})
+    meta["substituting_steps"] = {
+        **(meta.get("substituting_steps") or {}),
+        f"+{GLOBAL_ROUTING}": ECO_BUFFERS,
+    }
+    return {
+        **cfg,
+        "INSERT_ECO_BUFFERS": [*cfg.get("INSERT_ECO_BUFFERS", []), *buffers],
+        "meta": meta,
+    }
+
+
 # IHP's SRAMs allow a slew of 0.595 ns at their inputs at the slow corner, a quarter of the
 # standard cells' 2.5 ns, and OpenROAD's repair_design holds a net to its driver's limit
 # and the design's, not to its loads': in the macro-backed GEMV 1 x 4 build, an address bit
@@ -1305,6 +1384,9 @@ def sram_flow(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )
     cfg = sram_config(accel, clock_mhz, fp, macros, sizes)
+    cfg = with_eco_buffers(
+        cfg, sram_output_buffers((p, views[cells[p.instance]].view) for p in fp.macros)
+    )
     if accel_mhz:
         cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz)
     return cfg, plan

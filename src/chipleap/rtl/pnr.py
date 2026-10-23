@@ -46,6 +46,8 @@ from chipleap.verify.pnr import (
     parse_run,
     run_librelane,
     signoff,
+    sram_output_buffers,
+    with_eco_buffers,
     with_ihp_antenna,
 )
 from chipleap.verify.result import StepResult
@@ -320,17 +322,20 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
         workdir,
         views,
     )
-    return {
-        **MACRO_REPAIR,
-        **macro_reach(fp, list(sizes.values())),
-        "FP_SIZING": "absolute",
-        "DIE_AREA": [0, 0, *fp.die],
-        "CORE_AREA": list(fp.core),
-        "MACROS": entries,
-        "PDN_CFG": "dir::pdn.tcl",
-        "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
-        "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
-    }
+    return with_eco_buffers(
+        {
+            **MACRO_REPAIR,
+            **macro_reach(fp, list(sizes.values())),
+            "FP_SIZING": "absolute",
+            "DIE_AREA": [0, 0, *fp.die],
+            "CORE_AREA": list(fp.core),
+            "MACROS": entries,
+            "PDN_CFG": "dir::pdn.tcl",
+            "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
+            "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
+        },
+        sram_output_buffers((p, views[cell[p.instance]]) for p in fp.macros),
+    )
 
 
 def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
