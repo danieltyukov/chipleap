@@ -27,8 +27,8 @@ structure decides what it is:
 * ``handshake``: the destination captures through its enable, or through a multiplexer that
   otherwise keeps its value, and the enable or select depends on a synchronizer's output.
 * ``fifo_memory``: the source is a memory written in one domain and read with an address
-  from the reading domain only, as in an asynchronous FIFO, whose pointers the rules above
-  check.
+  from the reading domain only, into a flip-flop, memory or macro of that domain, as in an
+  asynchronous FIFO, whose pointers the rules above check.
 * ``unsynchronized`` (error): anything else.
 
 Resets: an asynchronous reset pin is traced to its ports. A reset synchronizer (flops reset
@@ -663,13 +663,16 @@ class Checker:
         return self._hold_selects(a, own, depth + 1) + self._hold_selects(b, own, depth + 1)
 
     def _read_in(self, dst: State, mem: State) -> bool:
-        """Whether ``dst`` reads ``mem`` with an address that comes only from its domain."""
+        """Whether ``dst`` reads ``mem`` with an address that comes only from its domain.
+        The destination may be a flip-flop, or a memory or hard macro of that domain the
+        word is written into (a FIFO's word stored straight into a buffer)."""
         if dst.kind == "readport" and dst.memory == mem.name:
             addr = dst.data.get("RD_ADDR", [])
         else:
             addr = []
+            ins = [x for bits in dst.data.values() for x in bits]
             for b, (m, a) in self.g.reads.items():
-                if m == mem.name and any(b in self._cone_bits(x) for x in dst.data.get("D", [])):
+                if m == mem.name and any(b in self._cone_bits(x) for x in ins):
                     addr += a
         doms = {self.domain(s) for b in addr for s in self.g.sources(b)}
         return bool(addr) and doms <= {dst.domain, "*"}

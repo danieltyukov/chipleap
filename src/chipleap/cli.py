@@ -303,7 +303,7 @@ def _print_steps(results: list[Any], width: int = 6) -> int:
     return 1 if failed else 0
 
 
-BUNDLE_STEPS = "consistency,lint,sim,synth,xheep"
+BUNDLE_STEPS = "consistency,lint,sim,cdc,synth,xheep"
 
 
 def _verify_project(args: argparse.Namespace, path: Path) -> int:
@@ -337,7 +337,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     steps = tuple(s.strip() for s in (args.steps or BUNDLE_STEPS).split(",") if s.strip())
     if "all" in steps:
         # Place and route takes many minutes, so it runs only when asked for.
-        steps = ("consistency", "lint", "sim", "synth", "xheep", "pnr")
+        steps = ("consistency", "lint", "sim", "cdc", "synth", "xheep", "pnr")
     sim_tool = getattr(args, "sim_tool", None) or "verilator"
     if sim_tool in ("icarus", "auto"):
         raise ValueError(
@@ -780,7 +780,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="show the diagnosis and alternatives at every step",
         )
         if name == "run":
-            s.add_argument("--verify-steps", default="consistency,lint,sim,synth,xheep")
+            s.add_argument("--verify-steps", default="consistency,lint,sim,cdc,synth,xheep")
             s.add_argument("--xheep", help="X-HEEP checkout")
             s.add_argument("--fetch-xheep", action="store_true")
             s.set_defaults(func=cmd_run)
@@ -808,7 +808,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--steps",
         default=None,
-        help="comma-separated steps; for a bundle consistency,lint,sim,synth,xheep, for a "
+        help="comma-separated steps; for a bundle consistency,lint,sim,cdc,synth,xheep, for a "
         "project lint,sim,coverage,formal,cdc,synth,equiv; pnr (place and route), gls "
         "(gate-level simulation of its netlist), the steps after it (eco, dft, power, "
         "ir_drop, upf) and chip (the whole chip with its pad ring and macros) are opt-in, and "

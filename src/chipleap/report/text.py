@@ -54,6 +54,9 @@ def clock_note(ev: Evaluation) -> str:
     accel = (
         f"the accelerator alone meets about {ev.accel_limit_mhz:.0f}" if ev.accel_limit_mhz else ""
     )
+    if ev.accel_clock_mhz:
+        own = f"the accelerator runs on its own clock at {ev.accel_clock_mhz:g}"
+        accel = f"{own}; it alone meets about {ev.accel_limit_mhz:.0f}" if accel else own
     if ev.soc_mhz < d.freq_mhz:
         notes = [f"the design asks {d.freq_mhz:g}", *([accel] if accel else [])]
         return f"{ev.soc_mhz:.1f} MHz, what X-HEEP's SoC meets ({'; '.join(notes)})"

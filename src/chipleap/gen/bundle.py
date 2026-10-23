@@ -174,7 +174,13 @@ def write_bundle(
         ),
     )
     if design.accel is not None:
-        written += write_rtl(design.accel, design.name, out, platform=design.platform)
+        written += write_rtl(
+            design.accel,
+            design.name,
+            out,
+            platform=design.platform,
+            own_clock=bool(design.accel_mhz),
+        )
         put("rtl/chipleap_accel.hjson", reggen_hjson(design.name))
     if result is not None:
         put("report.html", explore_html(result, result.cloud))
