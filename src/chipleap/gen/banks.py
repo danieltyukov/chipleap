@@ -152,7 +152,7 @@ def layout_reason(accel: Accel, srams: Iterable[Sram]) -> str | None:
     return unsupported(accel) or too_flat(accel, srams)
 
 
-def _bank(
+def bank_macros(
     lines: list[str], prefix: str, bank: Bank, aba: int, bits: int, sig: tuple[str, ...]
 ) -> None:
     """The macros of one bank, ``prefix_m<k>``: ``deep`` stacked on the address's top bits,
@@ -324,7 +324,7 @@ def top_sv(banks: Banks) -> str:
             f"abank_addr[{(s + 1) * aba - 1}:{s * aba}]",
             f"abank_rdata[{(s + 1) * b - 1}:{s * b}]",
         )
-        _bank(lines, f"abuf_s{s}", banks.abuf, aba, b, sig)
+        bank_macros(lines, f"abuf_s{s}", banks.abuf, aba, b, sig)
     for k in range(nwb):
         s, lane = divmod(k, banks.accel.rows)
         sig = (
@@ -333,6 +333,6 @@ def top_sv(banks: Banks) -> str:
             f"wbank_addr[{(k + 1) * wba - 1}:{k * wba}]",
             f"wbank_rdata[{(k + 1) * b - 1}:{k * b}]",
         )
-        _bank(lines, f"wbuf_s{s}_l{lane}", banks.wbuf, wba, b, sig)
+        bank_macros(lines, f"wbuf_s{s}_l{lane}", banks.wbuf, wba, b, sig)
     lines.append("endmodule")
     return "\n".join(lines) + "\n"

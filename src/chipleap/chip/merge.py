@@ -12,9 +12,15 @@ defined twice, unless both definitions come from the same PDK file or are identi
 Three merges are checked: the Verilog modules (the core's own, the macros', the IO
 cells' and the chip top) before LibreLane runs, and after it the GDS structures and the
 SPICE subcircuits (case folded, as SPICE reads them), with the cells the stream-out
-itself makes (the chip top and its vias) counted as a source of their own. An RTL
-project with macros (``chipleap.rtl.macros``) goes through the same checks, its top in
-the chip top's place and without IO cells.
+itself makes (the chip top and its vias) counted as a source of their own. The macros'
+own GDS structures and subcircuits are checked before LibreLane runs too
+(``check_macros``), so two macros that clash stop a run in seconds, not after its
+layout. An RTL project with macros (``chipleap.rtl.macros``) goes through the same
+checks, its top in the chip top's place and without IO cells.
+
+Two GDS structures are identical when they hold the same layout (``gds_names``), not
+only the same records: IHP's SRAM macros each carry their own copy of the same library
+cells, written in another order and placing vias that the generator named per macro.
 """
 
 from __future__ import annotations
@@ -22,13 +28,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chipleap.macro.gds import GdsError, structure_identities
-from chipleap.macro.layer import GDS_NAME
+from chipleap.macro.layer import GDS_NAME, MacroView
 
 FILE_MAX = 1 << 30
 MODULES_MAX = 100_000
@@ -74,23 +80,162 @@ def _read(path: Path) -> bytes:
     return path.read_bytes()
 
 
+# GDS record types: UNITS, ENDLIB, BGNSTR, STRNAME, ENDSTR, BOUNDARY, XY, ENDEL, SNAME,
+# PRESENTATION, and the records that begin an element (BOUNDARY, PATH, SREF, AREF, TEXT,
+# NODE, BOX).
+_UNITS, _ENDLIB, _BGNSTR, _STRNAME, _ENDSTR = 0x03, 0x04, 0x05, 0x06, 0x07
+_BOUNDARY, _XY, _ENDEL, _SNAME, _PRESENTATION = 0x08, 0x10, 0x11, 0x12, 0x17
+_ELEMENTS = frozenset({0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x15, 0x2D})
+# The GDSII stream format numbers its record types from HEADER (0x00) to LIBSECUR (0x3B).
+# A record of any other type is not GDSII: what it holds is unknown, so it is refused.
+_LAST_TYPE = 0x3B
+
+
+@dataclass
+class _Structure:
+    head: list[bytes]  # its records outside its elements, but BGNSTR and STRNAME
+    elements: list[list[bytes]]
+
+    def placed(self) -> list[bytes]:
+        return [r[4:].rstrip(b"\0") for el in self.elements for r in el if r[2] == _SNAME]
+
+
+def _structures(data: bytes) -> tuple[bytes | None, dict[bytes, _Structure]]:
+    """The UNITS record (None unless it is the stream's only one, before any structure)
+    and each structure by its name as written. A record that runs past the end, an
+    element outside a structure or a structure defined twice, differently, is an error."""
+    pos, n = 0, len(data)
+    units: list[bytes] = []
+    units_first = False
+    out: dict[bytes, _Structure] = {}
+    cur: _Structure | None = None
+    name = b""
+    element: list[bytes] | None = None
+    while pos + 4 <= n:
+        length, rtype = (data[pos] << 8) | data[pos + 1], data[pos + 2]
+        if length < 4 or pos + length > n:
+            raise MergeError(f"GDS: bad record length {length} at byte {pos}")
+        if rtype > _LAST_TYPE:
+            raise MergeError(f"GDS: unknown record type 0x{rtype:02x} at byte {pos}")
+        record = data[pos : pos + length]
+        pos += length
+        if rtype == _ENDLIB:
+            break
+        if rtype == _UNITS:
+            units_first = units_first or (not units and not out and cur is None)
+            units.append(record)
+        elif rtype == _BGNSTR:
+            cur, name, element = _Structure([], []), b"", None
+        elif cur is None:
+            if rtype in _ELEMENTS:
+                raise MergeError(f"GDS: an element outside a structure at byte {pos - length}")
+        elif element is not None:
+            if rtype == _ENDSTR:
+                raise MergeError(f"GDS: an element without its end at byte {pos - length}")
+            element.append(record)
+            if rtype == _ENDEL:
+                cur.elements.append(element)
+                element = None
+        elif rtype in _ELEMENTS:
+            element = [record]
+        elif rtype == _ENDSTR:
+            if name in out and out[name] != cur:
+                raise MergeError(f"GDS cell {name.decode('latin-1')} is defined twice in one file")
+            out[name] = cur
+            cur = None
+        elif rtype == _STRNAME and not name:
+            name = record[4:].rstrip(b"\0")
+        else:
+            cur.head.append(record)
+    return (units[0] if len(units) == 1 and units_first else None), out
+
+
+def _outline(record: bytes) -> bytes:
+    """A BOUNDARY's XY with its vertices in one order, whichever vertex the file starts
+    the polygon at and whichever way round it goes."""
+    body = record[4:]
+    if len(body) % 8:
+        raise MergeError("GDS: an XY record has an odd number of coordinates")
+    vertices = list(struct.iter_unpack(">ii", body))
+    if len(vertices) > 1 and vertices[0] == vertices[-1]:
+        vertices.pop()
+    if not vertices:
+        return b""
+    low = min(vertices)
+    ways = (vertices, vertices[::-1])
+    starts = [(w, i) for w in ways for i, v in enumerate(w) if v == low]
+    best = min(w[i:] + w[:i] for w, i in starts)
+    return struct.pack(f">{2 * len(best)}i", *(c for v in best for c in v))
+
+
+def _item(tag: bytes, payload: bytes) -> bytes:
+    """One item of what a layout's identity is computed from: a tag of one byte for its
+    kind and its length before its bytes, so that two different sequences of items are
+    never the same bytes, whatever the items hold."""
+    return tag + struct.pack(">Q", len(payload)) + payload
+
+
+def _element(records: list[bytes], ids: Mapping[bytes, str]) -> bytes:
+    """The digest of one element: its records, with the structure it places by that
+    structure's identity, not its name, its outline in one vertex order when it is a
+    BOUNDARY, and without its text's PRESENTATION (font and justification, which no
+    check reads). Each is an item of its own kind (``_item``)."""
+    h = hashlib.sha256()
+    boundary = records[0][2] == _BOUNDARY
+    for r in records:
+        if r[2] == _PRESENTATION:
+            continue
+        if r[2] == _SNAME:
+            placed = r[4:].rstrip(b"\0")
+            ref = ids.get(placed)
+            h.update(_item(b"S", ref.encode()) if ref else _item(b"N", placed))
+        elif r[2] == _XY and boundary:
+            h.update(_item(b"O", _outline(r)))
+        else:
+            h.update(_item(b"R", r))
+    return h.digest()
+
+
 def gds_names(data: bytes) -> dict[str, str]:
-    """Each structure of a GDS stream with its identity (its records and the file's
-    units, not the dates in its header), as macro/v1 defines identical structures
-    (``chipleap.macro.gds.structure_identities``). A name that is not plain is an error,
-    and so is one defined twice, differently, in one file."""
-    out: dict[str, str] = {}
-    try:
-        for raw, digest in structure_identities(data):
-            if not GDS_NAME.fullmatch(raw):
-                raise MergeError(f"GDS cell name {raw[:40]!r} is not plain")
-            current = raw.decode()
-            if current in out and out[current] != digest:
-                raise MergeError(f"GDS cell {current} is defined twice in one file")
-            out[current] = digest
-    except GdsError as exc:
-        raise MergeError(f"GDS: {exc}") from None
-    return out
+    """Each structure of a GDS stream with the identity of its layout: the file's UNITS
+    record, the structure's records outside its elements (not the dates in BGNSTR, but
+    STRCLASS and its properties), and the digests of its elements in any order, each
+    with the structure it places by that structure's identity, so the whole hierarchy
+    under a structure counts and the names of the structures in it do not. Every part is
+    an item with its kind and length (``_item``), so two different layouts never hash the
+    same bytes. In a file whose UNITS record is not its only one, before its first
+    structure, every identity is "", which matches nothing. A name that is not plain is an
+    error, and so are a record type GDSII does not have, a structure that contains itself
+    and one defined twice, differently, in one file."""
+    units, structures = _structures(data)
+    for raw in structures:
+        if not GDS_NAME.fullmatch(raw):
+            raise MergeError(f"GDS cell name {raw[:40]!r} is not plain")
+    if units is None:
+        return {raw.decode(): "" for raw in structures}
+    ids: dict[bytes, str] = {}
+    # Depth first without recursion: a structure's identity once those it places have one.
+    for top in structures:
+        stack, open_ = [(top, False)], set()
+        while stack:
+            name, ready = stack.pop()
+            if name in ids:
+                continue
+            s = structures[name]
+            if ready:
+                h = hashlib.sha256(_item(b"U", units))
+                for r in s.head:
+                    h.update(_item(b"H", r))
+                for d in sorted(_element(el, ids) for el in s.elements):
+                    h.update(_item(b"E", d))
+                ids[name] = h.hexdigest()
+                continue
+            if name in open_:
+                raise MergeError(f"GDS cell {name.decode()} contains itself")
+            open_.add(name)
+            stack.append((name, True))
+            stack += [(c, False) for c in s.placed() if c in structures and c not in ids]
+    return {raw.decode(): ids[raw] for raw in structures}
 
 
 def gds_source(label: str, path: Path) -> Source:
@@ -158,6 +303,19 @@ def check_modules(
         *(Source(f"macro {cell}", {cell: ""}) for cell in views),
     ]
     unique(sources, fold=False, what="module")
+
+
+# The macros' layouts and netlists, before LibreLane
+
+
+def check_macros(views: Iterable[MacroView]) -> None:
+    """The GDS structures and subcircuits of the macros a flow places, from their own
+    files, before LibreLane runs: what ``check_merges`` would refuse among them after
+    the layout, hours later. The standard cells, the IO cells and what the stream-out
+    makes are LibreLane's, and checked after it."""
+    every = list({v.cell: v for v in views}.values())
+    unique((gds_source(f"macro package {v.cell}", v.gds) for v in every), False, "GDS cell")
+    unique((spice_source(f"macro package {v.cell}", v.spice) for v in every), True, "subcircuit")
 
 
 # Layout and netlist, after LibreLane
