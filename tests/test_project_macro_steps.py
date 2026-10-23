@@ -460,9 +460,16 @@ def test_an_eco_passes_on_the_macros_chipleap_recorded_and_never_the_pdn_script(
         "sdf": {},
         "json_h": None,
     }
-    good = {"DESIGN_NAME": "counter", "CORE_AREA": [0, 0, 100, 100], "MACROS": {CELL: entry}}
+    good = {
+        "DESIGN_NAME": "counter",
+        "CORE_AREA": [0, 0, 100, 100],
+        "MACROS": {CELL: entry},
+        "IO_EXCLUDE_PIN_REGION": ["top:50-860"],
+    }
     out = E._settings(p, {**good, "PDN_CFG": "dir::pdn.tcl"}, sealed)
     assert out == good  # the grid is built before the state an ECO resumes from
+    with pytest.raises(E.EcoError, match="tool script"):
+        E._settings(p, {**good, "IO_EXCLUDE_PIN_REGION": ["top:[exec touch pwned]"]}, sealed)
     for bad, why in [
         ({"PDN_CFG": "dir::src/evil.tcl"}, "PDN_CFG"),
         ({"lef": ["dir::src/counter.v"]}, "not a view ChipLeap copied"),

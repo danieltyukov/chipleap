@@ -725,6 +725,8 @@ def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
     assert cfg["PL_RESIZER_SETUP_SLACK_MARGIN"] == 6.0
     assert cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"] == 5.0
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.2
+    # IHP's DRC deck runs after LibreLane, in parallel parts, not as LibreLane's step.
+    assert cfg["RUN_KLAYOUT_DRC"] is False
     monkeypatch.setenv(soc_step.HOLD_MARGIN_ENV, "0.3")
     assert soc_step.config(sources, 36.0)["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.3
     for bad in ("x", "nan", "-0.1", "2"):

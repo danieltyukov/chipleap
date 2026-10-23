@@ -393,7 +393,12 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     routed(counter_project)
     p = load_project(counter_project)
     _, sealed, _, _ = E.base(p)
-    good = {"DESIGN_NAME": "counter", "VERILOG_FILES": ["dir::src/counter.v"]}
+    good = {
+        "DESIGN_NAME": "counter",
+        "VERILOG_FILES": ["dir::src/counter.v"],
+        "DIODE_ON_PORTS": "in",  # every project's layout (chipleap.verify.pnr.port_diodes)
+        "DIODE_CELL": "sg13g2_antennanp/A",
+    }
     assert E._settings(p, good, sealed) == good
     # Every setting place and route shares passes on.
     assert E._settings(p, signoff(), sealed) == signoff()

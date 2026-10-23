@@ -44,6 +44,7 @@ from chipleap.verify.pnr import (
     PnrResult,
     macro_reach,
     parse_run,
+    port_diodes,
     run_librelane,
     signoff,
     with_ihp_antenna,
@@ -241,7 +242,8 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
     """LibreLane's settings for the project's hard macros: their views, the floorplan
     around them and their power, written into ``workdir``. An SRAM gets the macro grid
     over it; a package whose supply pins reach an edge gets them strapped to the rails,
-    as in a chip (``chipleap.chip.pdn``)."""
+    as in a chip (``chipleap.chip.pdn``). In a floorplan of ChipLeap's no pin goes along
+    the rows of macros (``chipleap.macro.place``)."""
     from chipleap.chip import merge, pdn
     from chipleap.chip.floorplan import Placed
     from chipleap.macro.layer import MacroImportError
@@ -320,7 +322,7 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
         workdir,
         views,
     )
-    return {
+    out: dict[str, Any] = {
         **MACRO_REPAIR,
         **macro_reach(fp, list(sizes.values())),
         "FP_SIZING": "absolute",
@@ -331,6 +333,9 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
     }
+    if fp.no_pins:
+        out["IO_EXCLUDE_PIN_REGION"] = place.pin_regions(fp)
+    return out
 
 
 def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -357,6 +362,7 @@ def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, A
         cfg["FP_SIZING"] = "absolute"
         cfg["DIE_AREA"] = [0, 0, w, h]
     cfg.update(signoff(*margins(project)))
+    cfg.update(port_diodes())
     cfg.update(project.pnr.librelane)
     # LibreLane hands these values to Tcl; refuse any a Tcl word could not hold as text.
     # The macros' entries are ChipLeap's own: checked names and paths it wrote.
@@ -394,9 +400,8 @@ def place_route(project: Project, workdir: Path | None = None) -> PnrResult:
         held = macros.pdk_cells(project)
     except macros.MacroStepError as exc:
         raise PnrError(f"macros: {exc}") from exc
-    r = parse_run(
-        metrics, clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS, gds, work / "runs" / RUN_TAG, held
-    )
+    mhz = clk.mhz if clk else 1000.0 / DEFAULT_PERIOD_NS
+    r = parse_run(metrics, mhz, gds, work / "runs" / RUN_TAG, held, io.pdk_dir())
     r = with_ihp_antenna(r, io.pdk_dir(), project.top, work)
     if not project.macros:
         return r

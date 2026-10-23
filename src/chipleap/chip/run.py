@@ -19,10 +19,12 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from functools import lru_cache
 from pathlib import Path
+from typing import BinaryIO
 
 from chipleap.rtl import builddir, confine
 from chipleap.verify.drc import DB_MAX
@@ -189,17 +191,124 @@ def ihp_runner(
             timeout,
             {"PYTHONPATH": module_dir},
         )
-        log = tail
-        if run_dir.is_dir():
-            for f in sorted(run_dir.iterdir()):
-                wanted = f.name in keep or f.suffix in (".lyrdb", ".log")
-                if not f.is_file() or not wanted:
-                    continue
-                if f.stat().st_size > DB_MAX:
-                    raise ToolError(
-                        f"IHP's {which.upper()} wrote {f.name}, larger than ChipLeap reads"
-                    )
-                builddir.write_bytes(out_dir, f.name, f.read_bytes())
-                if f.name in keep and f.suffix == ".log":
-                    log += "\n" + f.read_text(errors="replace")
+        log = tail + _copy_back(run_dir, out_dir, keep, which)
     return code, log
+
+
+def _copy_back(run_dir: Path, out_dir: Path, keep: tuple[str, ...], which: str) -> str:
+    """Copy the files named in ``keep``, every report (.lyrdb) and every log of a run of
+    IHP's runners into ``out_dir``; the text of the logs named in ``keep``."""
+    log = ""
+    if run_dir.is_dir():
+        for f in sorted(run_dir.iterdir()):
+            wanted = f.name in keep or f.suffix in (".lyrdb", ".log")
+            if not f.is_file() or not wanted:
+                continue
+            if f.stat().st_size > DB_MAX:
+                raise ToolError(f"IHP's {which.upper()} wrote {f.name}, larger than ChipLeap reads")
+            builddir.write_bytes(out_dir, f.name, f.read_bytes())
+            if f.name in keep and f.suffix == ".log":
+                log += "\n" + f.read_text(errors="replace")
+    return log
+
+
+def ihp_runs(
+    pdk: Path,
+    out_dir: Path,
+    inputs: dict[str, Path],
+    decks: Mapping[str, str],
+    cmds: Mapping[str, Callable[[Path, str], list[str]]],
+    timeout: float,
+) -> dict[str, tuple[int, str]]:
+    """Several KLayout runs at once in one private directory, as ``ihp_runner`` runs one
+    of IHP's runners: on copies of ``inputs``, beside ``decks`` (file name to text, decks
+    of ChipLeap's own), each command built from the run directory (made first) and the
+    Python with KLayout's module, every report and log in the run directory copied back.
+    Returns each command's exit code and output."""
+    found = python_with_klayout()
+    if found is None:
+        raise ToolError(
+            "IHP's DRC and LVS runners need a Python with KLayout's module (pip install "
+            "klayout); set CHIPLEAP_KLAYOUT_PYTHON to one"
+        )
+    python, module_dir = found
+    with private_dir("chipleap-drc-") as tmp:
+        for dest, src in inputs.items():
+            shutil.copyfile(src, tmp / dest)
+        for name, text in decks.items():
+            (tmp / name).write_text(text)
+        run_dir = tmp / "run"
+        run_dir.mkdir()
+        shm = [Path("/dev/shm")] if Path("/dev/shm").is_dir() else []
+        out = run_all(
+            {name: build(run_dir, python) for name, build in cmds.items()},
+            tmp,
+            [pdk, Path(module_dir), *shm],
+            out_dir,
+            timeout,
+            {"PYTHONPATH": module_dir},
+        )
+        _copy_back(run_dir, out_dir, (), "drc")
+    return out
+
+
+def run_all(
+    cmds: Mapping[str, list[str]],
+    cwd: Path,
+    read: Iterable[Path],
+    log_dir: Path,
+    timeout: float,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, tuple[int, str]]:
+    """``run`` for several commands at once, each with its output in ``log_dir/<name>.log``:
+    started together and waited for together; when the time limit passes or the wait is
+    cut short, every one of them is ended. Returns each one's exit code and the last part
+    of its output."""
+    read = list(read)
+    procs: dict[str, tuple[subprocess.Popen[bytes], BinaryIO]] = {}
+    with (
+        tempfile.TemporaryDirectory(prefix="chipleap-home-") as home,
+        tempfile.TemporaryDirectory(prefix="chipleap-out-") as sinks,
+        ExitStack() as stack,
+    ):
+        extra = {
+            "HOME": home,
+            "KLAYOUT_HOME": home,
+            "TMPDIR": home,
+            "QT_QPA_PLATFORM": "offscreen",
+            **(env or {}),
+        }
+        try:
+            for name, cmd in cmds.items():
+                argv, base = stack.enter_context(confine.confined(cmd, [*read, Path(home), cwd]))
+                sink = stack.enter_context(open(Path(sinks) / f"{name}.out", "w+b"))
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    env={**base, **extra},
+                    stdout=sink,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                procs[name] = (proc, sink)
+            deadline = time.monotonic() + timeout
+            for name, (proc, _) in procs.items():
+                try:
+                    proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    tool = Path(cmds[name][0]).name
+                    raise ToolError(f"{tool} did not finish in {timeout:g} s") from None
+        except BaseException:
+            for proc, _ in procs.values():
+                with suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+            raise
+        out = {}
+        for name, (proc, stream) in procs.items():
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - LOG_MAX))
+            data = stream.read()
+            builddir.write_bytes(log_dir, f"{name}.log", data)
+            out[name] = (proc.returncode, data[-4000:].decode(errors="replace"))
+    return out

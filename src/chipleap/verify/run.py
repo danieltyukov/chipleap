@@ -554,6 +554,7 @@ def soc_step_result(design: Design, s: SocResult, runtime_s: float) -> StepResul
         "drc_errors": r.drc_errors,
         "lvs_errors": r.lvs_errors,
         "antenna_nets": r.antenna_nets,
+        **r.ihp_drc_data(),
         **r.ihp_antenna_data(),
         "max_slew_violations": r.max_slew_violations,
         "max_cap_violations": r.max_cap_violations,
