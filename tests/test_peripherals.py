@@ -285,7 +285,7 @@ def test_the_bundle_carries_the_peripherals_and_the_pad_configuration(tmp_path):
 
 def test_a_design_without_peripherals_gets_the_default_and_round_trips():
     data = SMOLLM2.to_dict()
-    data.pop("peripherals")
+    assert "peripherals" not in data  # the default is left out
     assert Design.from_dict(data).peripherals == Peripherals()
     data["peripherals"] = {"uart": False}
     assert Design.from_dict(data).peripherals == Peripherals(uart=False)

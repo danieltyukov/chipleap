@@ -304,6 +304,10 @@ class Design:
         d.pop("notes")
         if self.accel is None:
             d["accel"] = None
+        # The default peripherals are left out, so design files written before they could
+        # be chosen read the same.
+        if self.peripherals == Peripherals():
+            d.pop("peripherals")
         return d
 
     @staticmethod

@@ -12,12 +12,14 @@ A bundle carries everything X-HEEP needs: a configuration for its generator, the
 - the code and data linker sections (X-HEEP's default 58 KiB of code, less when the banks are small);
 - the external slave window: X-HEEP's default 1 GiB at `0xC0000000`, or 2 GiB at `0x80000000` when more than 1 GiB lives in external memory.
 
-- the peripherals: X-HEEP's default without the SPI host, the I2C, the second SPI host (SPI2) and the I2S, which nothing in ChipLeap's model uses and which are most of X-HEEP's logic (the two SPI hosts about 62 kGE each on IHP SG13G2); the DMA with one master port, as the model's DMA moves 4 bytes per cycle, and two channels.
+- the peripherals: X-HEEP's always-on ones, which every X-HEEP has, and of the others only those the spec's `peripherals` section asks for ([spec.md](spec.md#peripherals)): the UART, the GPIO blocks for the pins it asks for, the second timer block, the SPI hosts, the I2C, the I2S, the PDM2PCM, the debug module's SPI slave, and the PLIC when one of them raises its interrupts through it; the DMA with the channels and master ports the section asks for. Without the section a design gets X-HEEP's default without the SPI host, the I2C, the second SPI host (SPI2) and the I2S, with a DMA of two channels on one master port, as the model's DMA moves 4 bytes per cycle.
 
-The interrupts, the address map and the pads (`configs/pad_cfg.py`) are X-HEEP's default; the pads keep the pins of the peripherals left out, since X-HEEP's MCU template wires them whatever it has. Generate the MCU with:
+The interrupts, the address map and the pads (`configs/pad_cfg.py`) are X-HEEP's default; the pads keep the pins of the peripherals left out, since X-HEEP's MCU template wires them whatever it has. The exception is the debug SPI slave: without it X-HEEP's MCU must not have its pins, so the bundle has a pad configuration of its own, `xheep/<name>_pads.py`, X-HEEP's default without them. Generate the MCU with:
 
 ```sh
 make mcu-gen X_HEEP_CFG=<bundle>/xheep/<name>.py
+# without the debug SPI slave:
+make mcu-gen X_HEEP_CFG=<bundle>/xheep/<name>.py PADS_CFG=<bundle>/xheep/<name>_pads.py
 ```
 
 `chipleap verify` runs X-HEEP's own validation and template rendering on the file; see [verification.md](verification.md).

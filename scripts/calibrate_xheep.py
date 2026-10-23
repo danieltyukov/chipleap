@@ -38,12 +38,14 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from chipleap.chip import io
 from chipleap.gen import soc as top
 from chipleap.gen.xheep import xheep_config
 from chipleap.hw import Accel, Design
 from chipleap.hw.design import Peripherals
+from chipleap.model import evaluate
 from chipleap.verify import soc, xheep
 from chipleap.verify.tools import ihp_liberty
 
@@ -89,12 +91,36 @@ CONFIGS: dict[str, Design] = {
         SMOLLM2,
         peripherals=Peripherals(uart=False, gpio=24, spi_hosts=2, dma_channels=8, dma_ports=4),
     ),
+    # The accelerator keeps one port: its buffers are macros only with one.
     "ntom": replace(
+        SMOLLM2, bus="NtoM", banks=2, peripherals=Peripherals(dma_channels=2, dma_ports=2)
+    ),
+}
+# Configurations the fit never sees, to check the model on: the keyword-spotting example's
+# peripherals, and two mixes of blocks, channel counts and banks no fitted one has.
+CHECKS: dict[str, Design] = {
+    "kws": replace(
+        SMOLLM2, peripherals=Peripherals(uart=False, gpio=8, timers=2, pdm2pcm=True)
+    ),
+    "mix": replace(
+        SMOLLM2,
+        peripherals=Peripherals(
+            uart=False,
+            gpio=24,
+            spi_hosts=1,
+            i2c=True,
+            spi_slave=False,
+            dma_channels=6,
+            dma_ports=2,
+        ),
+    ),
+    "ntom_il": replace(
         SMOLLM2,
         bus="NtoM",
         banks=2,
-        accel=replace(SMOLLM2.accel, ports=2),  # type: ignore[arg-type]
-        peripherals=Peripherals(dma_channels=2, dma_ports=2),
+        il_banks=2,
+        il_bank_kib=16,
+        peripherals=Peripherals(spi_hosts=1, i2s=True, dma_channels=4, dma_ports=4),
     ),
 }
 
@@ -215,15 +241,16 @@ def measure(args: argparse.Namespace) -> None:
     checkout = xheep.find_checkout(args.xheep)
     if checkout is None:
         raise SystemExit("no X-HEEP checkout (--xheep DIR or CHIPLEAP_XHEEP_DIR)")
-    names = args.configs.split(",") if args.configs else list(CONFIGS)
-    bad = [n for n in names if n not in CONFIGS]
+    every = {**CONFIGS, **CHECKS}
+    names = args.configs.split(",") if args.configs else list(every)
+    bad = [n for n in names if n not in every]
     if bad:
         raise SystemExit(f"unknown configurations: {', '.join(bad)}")
     yosys = shlex.split(args.yosys)
     failed = []
     with ThreadPoolExecutor(args.jobs) as pool:
         jobs = {
-            n: pool.submit(measure_one, n, CONFIGS[n], args.out, yosys, checkout) for n in names
+            n: pool.submit(measure_one, n, every[n], args.out, yosys, checkout) for n in names
         }
         for n, f in jobs.items():
             try:
@@ -251,50 +278,151 @@ def _lstsq(rows: list[list[float]], ys: list[float]) -> list[float]:
     return [b[i] / a[i][i] if a[i][i] else 0.0 for i in range(n)]
 
 
-def fit(args: argparse.Namespace) -> None:
-    from chipleap.model import evaluate
+# The blocks the model prices one by one (chipleap.model.evaluate.XHEEP_BLOCK_KGE).
+OPTIONAL = (
+    "spi_slave",
+    "ao_gpio",
+    "user_gpio",
+    "user_timer",
+    "plic",
+    "uart",
+    "spi_host",
+    "spi2",
+    "i2c",
+    "i2s",
+    "pdm2pcm",
+)
+Runs = dict[str, tuple[Design, dict[str, float]]]
 
-    runs = {}
-    for f in sorted(args.out.glob("*/blocks.json")):
+
+def _mean(xs: list[float]) -> float | None:
+    return sum(xs) / len(xs) if xs else None
+
+
+def prices(runs: Runs, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The model's constants fitted to ``runs``: each block's mean where it is there, the
+    least-squares fits of the parts that depend on the configuration. A term ``runs``
+    cannot fit comes from ``fallback``."""
+    vals = list(runs.values())
+    one = [(d, b) for d, b in vals if d.bus == "onetoM"]
+    ntom = [(d, b) for d, b in vals if d.bus == "NtoM"]
+
+    def pick(key: str, value: Any) -> Any:
+        if value is None:
+            if fallback is None:
+                raise SystemExit(f"no configuration measures {key}")
+            return fallback[key]
+        return value
+
+    flash = _mean([b["flash"] for _, b in one])
+    out: dict[str, Any] = {
+        "fixed": {
+            "flash SPI host": flash if flash is not None else pick("fixed", None)["flash SPI host"],
+            "debug module": _mean([b["debug"] for _, b in vals]),
+            "always-on": _mean([b["ao_timer"] + b["power_manager"] + b["glue"] for _, b in vals]),
+        },
+        "blocks": {},
+    }
+    for k in OPTIONAL:
+        v = _mean([b[k] for _, b in vals if b[k] > 0])
+        out["blocks"][k] = v if v is not None else pick("blocks", None)[k]
+    cache = _mean([b["flash"] for _, b in ntom])
+    out["flash cache"] = (
+        cache - out["fixed"]["flash SPI host"] if cache is not None else pick("flash cache", None)
+    )
+    p = [d.peripherals for d, _ in vals]
+    out["dma"] = tuple(
+        _lstsq([[1.0, x.dma_channels, x.dma_ports] for x in p], [b["dma"] for _, b in vals])
+    )
+    out["periph bus"] = tuple(
+        _lstsq(
+            [[1.0, len(evaluate.xheep_user_peripherals(x))] for x in p],
+            [b["user_xbar"] for _, b in vals],
+        )
+    )
+    out["bank"] = _mean([b["memory"] / (d.banks + d.il_banks) for d, b in vals])
+    out["onetoM"] = tuple(
+        _lstsq([[1.0, evaluate.bus_masters(d)] for d, _ in one], [b["bus"] for _, b in one])
+    )
+    pair = _mean([b["bus"] / (evaluate.bus_masters(d) * evaluate.bus_slaves(d)) for d, b in ntom])
+    out["ntom pair"] = pair if pair is not None else pick("ntom pair", None)
+    return out
+
+
+def apply(p: dict[str, Any]) -> None:
+    """Set the model's constants to ``p``."""
+    evaluate.XHEEP_FIXED_KGE = dict(p["fixed"])
+    evaluate.XHEEP_BLOCK_KGE = dict(p["blocks"])
+    evaluate.XHEEP_FLASH_CACHE_KGE = p["flash cache"]
+    evaluate.XHEEP_DMA_KGE = p["dma"]
+    evaluate.XHEEP_PERIPH_BUS_KGE = p["periph bus"]
+    evaluate.XHEEP_BANK_KGE = p["bank"]
+    evaluate.ONE_TO_M_BUS_KGE = p["onetoM"]
+    evaluate.NTOM_PAIR_KGE = p["ntom pair"]
+
+
+def model_kge(d: Design) -> float:
+    """The model's X-HEEP without the CPU: its logic and its bus."""
+    return evaluate.xheep_kge(d) + evaluate.bus_kge(d)
+
+
+def load(out: Path) -> Runs:
+    runs: Runs = {}
+    for f in sorted(out.glob("*/blocks.json")):
         data = json.loads(f.read_text())
         runs[f.parent.name] = (Design.from_dict(data["design"]), data["blocks"])
     if not runs:
-        raise SystemExit(f"no blocks.json under {args.out}")
+        raise SystemExit(f"no blocks.json under {out}")
+    return runs
+
+
+def fit(args: argparse.Namespace) -> None:
+    runs = load(args.out)
     names = list(runs)
-    cols = [*BLOCKS, "glue", "mcu"]
     print("kGE per block" + "".join(f"{n:>9}" for n in names))
-    for c in cols:
+    for c in [*BLOCKS, "glue", "mcu", "accelerator"]:
         print(f"{c:<13}" + "".join(f"{runs[n][1].get(c, 0.0):9.2f}" for n in names))
-
-    def dma_rows(sel):
-        return [[1.0, d.peripherals.dma_channels, d.peripherals.dma_ports] for d, _ in sel]
-
-    sel = list(runs.values())
+    spread = {
+        k: (max(xs) - min(xs)) / _mean(xs)  # type: ignore[operator]
+        for k in ("flash", "debug", *OPTIONAL)
+        if len(xs := [b[k] for d, b in runs.values() if b[k] > 0 and d.bus == "onetoM"]) > 1
+    }
+    worst = max(spread, key=lambda k: spread[k])
     print(
-        "\nDMA = a + b channels + c ports:", _fmt(_lstsq(dma_rows(sel), [b["dma"] for _, b in sel]))
-    )
-    one = [(d, b) for d, b in sel if d.bus == "onetoM"]
-    if one:
-        rows = [[1.0, evaluate.bus_masters(d)] for d, _ in one]
-        print("one-to-many bus = a + b masters:", _fmt(_lstsq(rows, [b["bus"] for _, b in one])))
-    rows = [[1.0, len(evaluate.xheep_user_peripherals(d.peripherals))] for d, _ in sel]
-    print(
-        "user interconnect = a + b peripherals:",
-        _fmt(_lstsq(rows, [b["user_xbar"] for _, b in sel])),
+        f"\nA block's largest spread between configurations: {worst}, {100 * spread[worst]:.2f} %"
     )
 
-    print("\nX-HEEP without the CPU: measured, model, error")
-    errs = []
+    shipped = {n: model_kge(d) for n, (d, _) in runs.items()}
+    full = prices(runs)
+    print("\nFitted to every configuration:")
+    for k, v in full.items():
+        print(f"  {k}: {_fmt(v)}")
+    apply(full)
+    print("\nX-HEEP without the CPU, kGE: measured; the model as shipped, fitted, left out")
+    errs: dict[str, list[float]] = {"shipped": [], "fitted": [], "left out": []}
     for n, (d, b) in runs.items():
         meas = b["mcu"] - b["cpu"]
-        model = evaluate.xheep_kge(d) + evaluate.bus_kge(d)
-        errs.append(abs(model - meas) / meas)
-        print(f"  {n:<6} {meas:8.1f} {model:8.1f} {100 * (model - meas) / meas:+6.2f} %")
-    print(f"  mean |error| {100 * sum(errs) / len(errs):.2f} %, worst {100 * max(errs):.2f} %")
+        fitted = model_kge(d)
+        apply(prices({k: v for k, v in runs.items() if k != n}, fallback=full))
+        left = model_kge(d)
+        apply(full)
+        row = {"shipped": shipped[n], "fitted": fitted, "left out": left}
+        for k, v in row.items():
+            errs[k].append(abs(v - meas) / meas)
+        print(
+            f"  {n:<6} {meas:8.1f}"
+            + "".join(f"  {v:8.1f} ({100 * (v - meas) / meas:+5.2f} %)" for v in row.values())
+        )
+    for k, e in errs.items():
+        print(f"  {k}: mean |error| {100 * sum(e) / len(e):.2f} %, worst {100 * max(e):.2f} %")
 
 
-def _fmt(xs: list[float]) -> str:
-    return ", ".join(f"{x:.3f}" for x in xs)
+def _fmt(x: Any) -> str:
+    if isinstance(x, dict):
+        return ", ".join(f"{k} {v:.2f}" for k, v in x.items())
+    if isinstance(x, tuple):
+        return ", ".join(f"{v:.3f}" for v in x)
+    return f"{x:.3f}"
 
 
 def main(argv: list[str] | None = None) -> None:

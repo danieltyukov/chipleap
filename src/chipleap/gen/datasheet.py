@@ -167,6 +167,8 @@ def datasheet(
         + " |",
         f"| External memory | {mem.name + (f' x {d.ext_channels}' if d.ext_channels > 1 else '') if mem else 'none'} |",
     ]
+    if not standalone:
+        lines.append(f"| Peripherals | always-on, {d.peripherals.summary()} |")
     if standalone:
         lines += [
             "",

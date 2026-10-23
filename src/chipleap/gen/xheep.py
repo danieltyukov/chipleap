@@ -142,8 +142,6 @@ def xheep_config(d: Design, ext_bytes: float = 0.0, spec_name: str = "") -> str:
     p = d.peripherals
     code = code_section_bytes(d)
     ext_start, ext_len = ext_window(ext_bytes)
-    # X-HEEP only allows the flash controller's cache on the NtoM bus.
-    flash_cache = "yes" if d.bus == "NtoM" else "no"
     il = ""
     if d.il_banks:
         il = f'    memory_ss.add_ram_banks_il({d.il_banks}, {d.il_bank_kib}, "data_interleaved")\n'
@@ -244,7 +242,7 @@ def xheep_config(d: Design, ext_bytes: float = 0.0, spec_name: str = "") -> str:
     base.add_peripheral(SOC_ctrl(0x00000000))
     base.add_peripheral(Bootrom(0x00010000))
     base.add_peripheral(SPI_flash(0x00020000, 0x00008000))
-    base.add_peripheral(W25Q128JW_Controller(0x00029000, 0x00007000, cache="{flash_cache}"))
+    base.add_peripheral(W25Q128JW_Controller(0x00029000, 0x00007000, cache="no"))
     base.add_peripheral(
         DMA(address=0x30000, length=0x10000, num_channels={p.dma_channels}, num_master_ports={p.dma_ports},
             num_channels_per_master_port={per_port})

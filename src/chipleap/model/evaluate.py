@@ -55,6 +55,8 @@ XHEEP_BLOCK_KGE = {
     "i2s": 8.22,
     "pdm2pcm": 0.0,
 }
+# The flash controller's cache, which X-HEEP has on the NtoM bus only.
+XHEEP_FLASH_CACHE_KGE = 0.0
 # The DMA: a + b per channel + c per master port.
 XHEEP_DMA_KGE = (1.09, 17.0, 0.0)
 # The user domain's address decoder and register demultiplexer: a + b per peripheral.
@@ -602,6 +604,8 @@ def xheep_parts_kge(d: Design) -> dict[str, float]:
     peripherals the design has with the user domain's bus that reaches them."""
     p = d.peripherals
     parts = dict(XHEEP_FIXED_KGE)
+    if d.bus == "NtoM":
+        parts["flash SPI host"] += XHEEP_FLASH_CACHE_KGE
     a, per_ch, per_port = XHEEP_DMA_KGE
     parts["DMA"] = a + per_ch * p.dma_channels + per_port * p.dma_ports
     parts["memory subsystem"] = XHEEP_BANK_KGE * (d.banks + d.il_banks)
@@ -629,13 +633,18 @@ def bus_masters(d: Design) -> int:
     return 3 + 3 * d.peripherals.dma_ports + (d.accel.ports + 1 if d.accel else 0)
 
 
+def bus_slaves(d: Design) -> int:
+    """Slaves of X-HEEP's system bus: its error slave, each bank, the debug module, the two
+    peripheral domains, the flash window and the external slave window."""
+    return d.banks + d.il_banks + 6
+
+
 def bus_kge(d: Design) -> float:
     """X-HEEP's system bus in kGE on IHP SG13G2 (``ONE_TO_M_BUS_KGE``, ``NTOM_PAIR_KGE``)."""
     if d.bus == "onetoM":
         a, per_master = ONE_TO_M_BUS_KGE
         return a + per_master * bus_masters(d)
-    slaves = d.banks + d.il_banks + 6
-    return NTOM_PAIR_KGE * bus_masters(d) * slaves
+    return NTOM_PAIR_KGE * bus_masters(d) * bus_slaves(d)
 
 
 def soc_logic_mm2(d: Design, tech: Technology) -> dict[str, float]:
