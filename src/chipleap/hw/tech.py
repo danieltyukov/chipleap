@@ -81,15 +81,15 @@ FLOP_OVERHEAD_NS = 0.45  # clock-to-Q plus setup of sg13g2_dfrbpq_1, typical cor
 #   1 x 8 engine's, routes in proportion to that datapath and its flop overhead: the 1 x 16
 #   engine took 10.20 ns, 1.920 times it, and the 1 x 32 11.53 ns, 1.981 times.
 #   ACCEL_SIGNOFF_FACTOR is the larger. It used to be ACCEL_ROUTED_NS over the GEMV 1 x 8's
-#   datapath, but on 3.0.14 the narrow designs route faster than on 3.0.0.dev44 and the wide
-#   trees do not: that ratio (1.938) would put the 1 x 32 at 88.7 MHz, where it met 86.7.
+#   datapath; on 3.0.14 that ratio (1.938) would put the 1 x 32 at 88.7 MHz, where it met
+#   86.7.
 # - A GEMV engine slows with its lanes, which make it larger: the 2 x 8 engine with four
 #   ports took 9.60 ns, under the port line below, and the 4 x 8 with two 9.96 ns.
 #   ACCEL_LANE_NS per doubling of lanes bounds the 4 x 8 from above.
 # - More ports make the engine larger and its wires longer. The GEMV 1 x 8 engine took
 #   9.30 ns with one port, 10.82 ns with eight (between flip-flops, through 6.4 ns of
 #   repeaters across the engine and a 0.65 ns hold buffer) and 11.05 ns with sixteen (a read
-#   port's data input into the engine through weak buffers, at 51 % core utilisation).
+#   port's data input into the engine through weak buffers, placed at 35 % core utilisation).
 #   ACCEL_PORT_NS is the line a + b x ports through one and eight ports; sixteen lie 1.5 ns
 #   under it. On 3.0.0.dev44 the engine took 9.11, 10.09 and 10.41 ns, sixteen 0.8 ns under
 #   that flow's line. Each port has an address generator of its own, so the DMA no longer
