@@ -202,6 +202,8 @@ def test_a_macro_build_on_its_own_clock_puts_its_macros_inside_the_crossings(tmp
         "u_accel.wbuf_s0_l0_m0",
         "u_accel.wbuf_s1_l0_m0",
     }
+    # No pin along either row of macros, as on one clock.
+    assert [s.split(":")[0] for s in cfg["IO_EXCLUDE_PIN_REGION"]] == ["top", "bottom"]
     pnr_sdc, signoff_sdc = ((work / n).read_text() for n in ("pnr.sdc", "signoff.sdc"))
     assert "set_max_delay -ignore_clock_latency 11.111" in pnr_sdc
     assert "set_max_transition 0.3 [current_design]" in pnr_sdc
