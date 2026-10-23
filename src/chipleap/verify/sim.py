@@ -160,7 +160,10 @@ def build(
     if cdc:
         rtl["chipleap_accel_cdc.sv"] = cdc_sv(banks.TOP if srams is not None else "chipleap_accel")
     rtl |= macro_rtl
+    # The build depends on the Verilator that made it too: another version may reject the
+    # RTL one accepts, or simulate it differently.
     sources = "".join(rtl.values()) + tb_text + header + " ".join(params)
+    sources += f"{tool.path} {tool.version}"
     digest = hashlib.sha256(sources.encode()).hexdigest()[:16]
     root = workdir or (cache_dir() / f"sim-{digest}")
     binary = root / "obj_dir" / ("Vchipleap_accel" if macro_rtl and not cdc else f"V{top}")

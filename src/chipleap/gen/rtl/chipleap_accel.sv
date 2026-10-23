@@ -1054,12 +1054,15 @@ module chipleap_accel_core #(
     end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        for (int v = 0; v < int'(V); v++) xq[v] <= '0;
-        for (int l = 0; l < int'(L); l++) for (int v = 0; v < int'(V); v++) wq[l][v] <= '0;
-      end else if (issue) begin
-        xq <= xv;
-        wq <= wv;
+      if (!rst_ni) for (int v = 0; v < int'(V); v++) xq[v] <= '0;
+      else if (issue) xq <= xv;
+    end
+    // Each lane's weights in a block of their own: Verilator 5.020 does not unroll a loop
+    // over every lane's of a wide engine (BLKLOOPINIT), as with the arrays' PEs below.
+    for (genvar l = 0; l < int'(L); l++) begin : g_wq
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) for (int v = 0; v < int'(V); v++) wq[l][v] <= '0;
+        else if (issue) wq[l] <= wv[l];
       end
     end
 
@@ -1185,9 +1188,12 @@ module chipleap_accel_core #(
     logic [31:0] blk, nblk;
     logic [TW-1:0] t, tstream;
     logic [31:0] tbase;  // word address of activation row t while streaming
-    // PE registers, row-major (r * C + c)
+    // PE registers, row-major (r * C + c). A PE passes its activation to the next column,
+    // so with one column no PE reads aq.
     logic signed [7:0] wq[R*C];
+    /* verilator lint_off UNUSEDSIGNAL */
     logic signed [7:0] aq[R*C];
+    /* verilator lint_on UNUSEDSIGNAL */
     logic signed [31:0] pq[R*C];
     logic signed [31:0] acc[ACC_ROWS*C];
     // The activation feed is registered before it enters the array, so the buffer read
@@ -1230,12 +1236,6 @@ module chipleap_accel_core #(
         t <= '0;
         tstream <= '0;
         tbase <= '0;
-        for (int r = 0; r < int'(R); r++)
-          for (int c = 0; c < int'(C); c++) begin
-            aq[r*C+c] <= '0;
-            pq[r*C+c] <= '0;
-            wq[r*C+c] <= '0;
-          end
         for (int c = 0; c < int'(C); c++) begin
           wb_v[c] <= 1'b0;
           wb_first[c] <= 1'b0;
@@ -1265,22 +1265,12 @@ module chipleap_accel_core #(
           tstream <= TW'(cd.tm + 32'(R + C));
         end else if (running) begin
           if (loading) begin
-            for (int c = 0; c < int'(C); c++)
-              wq[int'(t[RI-1:0])*C+c] <= (32'(c) < cd.tn) ?
-                  w_at(32'(c), blk * R + 32'(t)) : 8'sd0;
             if (32'(t) + 1 == 32'(R)) begin
               loading <= 1'b0;
               t <= '0;
               tbase <= a_base;
             end else t <= t + TW'(1);
           end else begin
-            for (int r = 0; r < int'(R); r++)
-              for (int c = 0; c < int'(C); c++) begin
-                logic signed [7:0] ain;
-                ain = (c == 0) ? feed_q[r] : aq[r*C+c-1];
-                aq[r*C+c] <= ain;
-                pq[r*C+c] <= ((r == 0) ? 32'sd0 : pq[(r-1)*C+c]) + 32'(mul8(ain, wq[r*C+c]));
-              end
             for (int c = 0; c < int'(C); c++) begin
               logic [31:0] m;
               m = 32'(t) - 32'(R) - 32'(c) - 32'd1;
@@ -1298,6 +1288,48 @@ module chipleap_accel_core #(
                 loading <= 1'b1;
               end
             end else t <= t + TW'(1);
+          end
+        end
+      end
+    end
+
+    // Row t's weights while loading, a word per column.
+    logic signed [7:0] wl[C];
+    always_comb
+      for (int c = 0; c < int'(C); c++)
+        wl[c] = (32'(c) < cd.tn) ? w_at(32'(c), blk * R + 32'(t)) : 8'sd0;
+
+    // Each PE's registers in a block of their own, at constant indices: Verilator 5.020
+    // (Ubuntu 24.04's) does not unroll a loop over a large array's PEs and rejects a
+    // nonblocking assignment to an array inside a loop it keeps (BLKLOOPINIT).
+    for (genvar r = 0; r < int'(R); r++) begin : g_row
+      for (genvar c = 0; c < int'(C); c++) begin : g_pe
+        logic signed [7:0] ain;
+        logic signed [31:0] pin;
+        if (c == 0) begin : g_aedge
+          assign ain = feed_q[r];
+        end else begin : g_ain
+          assign ain = aq[r*C+c-1];
+        end
+        if (r == 0) begin : g_ptop
+          assign pin = 32'sd0;
+        end else begin : g_pin
+          assign pin = pq[(r-1)*C+c];
+        end
+        always_ff @(posedge clk_i or negedge rst_ni) begin
+          if (!rst_ni) begin
+            aq[r*C+c] <= '0;
+            pq[r*C+c] <= '0;
+            wq[r*C+c] <= '0;
+          end else if (core_start) begin
+            // As the control block above decides: a start holds the PEs, a run steps them.
+          end else if (running) begin
+            if (loading) begin
+              if (int'(t[RI-1:0]) == r) wq[r*C+c] <= wl[c];
+            end else begin
+              aq[r*C+c] <= ain;
+              pq[r*C+c] <= pin + 32'(mul8(ain, wq[r*C+c]));
+            end
           end
         end
       end
@@ -1320,9 +1352,12 @@ module chipleap_accel_core #(
     localparam int unsigned C = COLS;
     logic running;
     logic [31:0] t, tend;
-    // PE registers, row-major (r * C + c)
+    // PE registers, row-major (r * C + c). A PE passes its activation to the next column and
+    // its weight to the next row, so with one column no PE reads aq, and with one row none wq.
+    /* verilator lint_off UNUSEDSIGNAL */
     logic signed [7:0] aq[R*C];
     logic signed [7:0] wq[R*C];
+    /* verilator lint_on UNUSEDSIGNAL */
     logic signed [31:0] pacc[R*C];
     // Both edge feeds are registered before they enter the array, so the buffer reads, the
     // weight unpacking and their address arithmetic are not in series with a multiply-add.
@@ -1361,33 +1396,47 @@ module chipleap_accel_core #(
         running <= 1'b0;
         t <= '0;
         tend <= '0;
-        for (int r = 0; r < int'(R); r++)
-          for (int c = 0; c < int'(C); c++) begin
+      end else if (core_start) begin
+        running <= 1'b1;
+        t <= '0;
+        tend <= cd.tk + 32'(R + C) - 32'd1;
+      end else if (running) begin
+        if (t + 1 == tend) running <= 1'b0;
+        t <= t + 1;
+      end
+    end
+
+    // Each PE's registers in a block of their own, at constant indices: Verilator 5.020
+    // (Ubuntu 24.04's) does not unroll a loop over a large array's PEs and rejects a
+    // nonblocking assignment to an array inside a loop it keeps (BLKLOOPINIT).
+    for (genvar r = 0; r < int'(R); r++) begin : g_row
+      for (genvar c = 0; c < int'(C); c++) begin : g_pe
+        logic signed [7:0] ain, win;
+        if (c == 0) begin : g_aedge
+          assign ain = afeed_q[r];
+        end else begin : g_ain
+          assign ain = aq[r*C+c-1];
+        end
+        if (r == 0) begin : g_wedge
+          assign win = wfeed_q[c];
+        end else begin : g_win
+          assign win = wq[(r-1)*C+c];
+        end
+        always_ff @(posedge clk_i or negedge rst_ni) begin
+          if (!rst_ni) begin
             aq[r*C+c] <= '0;
             wq[r*C+c] <= '0;
             pacc[r*C+c] <= '0;
-          end
-      end else begin
-        if (core_start) begin
-          running <= 1'b1;
-          t <= '0;
-          tend <= cd.tk + 32'(R + C) - 32'd1;
-        end else if (running) begin
-          for (int r = 0; r < int'(R); r++)
-            for (int c = 0; c < int'(C); c++) begin
-              logic signed [7:0] ain, win;
-              ain = (c == 0) ? afeed_q[r] : aq[r*C+c-1];
-              win = (r == 0) ? wfeed_q[c] : wq[(r-1)*C+c];
+          end else begin
+            // As the control block above decides: a start holds the PEs, a run steps them.
+            if (core_start) begin
+            end else if (running) begin
               aq[r*C+c] <= ain;
               wq[r*C+c] <= win;
               pacc[r*C+c] <= pacc[r*C+c] + 32'(mul8(ain, win));
             end
-          if (t + 1 == tend) running <= 1'b0;
-          t <= t + 1;
-        end
-        if (st_done) begin  // the output tile has been stored
-          for (int r = 0; r < int'(R); r++)
-            for (int c = 0; c < int'(C); c++) pacc[r*C+c] <= '0;
+            if (st_done) pacc[r*C+c] <= '0;  // the output tile has been stored
+          end
         end
       end
     end
@@ -1520,6 +1569,7 @@ module chipleap_accel #(
     output logic irq_o
 );
   /* verilator lint_off PINCONNECTEMPTY */  // the banks, unused with the buffers inside
+  /* verilator lint_off WIDTHCONCAT */  // their read data, tied off: over 8k bits in large arrays
   chipleap_accel_core #(
       .DATAFLOW(DATAFLOW),
       .ROWS(ROWS),
@@ -1575,5 +1625,6 @@ module chipleap_accel #(
       .wbank_rdata_i('0),
       .irq_o
   );
+  /* verilator lint_on WIDTHCONCAT */
   /* verilator lint_on PINCONNECTEMPTY */
 endmodule
