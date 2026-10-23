@@ -32,6 +32,7 @@ def evaluation_dict(ev: Evaluation, ops: bool = True) -> dict[str, Any]:
             "soc": round(ev.soc_mhz, 2),
             "soc_limit": round(ev.soc_limit_mhz, 2) if ev.soc_limit_mhz else None,
             "accelerator_limit": round(ev.accel_limit_mhz, 2) if ev.accel_limit_mhz else None,
+            "accelerator": ev.accel_clock_mhz or round(ev.soc_mhz, 2),
         },
         "bottleneck": ev.bound,
         "time_share": {k: round(v, 4) for k, v in ev.bound_share().items()},
