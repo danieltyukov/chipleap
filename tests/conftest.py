@@ -11,6 +11,14 @@ os.environ["CHIPLEAP_TECH_DIR"] = ""
 # The key that authenticates ChipLeap's manifests of build results: a fresh one for the
 # test run, never the user's.
 os.environ["CHIPLEAP_BUILD_KEY"] = str(Path(tempfile.mkdtemp(prefix="chipleap-key-")) / "build.key")
+# LibreLane's PDK: a stand-in root, so no test that fakes LibreLane installs the PDK (about
+# 800 MB) into the user's data directory. The gated runs of the real LibreLane
+# (CHIPLEAP_RUN_PNR, CHIPLEAP_RUN_IMPL) keep the user's own.
+if not (os.environ.get("CHIPLEAP_RUN_PNR") or os.environ.get("CHIPLEAP_RUN_IMPL")):
+    _librelane_pdk = Path(tempfile.mkdtemp(prefix="chipleap-librelane-pdk-"))
+    (_librelane_pdk / "ihp-sg13g2").mkdir()
+    os.environ["CHIPLEAP_LIBRELANE_PDK_ROOT"] = str(_librelane_pdk)
+    os.environ["XDG_DATA_HOME"] = str(_librelane_pdk / "data")
 
 
 # A small RTL project that lints clean on Verilator -Wall and slang -Wextra, with cocotb

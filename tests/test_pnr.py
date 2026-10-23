@@ -111,10 +111,12 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
         }
         return metrics, None
 
+    # Before run_librelane is replaced: importing chipleap.rtl.pnr while it is would bind
+    # the stand-in there for every later test.
+    monkeypatch.setattr("chipleap.rtl.pnr.check_merged", lambda *a: {})
     monkeypatch.setattr(pnr, "librelane", lambda: SimpleNamespace(found=True, path="ll"))
     monkeypatch.setattr(pnr, "_sv2v", lambda a, b: b.write_text(a.read_text()))
     monkeypatch.setattr(pnr, "run_librelane", run)
-    monkeypatch.setattr("chipleap.rtl.pnr.check_merged", lambda *a: {})
     r = pnr.place_and_route(SMOLLM2, 90.0, work, pdk=pdk)
     cfg = seen["cfg"]
     cell = "RM_IHPSG13_1P_256x64_c2_bm_bist"
@@ -125,6 +127,10 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     # Placed and routed against a slew limit under the macros' own, signed off against
     # LibreLane's constraints and every cell's own limit.
     assert cfg["PNR_SDC_FILE"] == "dir::pnr.sdc" and cfg["SIGNOFF_SDC_FILE"] == "dir::signoff.sdc"
+    # The legaliser reaches the band past the macro rows (test_the_legaliser_reaches_...),
+    # and hold is repaired with room for detailed routing at the macros' inputs.
+    assert cfg["PL_MAX_DISPLACEMENT_Y"] > 100
+    assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == pnr.MACRO_HOLD_MARGIN_NS == 0.15
     pnr_sdc, signoff_sdc = ((work / n).read_text() for n in ("pnr.sdc", "signoff.sdc"))
     assert "source $::env(SCRIPTS_DIR)/base.sdc" in pnr_sdc and "base.sdc" in signoff_sdc
     assert "set_max_transition 0.3 [current_design]" in pnr_sdc
@@ -224,6 +230,62 @@ def test_the_core_ends_at_the_widest_rows_last_halo():
     size = {m.instance: m for m in ms}
     right = max(p.x + size[p.instance].width for p in fp.macros) + place.HALO_UM
     assert 0 <= fp.core[2] - right < place.SITE_UM[0]
+
+
+def test_the_legaliser_reaches_past_the_macro_rows():
+    """LibreLane 3.0.14 puts a port's buffer at its pin; over the SmolLM2 accelerator's
+    macro rows the free rows were 161 um away and the legaliser's 100 um left 44 buffers
+    unplaced (DPL-0036). A layout with macros lets it reach the band and 50 um into it."""
+    from chipleap.macro import place
+
+    ms = [place.Macro(f"m{i}", 784.48, 118.78) for i in range(4)]
+    fp = place.rows(ms, 287000)
+    tops = [p for p in fp.macros if p.orient == "N"]
+    bottoms = [p for p in fp.macros if p.orient == "FS"]
+    reach = place.edge_reach_um(fp, ms)
+    assert reach == pytest.approx(fp.die[1] - (min(p.y for p in tops) - place.HALO_UM))
+    assert reach >= max(p.y for p in bottoms) + 118.78 + place.HALO_UM - 1e-6
+    assert 150 < reach < 170
+    assert pnr.macro_reach(fp, ms) == {"PL_MAX_DISPLACEMENT_Y": math.ceil(reach + 50)}
+    # A macro with rows between it and the core's edges leaves the default.
+    x0, y0, _, _ = fp.core
+    inner = place.Macro("inner", 100.0, 50.0)
+    mid = place.Floorplan(fp.die, fp.core, (place.Placed("inner", x0 + 60, y0 + 200, "N"),))
+    assert place.edge_reach_um(mid, [inner]) == 0
+    assert pnr.macro_reach(mid, [inner]) == {"PL_MAX_DISPLACEMENT_Y": 100}
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [("RM_IHPSG13_1P_1024x64_c2_bm_bist", 784.48, 336.46)] * 4,
+        [("RM_IHPSG13_1P_2048x64_c2_bm_bist", 784.48, 626.7)] * 4,
+        [("RM_IHPSG13_1P_4096x16_c3_bm_bist", 416.64, 618.3)] * 4,
+        # Rows of two depths, as the SoC's: the deeper decides.
+        [("RM_IHPSG13_1P_1024x32_c2_bm_bist", 416.64, 336.46)] * 8
+        + [("RM_IHPSG13_1P_256x64_c2_bm_bist", 784.48, 118.78)] * 4,
+    ],
+)
+def test_the_legaliser_reaches_the_band_past_the_deepest_row(rows):
+    """From a pin on either edge, the legaliser's limit covers the margin, the deepest
+    macro row with its halos and a row of the band, for IHP's deepest SRAMs too."""
+    from chipleap.macro import place
+
+    ms = [place.Macro(f"m{i}", w, h) for i, (_, w, h) in enumerate(rows)]
+    fp = place.rows(ms, 3.2e6)
+    size = {m.instance: m for m in ms}
+    tops = [p for p in fp.macros if p.orient == "N"]
+    bottoms = [p for p in fp.macros if p.orient == "FS"]
+    need = (
+        max(
+            max(fp.die[1] - (p.y - place.HALO_UM) for p in tops),
+            max(p.y + size[p.instance].height + place.HALO_UM for p in bottoms),
+        )
+        + place.SITE_UM[1]
+    )
+    deepest = max(m.height for m in ms) + 2 * place.HALO_UM + place.MARGIN_UM
+    limit = pnr.macro_reach(fp, ms)["PL_MAX_DISPLACEMENT_Y"]
+    assert need >= deepest and need <= limit <= need + 51
 
 
 def test_the_step_compares_cells_and_macros_with_the_model(tmp_path, monkeypatch):

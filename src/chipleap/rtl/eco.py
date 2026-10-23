@@ -55,13 +55,14 @@ from chipleap.rtl.openroad import (
 from chipleap.rtl.pnr import PNR_SDC_NAME, SDC_NAME, margins, pnr_data
 from chipleap.rtl.project import CORNERS, EcoChange, Project
 from chipleap.rtl.provenance import Sealed, SealError, seal, unseal
-from chipleap.verify import launch
+from chipleap.verify import launch, librelane_pdk
 from chipleap.verify.pnr import (
     DEF_TO_ODB,
     DETAILED_ROUTING,
     PnrError,
     PnrResult,
     begin_second_part,
+    for_librelane,
     klayout_drc,
     klayout_report,
     parse,
@@ -76,7 +77,6 @@ from chipleap.verify.result import StepResult
 from chipleap.verify.tools import (
     librelane,
     librelane_env,
-    librelane_pdk_args,
     librelane_ran,
     untrusted,
 )
@@ -91,8 +91,8 @@ REPAIR = "OpenROAD.ResizerTimingPostGRT"
 # its own step list instead.
 ROUTED_META = with_late_antenna_repair({"RUN_POST_GRT_RESIZER_TIMING": True})["meta"]
 STEP_ID_RE = re.compile(r"[A-Z][A-Za-z]*\.[A-Z][A-Za-z0-9]*")
-# The LibreLane variables ChipLeap's place and route writes (chipleap.rtl.pnr.config and
-# chipleap.verify.pnr.signoff), by the kind of value each takes. An ECO resumes LibreLane
+# The LibreLane variables ChipLeap's place and route writes (chipleap.rtl.pnr.config,
+# chipleap.verify.pnr.signoff and for_librelane), by the kind of value each takes. An ECO resumes LibreLane
 # with these, and with the project's own pnr.librelane settings that are numbers or
 # booleans; anything else in the configuration fails the ECO.
 TEMPLATE_KEYS = {
@@ -111,6 +111,9 @@ TEMPLATE_KEYS = {
     "FP_SIZING": "text",
     "DIE_AREA": "number",
     "RUN_MAGIC_DRC": "bool",
+    "ERROR_ON_KLAYOUT_DRC": "bool",
+    "SETUP_VIOLATION_CORNERS": "text",
+    "HOLD_VIOLATION_CORNERS": "text",
     "DRT_ANTENNA_REPAIR_ITERS": "number",
     "DEFAULT_CORNER": "text",
     "RUN_POST_GRT_RESIZER_TIMING": "bool",
@@ -118,10 +121,13 @@ TEMPLATE_KEYS = {
     "GRT_RESIZER_SETUP_SLACK_MARGIN": "number",
     "GRT_RESIZER_HOLD_SLACK_MARGIN": "number",
     "KLAYOUT_DRC_THREADS": "number",
+    "KLAYOUT_DRC_DEFINES": "drc_defines",
+    "PL_TIMING_DRIVEN": "bool",
     # A project with hard macros (chipleap.rtl.pnr.macro_config).
     "CORE_AREA": "number",
     "FP_MACRO_HORIZONTAL_HALO": "number",
     "FP_MACRO_VERTICAL_HALO": "number",
+    "PL_MAX_DISPLACEMENT_Y": "number",
     "MACROS": "macros",
     "PDN_CFG": "pdn",
     "RUN_POST_GRT_DESIGN_REPAIR": "bool",
@@ -429,6 +435,13 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
         if kind == "macros":
             _macros(value, sealed)
             continue
+        if kind == "drc_defines":
+            # ChipLeap's own (``chipleap.verify.pnr.for_librelane``), which the ECO's
+            # run writes again.
+            if value != {"threads": str(cfg.get("KLAYOUT_DRC_THREADS"))}:
+                raise EcoError(f"the routed run's configuration sets {key} to {value!r}")
+            del out[key]
+            continue
         if kind == "pdn":
             # ChipLeap's power grid script: the ECO resumes after the grid is built, so it
             # is not passed on, and a script is never run from a configuration.
@@ -583,12 +596,13 @@ def _run_librelane(
     if not tool.found or tool.path is None:
         raise OpenroadUnavailable("LibreLane is not installed")
     try:
-        pdk_args = librelane_pdk_args()
+        pdk_root = librelane_pdk.ensure()
         env = librelane_env()
     except ValueError as exc:
         raise EcoError(str(exc)) from None
+    cfg = for_librelane(cfg, tool.version)
     builddir.write_text(work, "config.eco.json", json.dumps(cfg, indent=2))
-    base = [tool.path, *pdk_args, "--run-tag", ECO_TAG]
+    base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", ECO_TAG]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
     start = time.monotonic()
     route_log = work / "librelane-eco-route.log"
@@ -598,7 +612,7 @@ def _run_librelane(
     )
     run = run_dir_of(work)
     try:
-        librelane_ran(run)
+        librelane_ran(run, pdk_root)
     except ValueError as exc:
         raise EcoError(str(exc)) from None
     routed = step_state(run, DETAILED_ROUTING)

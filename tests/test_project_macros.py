@@ -3,7 +3,9 @@ synthesis, simulation, place and route) or say they cannot yet."""
 
 from __future__ import annotations
 
+import json
 import shutil
+from fnmatch import fnmatch
 from pathlib import Path
 
 import pytest
@@ -199,6 +201,7 @@ def test_place_and_route_sizes_the_die_around_the_macro(
     assert set(entry["lib"]) == {"*_typ_*", "*_slow_*", "*_fast_*"}
     assert cfg["PDN_CFG"] == "dir::pdn.tcl"
     assert cfg["RUN_POST_GRT_DESIGN_REPAIR"] is True
+    assert cfg["PL_MAX_DISPLACEMENT_Y"] >= 100
     script = (work / "pdn.tcl").read_text()
     assert "-inst_pattern {^u_mem$} -pin_pattern {^VDDARRAY!$} -power" in script
     x = entry["instances"]["u_mem"]["location"][0]
@@ -235,6 +238,8 @@ def test_a_die_of_the_projects_own_places_each_macro_where_it_says(
     loc = cfg["MACROS"][CELL]["instances"]["u_mem"]
     assert loc["orientation"] == "FS"
     assert loc["location"] == [cfg["CORE_AREA"][0] + 60, cfg["CORE_AREA"][1] + 20]
+    # Rows between the macro's halo and the core's edge: the legaliser keeps its default.
+    assert cfg["PL_MAX_DISPLACEMENT_Y"] == 100
     assert "IO_EXCLUDE_PIN_REGION" not in cfg  # the project's floorplan, its pins
     # Under no TopMetal2 supply pair: refused, with where it could go.
     edit(
@@ -424,6 +429,8 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
 
     def run(workdir, cfg, tag="chipleap", *, late_antenna_repair=False):
         assert late_antenna_repair  # every layout but the SoC's repairs antennas twice
+        # LibreLane leaves the verdict to ChipLeap: its own would end the run on exit 2.
+        assert cfg["ERROR_ON_KLAYOUT_DRC"] is False
         (workdir / "config.json").write_text("{}")
         reports = workdir / "runs" / tag / "66-klayout-drc" / "reports"
         reports.mkdir(parents=True, exist_ok=True)
@@ -467,6 +474,171 @@ def test_off_grid_pin_markers_in_the_pdks_sram_are_reported_apart_and_pass(
             "1 DRC, 0 LVS and 0 antenna violations, 0 slew and 0 capacitance violations; "
             "4 pin markers" in result.summary
         )
+
+
+BLDRV = "RM_IHPSG13_1P_BLDRV"
+SLOW, TYP, FAST = "nom_slow_1p08V_125C", "nom_typ_1p20V_25C", "nom_fast_1p32V_m40C"
+
+
+def _timing(setup: tuple[float, ...], hold: tuple[float, ...]) -> dict[str, float]:
+    """LibreLane's worst slacks, per corner (slow, typical, fast) and overall."""
+    out: dict[str, float] = {}
+    for kind, values in (("setup", setup), ("hold", hold)):
+        for corner, v in zip((SLOW, TYP, FAST), values, strict=True):
+            out[f"timing__{kind}__ws__corner:{corner}"] = v
+        out[f"timing__{kind}__ws"] = min(values)
+    return out
+
+
+MET = _timing((9.7, 12.1, 15.0), (0.5, 1.0, 0.3))
+MARKERS = [("metal1_pin_Offgrid", f"{BLDRV}:r0")] * 8  # what the example's SRAM has
+
+
+def _deferred(cfg: dict, metrics: dict, drc_count: int) -> list[str]:
+    """The deferred errors of LibreLane 3.0.14's checkers on IHP-Open-PDK 22f2a25, as far as
+    these tests need them: a KLayout DRC count unless ERROR_ON_KLAYOUT_DRC is off, and a
+    negative worst slack at a corner SETUP_VIOLATION_CORNERS (else IHP's
+    TIMING_VIOLATION_CORNERS, "*") or HOLD_VIOLATION_CORNERS (LibreLane's default, "*")
+    matches; "" matches none."""
+    errors = []
+    if drc_count and cfg.get("ERROR_ON_KLAYOUT_DRC", True):
+        errors.append(f"{drc_count} KLayout DRC errors found.")
+    for kind in ("setup", "hold"):
+        corners = [c for c in (cfg.get(f"{kind.upper()}_VIOLATION_CORNERS") or ["*"]) if c]
+        for key, value in metrics.items():
+            corner = key.partition(f"timing__{kind}__ws__corner:")[2]
+            if corner and value < 0 and any(fnmatch(corner, c) for c in corners):
+                errors.append(f"{kind} violations at {corner}")
+    return errors
+
+
+@pytest.fixture
+def librelane_3014(sram_project, stand_in_pdk, monkeypatch, module_check, tmp_path):
+    """Place and route of the SRAM example through ``run_librelane`` with a LibreLane that
+    behaves like 3.0.14 at the end of a run: it writes final/ and exits 2 on a deferred
+    error (``_deferred``). Set ``items`` (KLayout DRC report) and ``metrics`` first; each
+    run records the errors under ChipLeap's configuration and under LibreLane's own."""
+    from chip_fakes import _gds
+    from chipleap.rtl import pnr
+    from chipleap.verify import pnr as accel_pnr
+
+    gds = stand_in_pdk / "libs.ref" / "sg13g2_sram" / "gds" / f"{CELL}.gds"
+    gds.write_bytes(_gds(CELL, BLDRV))
+    tool = tmp_path / "librelane"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(tool))
+    monkeypatch.setattr(pnr, "_cell_area", lambda project, workdir: 20000.0)
+    monkeypatch.setattr(pnr, "check_merged", lambda *a: {})
+    monkeypatch.setattr(
+        accel_pnr, "patch_min_area", lambda *a, **k: (accel_pnr.AFTER_ROUTING, None)
+    )
+    state: dict = {"items": [], "metrics": MET, "runs": []}
+
+    def fake(cmd, workdir, log, timeout, limit, env):
+        run = workdir / "runs" / "chipleap"
+        log.write_text("")
+        if "--to" in cmd:
+            routed = run / "45-openroad-detailedrouting"
+            routed.mkdir(parents=True)
+            (routed / "state_out.json").write_text("{}")
+            return 0
+        reports = run / "66-klayout-drc" / "reports"
+        reports.mkdir(parents=True)
+        (reports / "drc.klayout.lyrdb").write_text(
+            "<report-database><items>"
+            + "".join(
+                f"<item><category>'{r}'</category><cell>{c}</cell></item>"
+                for r, c in state["items"]
+            )
+            + "</items></report-database>"
+        )
+        metrics = {**state["metrics"], "klayout__drc_error__count": len(state["items"])}
+        (run / "final").mkdir()
+        (run / "final" / "metrics.json").write_text(json.dumps(metrics))
+        cfg = json.loads((workdir / cmd[-1]).read_text())
+        ours, theirs = (_deferred(c, metrics, len(state["items"])) for c in (cfg, {}))
+        state["runs"].append({"chipleap": ours, "librelane": theirs})
+        return 2 if ours else 0
+
+    monkeypatch.setattr(accel_pnr, "_librelane", fake)
+    state["project"] = load_project(sram_project)
+    return state
+
+
+def test_the_srams_markers_alone_pass_where_librelanes_gate_would_end_the_run(librelane_3014):
+    from chipleap.rtl import pnr
+
+    librelane_3014["items"] = MARKERS
+    result = pnr.pnr(librelane_3014["project"])
+    assert result.status == "pass", result.summary
+    assert result.data["drc_errors"] == 0
+    assert result.data["pin_markers_in_pdk_macros"][0]["count"] == 8
+    assert librelane_3014["runs"] == [
+        {"chipleap": [], "librelane": ["8 KLayout DRC errors found."]}
+    ]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("M1.b", f"{BLDRV}:r0"),  # another rule, inside the SRAM
+        ("metal1_pin_Offgrid", "scratchpad"),  # the marker rule in the design's own cell
+        ("metal1_pin_Offgrid", "sg13g2_dfrbp_1"),  # and in a standard cell, no PDK macro
+    ],
+)
+def test_without_librelanes_drc_gate_one_error_beyond_the_markers_fails(librelane_3014, extra):
+    from chipleap.rtl import pnr
+
+    librelane_3014["items"] = [*MARKERS, extra]
+    result = pnr.pnr(librelane_3014["project"])
+    assert result.status == "fail" and result.data["drc_errors"] == 1, result.summary
+    assert "1 DRC, 0 LVS and 0 antenna violations" in result.summary
+    assert "; 8 pin markers off the grid" in result.summary
+    assert librelane_3014["runs"][0]["chipleap"] == []  # judged by ChipLeap, not LibreLane
+
+
+def test_without_librelanes_timing_gate_a_slow_corner_miss_is_reported_as_missed(
+    librelane_3014,
+):
+    """Setup met at the typical corner and missed by 0.4 ns at the slow one: IHP's
+    configuration at 22f2a25 checks every corner, so LibreLane would end the run; ChipLeap
+    reads it and reports the clock it does meet."""
+    from chipleap.rtl import pnr
+
+    librelane_3014["metrics"] = _timing((-0.4, 1.2, 3.0), (0.5, 1.0, 0.3))
+    result = pnr.pnr(librelane_3014["project"])
+    assert result.status == "fail", result.summary
+    assert "50 MHz on clk_i missed at the slow corner (about 49 MHz" in result.summary
+    assert result.data["setup_slack_ns"] == -0.4
+    assert librelane_3014["runs"] == [
+        {"chipleap": [], "librelane": [f"setup violations at {SLOW}"]}
+    ]
+
+
+def test_without_librelanes_timing_gate_a_fast_corner_hold_miss_fails(librelane_3014):
+    from chipleap.rtl import pnr
+
+    librelane_3014["metrics"] = _timing((9.7, 12.1, 15.0), (0.5, 1.0, -0.05))
+    result = pnr.pnr(librelane_3014["project"])
+    assert result.status == "fail", result.summary
+    assert "50 MHz on clk_i met at the slow corner" in result.summary
+    assert "; hold missed by 0.050 ns; DRC, LVS and antenna clean" in result.summary
+    assert result.data["hold_slack_ns"] == -0.05
+    assert librelane_3014["runs"] == [{"chipleap": [], "librelane": [f"hold violations at {FAST}"]}]
+
+
+def test_a_gate_the_project_turns_back_on_ends_the_run(librelane_3014, sram_project):
+    """A project may hand LibreLane its own verdict again (pnr.librelane); the run then
+    ends on exit 2 and is not read."""
+    from chipleap.rtl import pnr
+
+    data = yaml.safe_load((sram_project / "project.yaml").read_text())
+    data.setdefault("pnr", {}).setdefault("librelane", {})["ERROR_ON_KLAYOUT_DRC"] = True
+    (sram_project / "project.yaml").write_text(yaml.safe_dump(data))
+    librelane_3014["items"] = MARKERS
+    result = pnr.pnr(load_project(sram_project))
+    assert result.status == "fail" and "did not finish (exit 2)" in result.summary
 
 
 @pytest.mark.skipif(shutil.which("yosys") is None, reason="Yosys not installed")
