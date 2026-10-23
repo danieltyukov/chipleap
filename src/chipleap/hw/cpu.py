@@ -55,7 +55,7 @@ CPUS: dict[str, CPUModel] = {
         CPUModel(
             "cv32e20",
             "CV32E20 (2-stage, RV32IMC)",
-            kge=33.9,  # measured in the SmolLM2 SoC (chipleap.model.evaluate.XHEEP_BASE_KGE)
+            kge=33.9,  # measured in the SmolLM2 SoC (scripts/calibrate_xheep.py)
             cycles_per_mac={8: 6.0, 4: 8.0, 2: 9.0},
             vector_factor=1.6,
             xheep_expr='cv32e20(rv32e=False, rv32m="RV32MFast")',

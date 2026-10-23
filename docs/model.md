@@ -174,7 +174,7 @@ Per step:
 Core area, excluding pads:
 
 - CPU: kGE x NAND2 area / 0.7 placement utilisation.
-- SoC logic: 208.4 kGE for X-HEEP as ChipLeap configures it ([xheep.md](xheep.md)): the debug module with its SPI slave (33 kGE), the DMA (35 kGE), the flash's SPI host and controller (68 kGE), GPIO, UART, timers, interrupt controllers, boot ROM, power manager and pad control; plus the bus (6.1 kGE one-to-many, 0.6 kGE per master and slave pair for NtoM). Measured on the SmolLM2 SoC with Yosys and ABC against IHP SG13G2's typical liberty, the hierarchy kept, the CPU, the accelerator and the bus taken out: 208.4 kGE of 288.0. With X-HEEP's default peripherals (two more SPI hosts at 62 kGE each, the I2C, the I2S, a DMA with two master ports) it was 401.8 kGE, 409.6 with the bus. LibreLane's synthesis of the same SoC, which maps for area, comes out 12 % smaller (253.8 kGE in all), so the step that lays the SoC out reads the model about that much high.
+- SoC logic: X-HEEP's logic besides the CPU, priced block by block for the peripherals the design has ([below](#x-heeps-logic-block-by-block)), and its system bus: 208.4 kGE and 6.1 kGE of bus on the SmolLM2 SoC. LibreLane's synthesis of that SoC, which maps for area, comes out 12 % smaller (253.8 kGE in all), so the step that lays the SoC out reads the model about that much high.
 - SRAM: on IHP SG13G2 each of X-HEEP's banks is the PDK's single-port macros of 32-bit words with a bit mask that hold it (`chipleap.model.evaluate.bank_mm2`), as the SoC's layout builds it (X-HEEP writes bytes, and the one macro without a mask, 8192 x 32, cannot): a 32 KiB bank is eight 1024 x 32 macros, 1.121 mm2, where the density formula gave 0.947 mm2. Other nodes build each bank from the largest macros available, as `macros x periphery + KiB x array`.
 - Accelerator logic: `accel_logic_kge`, fitted to Yosys synthesis of the generated RTL on SG13G2 (below): 24.9 kGE of control, registers and store engine, 2.8 kGE per OBI read port (its address generator, request and response queue), and per dataflow a cost per MAC plus a cost per lane, column or array edge. Weight width does not enter, because the PEs multiply 8 x 8 and only the unpacking depends on it. On IHP SG13G2 a GEMV engine whose buffers are banks of macros (next item) also has the banks' interface (`accel_bank_kge`): the macros' write path and the registers that read each chunk a cycle ahead, 5.5 kGE plus 0.10 kGE per MAC, plus 1.0 kGE with a double buffer.
 - Accelerator buffers: SRAM macros. On IHP SG13G2 they are IHP's own single-port macros (`chipleap.macro.sram.IHP_1P`, the PDK's outlines, no PDK needed): a GEMV engine with COLS of 4, 8 or 16 gets exactly the banks the layout places for a one-port build (`chipleap.gen.banks`: per slot of a double buffer, and per lane for the weights, COLS bytes wide), whatever its number of ports, since more ports read the same words; any other build gets each slot of each buffer in macros of 32-bit words. So does a GEMV engine whose banks' two rows of macros would leave a core more than four times as wide as tall, such as the 1 x 16 with a double buffer (eight 784 um macros, a core of 3249 x 438 um): it did not route, so place and route keeps flop buffers, and the model prices and times it as a build without banks, with no bank interface and the flop-buffer build's clock. Both decide by one function, `chipleap.gen.banks.layout_reason`, and the evaluation names the reason in its warnings. A slot costs the macro that holds it: the SmolLM2 example's 1 KiB slots of 64-bit words take 256x64 macros, half empty, 0.373 mm2 for 4 KiB of buffers where the density formula gives 0.186 mm2. Other nodes use `macros x periphery + KiB x array` per buffer.
@@ -182,6 +182,54 @@ Core area, excluding pads:
 - Memory interface: PHY area (LPDDR only, scaled linearly from 28 nm) plus controller logic.
 
 `chipleap verify` synthesizes the accelerator's logic with Yosys on SG13G2 and reports how far this estimate is from it (cell area against cell area, before the utilisation factor).
+
+### X-HEEP's logic, block by block
+
+`chipleap.model.evaluate.xheep_parts_kge` prices each block of X-HEEP the design has, from hierarchical syntheses of the SmolLM2 SoC with X-HEEP configured six ways (`scripts/calibrate_xheep.py`): Yosys 0.54 with yosys-slang and ABC against IHP SG13G2's typical liberty, the hierarchy kept. A hierarchical synthesis optimizes no logic across a module's boundary, so a block is the subtree of its instances and measures the same in every configuration that has it, within 0.8 % (the debug module varies most).
+
+Every X-HEEP ChipLeap configures has the flash's SPI host with its controller (68.34 kGE; the controller has no cache, [xheep.md](xheep.md)), the debug module with its JTAG port (13.61 kGE) and the always-on domain's other blocks: SoC control, boot ROM, power manager, timers 0 and 1, the fast interrupt controller, the domain's bus and the bridge to the user domain (22.65 kGE). The peripherals the spec chooses ([spec.md](spec.md#peripherals)) add:
+
+| Block | kGE |
+|---|---|
+| The debug module's SPI slave | 18.98 |
+| GPIO 0 to 7 (always-on) | 10.17 |
+| GPIO 8 to 31 | 10.17 |
+| Timers 2 and 3 | 6.18 |
+| PLIC | 11.17 |
+| UART | 9.75 |
+| SPI host | 61.71 |
+| SPI2 | 61.75 |
+| I2C | 24.47 |
+| I2S | 8.23 |
+| PDM2PCM | 25.90 |
+
+The rest grows with the configuration:
+
+- the DMA: -0.129 + 17.962 per channel - 0.694 per master port (the same channels on more ports measure slightly smaller: four channels are 71.00 kGE on one port, 70.41 on two);
+- the user domain's address decoder and register demultiplexer: 0.259 + 0.376 per peripheral there;
+- the memory subsystem: 0.536 per bank;
+- the one-to-many bus: 1.094 + 0.632 per master; the NtoM crossbar: 0.493 per master and slave pair. The masters are the CPU's two ports, the debug module, three per DMA master port (read, write and address) and the accelerator's read ports and its write port; the slaves are the banks and six others (`bus_masters`, `bus_slaves`).
+
+The prices reproduce the SmolLM2 SoC exactly, since its layout and its clock were fitted with its area: a block it has is priced from it, the lines go through it with their slopes fitted to the other configurations by least squares, and a block it lacks is the mean of the configurations that have it. X-HEEP without the CPU, in kGE, for the configurations fitted (the first is X-HEEP's default peripherals, the second the SmolLM2 SoC):
+
+| Peripherals | Bus | Measured | Model | Fitted without it |
+|---|---|---|---|---|
+| UART, 32 GPIO, 4 timers, 2 SPI hosts, I2C, I2S, debug SPI slave, DMA 4 ch, 2 ports | one-to-many, 1 bank | 409.5 | 409.3 (-0.04 %) | 409.3 (-0.06 %) |
+| UART, 32 GPIO, 4 timers, debug SPI slave, DMA 2 ch | one-to-many, 1 bank | 214.6 | 214.6 (+0.00 %) | 214.6 (+0.00 %) |
+| 2 timers, DMA 1 ch | one-to-many, 1 bank | 128.5 | 128.7 (+0.13 %) | 128.6 (+0.05 %) |
+| UART, 8 GPIO, 2 timers, 1 SPI host, I2C, I2S, PDM2PCM, DMA 4 ch | one-to-many, 1 bank | 336.3 | 336.2 (-0.02 %) | (only it has the PDM2PCM) |
+| 24 GPIO, 4 timers, 2 SPI hosts, debug SPI slave, DMA 8 ch, 4 ports | one-to-many, 1 bank | 429.6 | 429.9 (+0.05 %) | 429.3 (-0.07 %) |
+| UART, 32 GPIO, 4 timers, debug SPI slave, DMA 2 ch, 2 ports | NtoM, 2 banks | 252.0 | 251.6 (-0.16 %) | (the only NtoM one) |
+
+and for three the fit never sees (the first is the keyword-spotting example's peripherals):
+
+| Peripherals | Bus | Measured | Model |
+|---|---|---|---|
+| 8 GPIO, 2 timers, PDM2PCM, debug SPI slave, DMA 2 ch | one-to-many, 1 bank | 202.0 | 202.1 (+0.03 %) |
+| 24 GPIO, 4 timers, 1 SPI host, I2C, DMA 6 ch, 2 ports | one-to-many, 1 bank | 334.8 | 335.3 (+0.15 %) |
+| UART, 32 GPIO, 4 timers, 1 SPI host, I2S, debug SPI slave, DMA 4 ch, 4 ports | NtoM, 2 banks and 2 interleaved | 405.6 | 398.3 (-1.81 %) |
+
+The NtoM crossbar grows a little faster than its master and slave pairs: 0.533 kGE per pair at 17 masters and 10 slaves, against the 0.493 the model takes from 11 and 8, which is most of the miss on the last configuration.
 
 ## Technology data
 

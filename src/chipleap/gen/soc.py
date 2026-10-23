@@ -9,7 +9,8 @@ leaves to a technology, written for IHP SG13G2.
   the peripherals the configuration has, the external memory's OBI ports that something
   uses, ``EXT_SLAVE_USED``, the pad control bus) is a port of the top, with X-HEEP's own
   types; the rest is tied off as a chip without coprocessor, external power domains or
-  hardware FIFOs ties it (``TIED``, ``OPEN`` and ``ABSENT_PINS``). A port this module
+  hardware FIFOs ties it (``TIED``, ``OPEN``, and the pads of the peripherals the
+  configuration leaves out, ``chipleap.gen.xheep.absent_pins``). A port this module
   does not know stops it, so a different X-HEEP cannot be wired by guess.
 - ``sram_wrapper``, X-HEEP's bank, in IHP's single-port macros with a bit mask
   (``chipleap.macro.sram.choose``), for each bank size the design has: X-HEEP writes
@@ -26,6 +27,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from chipleap.gen import banks
+from chipleap.gen.xheep import absent_pins
+from chipleap.hw.design import Peripherals
 from chipleap.macro.sram import Bank, Sram, choose
 
 TOP = "chipleap_soc"
@@ -67,13 +70,11 @@ OPEN = {
     "peripheral_subsystem_powergate_switch_no": "peripheral_subsystem_powergate_switch_n",
     "external_subsystem_powergate_switch_no": "external_subsystem_powergate_switch_n",
 }
-# The pads' signals of peripherals X-HEEP's default pads have and ChipLeap's configuration
-# does not (``chipleap.gen.xheep.REMOVED``: the SPI host, I2C, SPI2 and I2S), and of the
-# PDM2PCM and the serial link, which X-HEEP's default configuration leaves out too. The
-# MCU keeps the ports, since its template wires them whatever it has; the top ties their
-# inputs low and leaves their outputs open.
+# The pads' signals of peripherals X-HEEP's default pads have and the design's
+# configuration does not (``chipleap.gen.xheep.absent_pins``) keep their ports on the MCU,
+# since its template wires them whatever it has; the top ties their inputs low and leaves
+# their outputs open.
 TIE_LOW = "'0"
-ABSENT_PINS = ("spi_sck_", "spi_cs_", "spi_sd_", "spi2_", "i2c_", "i2s_", "pdm2pcm_", "ddr_")
 # The accelerator's connections.
 ACCEL = {
     "ext_xbar_master_req_i": "acc_obi_req",
@@ -167,11 +168,13 @@ def top_sv(
     accel_ports: int,
     accel_module: str = banks.TOP,
     ext_memory: bool = True,
+    absent: Sequence[str] = absent_pins(Peripherals()),
 ) -> str:
     """``chipleap_soc``: ``core_v_mini_mcu`` and the accelerator (``accel_module``, the
     flat ports of ``chipleap_accel``, one OBI master per read port and one for writes).
     With ``ext_memory`` the ports of ``EXT_SLAVE_USED`` are ports of the top; the other
-    external slave ports are tied off."""
+    external slave ports are tied off, and so are the pads' ports that start with one of
+    ``absent``, those of the peripherals the configuration leaves out."""
     names = {p.name for p in ports}
     for known in ACCEL:
         if known not in names:
@@ -194,7 +197,7 @@ def top_sv(
             conns.append(f".{p.name}({tied[p.name]})")
         elif p.name in open_:
             conns.append(f".{p.name}({open_[p.name]})")
-        elif p.kind == "logic" and p.name.startswith(ABSENT_PINS):
+        elif p.kind == "logic" and p.name.startswith(tuple(absent)):
             conns.append(f".{p.name}({TIE_LOW if p.direction == 'input' else ''})")
         elif p.kind == "logic" or p.name in through:
             if p.kind != "logic" and p.kind not in TYPES:
