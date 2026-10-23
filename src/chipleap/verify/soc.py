@@ -45,7 +45,14 @@ from chipleap.macro.layer import MacroView
 from chipleap.rtl import builddir
 from chipleap.verify import pnr
 from chipleap.verify.drc import pdk_cells
-from chipleap.verify.tools import Tool, clean_env, fusesoc, riscv_gcc
+from chipleap.verify.tools import (
+    Tool,
+    clean_env,
+    fusesoc,
+    librelane,
+    librelane_version_key,
+    riscv_gcc,
+)
 
 CORE = "chipleap:soc:xheep:0"
 TARGET = "asic_yosys_synthesis"
@@ -428,8 +435,59 @@ PINS = "pins.cfg"
 AFTER_SYNTHESIS = "Checker.YosysUnmappedCells"
 
 
-# The estimated setup slack the repairs keep after CTS and after global routing (``config``).
-SETUP_MARGINS_NS = (6.0, 5.0)
+# The LibreLane from which the SoC's layout takes the settings measured on it
+# (``librelane_from_3014``): the setup margins (``setup_margins_ns``), a buffer beside each
+# SRAM output (``output_buffers``) and the second antenna repair (``layout``). Before it,
+# on 3.0.0.dev44, the layout keeps #20's settings, those its evidence layout was made with.
+FROM_3014 = (3, 0, 14, 2, 0)
+
+
+def librelane_from_3014(version: str | None = None) -> bool:
+    """Whether LibreLane ``version`` (the one that runs, by default) takes 3.0.14's
+    settings; a version ChipLeap cannot read does, as the one it runs by default."""
+    key = librelane_version_key(librelane().version if version is None else version)
+    return key == (0, 0, 0, 0, 0) or key >= FROM_3014
+
+
+# The estimated setup slack the repairs keep after CTS and after global routing
+# (``setup_margins_ns``). LibreLane 3.0.0.dev44's estimate after global routing showed
+# 4 to 5 ns more than routing left on the SoC's long paths, and its repairs keep 6 and 5 ns
+# (SETUP_MARGINS_DEV44_NS). 3.0.14 estimates with IHP's ORFS fit of the layers' RC, and
+# there the estimate is the pessimistic side: on the SmolLM2 accelerator laid out on two
+# clocks, routing took at most 0.38 ns from it on any path group, and gave the accelerator's
+# paths a median 0.5 ns back. So from 3.0.14 the repairs keep the accelerator's own 0.8 and
+# 1.6 ns. Margins as large as dev44's lock hold repair out of a faster clock: OpenROAD's
+# hold repair adds no delay that takes an endpoint's setup slack below the margin, and at
+# 90 MHz almost every path of the accelerator has less than 5 ns. In the dev44 layout of the
+# SmolLM2 SoC with the accelerator at 90 MHz, three flip-flops of a DMA read port's phase
+# counter, each feeding back to itself through two gates, missed hold by up to 0.043 ns at
+# the fast corner; with a 3 ns margin after global routing, hold repair put delay cells on
+# them.
+# CHIPLEAP_SOC_SETUP_MARGINS sets other margins for a trial run.
+SETUP_MARGINS_DEV44_NS = (6.0, 5.0)
+SETUP_MARGINS_NS = (0.8, 1.6)
+SETUP_MARGINS_ENV = "CHIPLEAP_SOC_SETUP_MARGINS"
+
+
+def setup_margins_ns(version: str | None = None) -> tuple[float, float]:
+    """The setup margins after CTS and after global routing: ``SETUP_MARGINS_ENV`` when
+    set (two numbers of ns from 0 to 10, comma-separated), else ``SETUP_MARGINS_NS`` from
+    LibreLane 3.0.14 on and ``SETUP_MARGINS_DEV44_NS`` before it."""
+    raw = os.environ.get(SETUP_MARGINS_ENV, "").strip()
+    if not raw:
+        return SETUP_MARGINS_NS if librelane_from_3014(version) else SETUP_MARGINS_DEV44_NS
+    try:
+        values = tuple(float(v) for v in raw.split(","))
+    except ValueError:
+        values = ()
+    if len(values) != 2 or not all(0.0 <= v <= 10.0 for v in values):
+        raise SocError(
+            f"{SETUP_MARGINS_ENV} must be two numbers of ns from 0 to 10, comma-separated, "
+            f"not {raw[:20]!r}"
+        )
+    return values[0], values[1]
+
+
 # The hold slack the repair after global routing keeps, in ns. The worst hold endpoints
 # after routing are DMA0's registers, whose clock gate hangs on the clock tree's long
 # first-level net with the accelerator's macros, and routing moves them by more than the
@@ -501,13 +559,16 @@ class Prepared:
     views: dict[str, sram.SramViews]
 
 
-def config(sources: Sources, clock_mhz: float, accel_mhz: float = 0.0) -> dict[str, Any]:
+def config(
+    sources: Sources, clock_mhz: float, accel_mhz: float = 0.0, version: str | None = None
+) -> dict[str, Any]:
     """LibreLane's configuration for the SoC without its floorplan: slang reads the
     SystemVerilog, with the macros' and IHP's clock gate's black boxes that Yosys holds
     (``--extern-modules``) and without X-HEEP's assertions; LibreLane's Verilator lint is
     off, since X-HEEP is linted with its own waivers; the constraints are ChipLeap's
     (``chipleap.gen.soc.sdc``), and the signoff is the accelerator's. With ``accel_mhz``
-    the accelerator's clock is a second clock port.
+    the accelerator's clock is a second clock port. The repairs' setup margins are those
+    of the LibreLane ``version`` that runs (``setup_margins_ns``).
 
     LibreLane reads one ``CLOCK_PERIOD``, for its own base SDC (which ChipLeap's replaces)
     and as ABC's delay target in synthesis. It stays X-HEEP's even with the accelerator's
@@ -556,14 +617,13 @@ def config(sources: Sources, clock_mhz: float, accel_mhz: float = 0.0) -> dict[s
         "RUN_KLAYOUT_DRC": False,
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
-        # The repairs keep SETUP_MARGINS_NS of estimated setup slack, after CTS and after
-        # global routing, where the accelerator keeps 0.8 and 1.6 ns. Hold repair puts its
-        # delay cells wherever the estimate shows setup slack, and on the SoC's long paths
-        # the estimate after global routing shows 4 to 5 ns more than routing leaves (36 MHz:
-        # +4.56 ns there, -0.22 ns after routing). From one 36 MHz placement, routed:
-        # 0.8 and 1.6 ns left +0.259 ns of setup and -0.060 ns of hold, 6 and 5 ns +0.349
-        # and +0.047 ns.
-        **pnr.signoff(*SETUP_MARGINS_NS),
+        # The repairs keep ``setup_margins_ns`` of estimated setup slack, after CTS and after
+        # global routing. Hold repair puts its delay cells wherever the estimate shows setup
+        # slack above them. On 3.0.0.dev44, on the SoC's long paths the estimate after global
+        # routing showed 4 to 5 ns more than routing left (36 MHz: +4.56 ns there, -0.22 ns
+        # after routing), and from one 36 MHz placement, routed, 0.8 and 1.6 ns left +0.259 ns
+        # of setup and -0.060 ns of hold, 6 and 5 ns +0.349 and +0.047 ns.
+        **pnr.signoff(*setup_margins_ns(version)),
         # The SoC's wires are millimetres long, and the extraction after detailed routing
         # puts 14 to 20 % more capacitance on them than the global router's estimate that
         # the repairs work against: at 50 MHz a 0.0576 pF net (LibreLane's 10 % margin
@@ -772,12 +832,13 @@ def prepare(
     work: Path,
     pdk: Path,
     clock_mhz: float | None = None,
+    version: str | None = None,
 ) -> tuple[dict[str, Any], Prepared]:
     """Everything the LibreLane runs read, in ``work``: X-HEEP rendered for the design,
     its sources from FuseSoC, ChipLeap's sources and constraints, the macros' views. The
-    configuration without its floorplan, and what was prepared. The clock is the design's
-    unless ``clock_mhz`` says otherwise; the accelerator's own clock, when it has one, is
-    ``accel_clock_mhz``'s."""
+    configuration without its floorplan, for LibreLane ``version`` (the one that runs, by
+    default), and what was prepared. The clock is the design's unless ``clock_mhz`` says
+    otherwise; the accelerator's own clock, when it has one, is ``accel_clock_mhz``'s."""
     clock = clock_mhz or design.freq_mhz
     accel = accel_clock_mhz(design)
     if design.platform != "xheep":
@@ -822,7 +883,7 @@ def prepare(
         merge.check_macros(v.view for v in views.values())
     except merge.MergeError as exc:
         raise SocError(f"merged names: {exc}") from None
-    return config(sources, clock, accel), Prepared(sources, instances, views)
+    return config(sources, clock, accel, version), Prepared(sources, instances, views)
 
 
 def accel_clock_mhz(design: Design) -> float:
@@ -865,7 +926,8 @@ def place_and_route(
     peripherals are most of them, which the model's estimate does not follow), then the
     layout, in the same LibreLane run."""
     clock = clock_mhz or design.freq_mhz
-    cfg, prep = prepare(design, config_text, checkout, work, pdk, clock)
+    version = librelane().version
+    cfg, prep = prepare(design, config_text, checkout, work, pdk, clock, version)
     first, _ = with_floorplan(cfg, prep, model_areas_um2(design)[0], work)
     pnr.run_librelane(work, first, to="Yosys.Synthesis", timeout_s=TIMEOUT_S)
     run = work / "runs" / "chipleap"

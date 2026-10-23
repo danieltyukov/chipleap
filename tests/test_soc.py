@@ -456,7 +456,10 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     # and the repairs keep setup slack for what routing takes from the long paths.
     assert cfg["GRT_DESIGN_REPAIR_MAX_CAP_PCT"] == 25
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == pytest.approx(0.2)
-    assert (cfg["PL_RESIZER_SETUP_SLACK_MARGIN"], cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"]) == (6, 5)
+    assert (
+        cfg["PL_RESIZER_SETUP_SLACK_MARGIN"],
+        cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"],
+    ) == soc_step.setup_margins_ns()
     assert cfg["CTS_CLK_BUFFERS"][0] == cfg["CTS_ROOT_BUFFER"] == "sg13g2_buf_16"
     # A clock other than the design's, for a signoff the SoC can meet.
     slow, _ = soc_step.prepare(design, xheep_config(design), co, work, pdk, clock_mhz=55.0)
@@ -717,13 +720,29 @@ def test_the_socs_clock_terms_are_measured_from_its_routed_paths(monkeypatch):
 
 
 def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
-    """The SoC's repairs keep 6 and 5 ns of estimated setup slack and 0.2 ns of hold after
-    global routing; CHIPLEAP_SOC_HOLD_MARGIN sets another hold margin, a number of ns."""
+    """The SoC's repairs keep 0.8 and 1.6 ns of estimated setup slack from LibreLane 3.0.14
+    on, 6 and 5 ns on 3.0.0.dev44 (#20's evidence), and 0.2 ns of hold after global
+    routing; CHIPLEAP_SOC_SETUP_MARGINS and CHIPLEAP_SOC_HOLD_MARGIN set others for a
+    trial run."""
     sources = soc_step.Sources((), (), (), None)  # type: ignore[arg-type]
     monkeypatch.delenv(soc_step.HOLD_MARGIN_ENV, raising=False)
-    cfg = soc_step.config(sources, 36.0)
-    assert cfg["PL_RESIZER_SETUP_SLACK_MARGIN"] == 6.0
-    assert cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"] == 5.0
+    monkeypatch.delenv(soc_step.SETUP_MARGINS_ENV, raising=False)
+
+    def margins(version: str | None) -> tuple[float, float]:
+        cfg = soc_step.config(sources, 36.0, version=version)
+        return cfg["PL_RESIZER_SETUP_SLACK_MARGIN"], cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"]
+
+    assert margins("3.0.14") == margins("3.1.0") == (0.8, 1.6)
+    assert margins("3.0.0.dev44") == margins("3.0.0rc1") == (6.0, 5.0)
+    assert margins("unknown") == (0.8, 1.6)  # as the LibreLane run by default
+    monkeypatch.setenv(soc_step.SETUP_MARGINS_ENV, " 2.0, 3 ")
+    assert margins("3.0.14") == margins("3.0.0.dev44") == (2.0, 3.0)
+    for bad in ("2", "x,1", "1,2,3", "-1,2", "1,11"):
+        monkeypatch.setenv(soc_step.SETUP_MARGINS_ENV, bad)
+        with pytest.raises(soc_step.SocError, match="CHIPLEAP_SOC_SETUP_MARGINS must be"):
+            margins("3.0.14")
+    monkeypatch.delenv(soc_step.SETUP_MARGINS_ENV)
+    cfg = soc_step.config(sources, 36.0, version="3.0.14")
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.2
     # IHP's DRC deck runs after LibreLane, in parallel parts, not as LibreLane's step.
     assert cfg["RUN_KLAYOUT_DRC"] is False
