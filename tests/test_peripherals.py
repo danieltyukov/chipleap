@@ -101,6 +101,52 @@ def test_the_model_keeps_the_smollm2_socs_measured_total():
     assert ev.bus_kge(SMOLLM2) == pytest.approx(6.1, rel=0.02)
 
 
+# X-HEEP without the CPU (its logic and its bus) in kGE, as scripts/calibrate_xheep.py's
+# hierarchical synthesis measured each configuration it names: those the prices are fitted
+# to (CONFIGS) and those the fit never sees (CHECKS).
+MEASURED_KGE = {
+    "full": 409.50,
+    "trim": 214.57,
+    "min": 128.52,
+    "io": 336.28,
+    "dma": 429.65,
+    "ntom": 252.03,
+    "kws": 202.02,
+    "mix": 334.77,
+    "ntom_il": 405.65,
+}
+
+
+def _calibration(monkeypatch):
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "calibrate_xheep.py"
+    spec = importlib.util.spec_from_file_location("calibrate_xheep", path)
+    assert spec is not None and spec.loader is not None
+    cal = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "calibrate_xheep", cal)
+    spec.loader.exec_module(cal)
+    return cal
+
+
+def test_the_model_is_within_a_fraction_of_a_percent_of_each_fitted_configuration(monkeypatch):
+    cal = _calibration(monkeypatch)
+    assert set(cal.CONFIGS) | set(cal.CHECKS) == set(MEASURED_KGE)
+    for name, d in cal.CONFIGS.items():
+        assert cal.model_kge(d) == pytest.approx(MEASURED_KGE[name], rel=0.002), name
+
+
+def test_the_model_is_within_two_percent_of_each_configuration_the_fit_never_sees(monkeypatch):
+    """The NtoM bus with interleaved banks misses most, by 1.8 %: its crossbar measures
+    0.533 kGE per master and slave pair at 17 x 10, the model's price is the 0.493 of the
+    one NtoM configuration fitted, at 11 x 8."""
+    cal = _calibration(monkeypatch)
+    for name, d in cal.CHECKS.items():
+        assert cal.model_kge(d) == pytest.approx(MEASURED_KGE[name], rel=0.02), name
+
+
 # The configuration keeps exactly what the design has, by one rule.
 
 

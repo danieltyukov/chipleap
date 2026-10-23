@@ -28,9 +28,13 @@ from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workloa
 
 # X-HEEP's logic outside the CPU, the memories and the accelerator, per block, in kGE on
 # IHP SG13G2: Yosys and ABC against its typical liberty with the hierarchy kept, on the
-# SmolLM2 SoC with X-HEEP configured six ways (scripts/calibrate_xheep.py, docs/model.md).
-# A hierarchical synthesis optimizes no logic across a module's boundary, so each block's
-# area is that of its instances' subtree, the same in every configuration that has it.
+# SmolLM2 SoC with X-HEEP configured six ways, and checked on three configurations the fit
+# never saw (scripts/calibrate_xheep.py, docs/model.md). A hierarchical synthesis optimizes
+# no logic across a module's boundary, so each block's area is that of its instances'
+# subtree, the same in every configuration that has it (within 0.8 %). The prices
+# reproduce the SmolLM2 SoC's measured total exactly, since its layout and its clock were
+# fitted with it: what it has is priced from it, the lines below go through it, and a
+# block it lacks is the mean of the configurations that have it.
 #
 # Every X-HEEP ChipLeap configures has these: X-HEEP's SPI host for the flash with its
 # controller, the debug module with its JTAG port, and the always-on domain's other blocks
@@ -49,22 +53,22 @@ XHEEP_BLOCK_KGE = {
     "user_timer": 6.18,  # timers 2 and 3
     "plic": 11.17,
     "uart": 9.75,
-    "spi_host": 61.74,
-    "spi2": 61.73,
+    "spi_host": 61.71,
+    "spi2": 61.75,
     "i2c": 24.47,
-    "i2s": 8.22,
-    "pdm2pcm": 0.0,
+    "i2s": 8.23,
+    "pdm2pcm": 25.90,
 }
-# The DMA: a + b per channel + c per master port.
-XHEEP_DMA_KGE = (1.09, 17.0, 0.0)
+# The DMA: a + b per channel + c per master port. The same channels on more ports measure
+# slightly smaller (four channels: 71.00 kGE on one port, 70.41 on two).
+XHEEP_DMA_KGE = (-0.129, 17.962, -0.694)
 # The user domain's address decoder and register demultiplexer: a + b per peripheral.
-XHEEP_PERIPH_BUS_KGE = (0.17, 0.40)
+XHEEP_PERIPH_BUS_KGE = (0.259, 0.376)
 # The memory subsystem's logic per bank (its clock gates and request muxes).
-XHEEP_BANK_KGE = 0.54
-# The one-to-many bus: a + b per master. The NtoM crossbar costs about 0.6 kGE per master
-# and slave pair (an estimate).
-ONE_TO_M_BUS_KGE = (1.69, 0.557)
-NTOM_PAIR_KGE = 0.6
+XHEEP_BANK_KGE = 0.536
+# The one-to-many bus: a + b per master. The NtoM crossbar: per master and slave pair.
+ONE_TO_M_BUS_KGE = (1.094, 0.632)
+NTOM_PAIR_KGE = 0.493
 # What each block is called in a report.
 XHEEP_LABELS = {
     "spi_slave": "debug SPI slave",
