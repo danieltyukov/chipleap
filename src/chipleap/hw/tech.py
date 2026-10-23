@@ -38,6 +38,15 @@ from typing import Any
 # `scripts/calibrate_sg13g2.py` measures them again.
 ACCEL_BASE_KGE = 24.93  # register file, job and tile control, store engine, cycle counter
 ACCEL_PORT_KGE = 2.79  # one OBI read port of the DMA, with its own address generator
+# On a clock of its own the accelerator adds its crossings (chipleap_accel_cdc): the
+# register handshake, the write port's two FIFOs, the reset and interrupt synchronizers
+# (ACCEL_CDC_KGE), and each read port's two FIFOs of eight words (ACCEL_CDC_PORT_KGE).
+# Measured with Yosys and ABC against IHP SG13G2's typical liberty, chipleap_accel_cdc
+# less chipleap_accel at the same parameters: 15.53 kGE with one port (GEMV 1 x 8),
+# 21.46 with two (GEMV 4 x 8), 35.64 with four (output stationary 8 x 2); the line
+# through them is within 2.3 % of each.
+ACCEL_CDC_KGE = 8.43
+ACCEL_CDC_PORT_KGE = 6.76
 # Per dataflow: kGE per MAC (8 x 8 multiplier, adder or pipeline registers) and per edge
 # unit: a GEMV lane's accumulators, a weight-stationary column's accumulators, or the
 # operand skew registers on each row and column of an output-stationary array.

@@ -218,9 +218,10 @@ def bank_macros(
         lines.append(f"  assign {sig[3]} = {prefix}_q0[{bits - 1}:0];")
 
 
-def top_sv(banks: Banks) -> str:
+def top_sv(banks: Banks, max_outstanding: int | None = None) -> str:
     """``chipleap_accel_sram``: the ports of ``chipleap_accel`` for this build, the core
-    with ``SRAM_BUF`` and the macros of every bank."""
+    with ``SRAM_BUF`` and the macros of every bank. ``max_outstanding`` sets the core's
+    reads in flight per port (behind clock crossings, as many as they hold)."""
     p = rtl_params(banks.accel)
     b, nab, nwb, aba, wba = banks.bank_bits, banks.nab, banks.nwb, banks.aba, banks.wba
     lines = [
@@ -271,6 +272,7 @@ def top_sv(banks: Banks) -> str:
                 ("ACC_ROWS", p.acc_rows),
             )
         ),
+        *([f"    .MAX_OUTSTANDING({max_outstanding}),"] if max_outstanding else []),
         "    .SRAM_BUF(1)",
         "  ) u_core (",
         *(
