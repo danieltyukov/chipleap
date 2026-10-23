@@ -44,6 +44,7 @@ from chipleap.verify.pnr import (
     PnrResult,
     macro_reach,
     parse_run,
+    port_diodes,
     run_librelane,
     signoff,
     with_ihp_antenna,
@@ -361,6 +362,7 @@ def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, A
         cfg["FP_SIZING"] = "absolute"
         cfg["DIE_AREA"] = [0, 0, w, h]
     cfg.update(signoff(*margins(project)))
+    cfg.update(port_diodes())
     cfg.update(project.pnr.librelane)
     # LibreLane hands these values to Tcl; refuse any a Tcl word could not hold as text.
     # The macros' entries are ChipLeap's own: checked names and paths it wrote.

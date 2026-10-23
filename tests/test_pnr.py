@@ -21,6 +21,15 @@ def test_config_sets_parameters_and_clock():
     assert cfg["DEFAULT_CORNER"].startswith("nom_slow") and cfg["RUN_POST_GRT_RESIZER_TIMING"]
 
 
+def test_a_blocks_layout_puts_a_diode_at_each_input_port():
+    cfg = pnr.config(Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2), 100.0)
+    assert cfg["DIODE_ON_PORTS"] == "in"
+    # LibreLane's port diode step splits the cell from its pin.
+    assert cfg["DIODE_CELL"] == "sg13g2_antennanp/A"
+    # Not in the settings the SoC step and the chip flow share with the blocks.
+    assert not {"DIODE_ON_PORTS", "DIODE_CELL"} & (set(pnr.signoff()) | set(pnr.MACRO_REPAIR))
+
+
 def test_many_ports_get_room_to_route():
     def util(ports):
         return pnr.config(Accel("gemv", 1, 8, 8, ports=ports), 100.0)["FP_CORE_UTIL"]
@@ -121,6 +130,7 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     cfg = seen["cfg"]
     cell = "RM_IHPSG13_1P_256x64_c2_bm_bist"
     assert cfg["DESIGN_NAME"] == "chipleap_accel_sram" and cfg["FP_SIZING"] == "absolute"
+    assert {k: cfg[k] for k in pnr.port_diodes()} == pnr.port_diodes()
     # The macros' long input nets are repaired after global routing too.
     assert cfg["RUN_POST_GRT_DESIGN_REPAIR"] is True
     assert cfg["DESIGN_REPAIR_MAX_WIRE_LENGTH"] == cfg["GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH"] == 300
