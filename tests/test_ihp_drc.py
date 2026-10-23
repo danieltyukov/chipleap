@@ -15,6 +15,7 @@ import pytest
 from chipleap.chip import run as chip_run
 from chipleap.verify import antenna, maximal
 from chipleap.verify import pnr as P
+from chipleap.verify.drc import DrcResult
 
 HEADER = """\
 logger = MultiLogger.new(stdout_logger, file_logger)
@@ -77,6 +78,15 @@ def test_the_extra_rules_split_into_runs_that_keep_only_the_layers_they_use():
     # As many parts as there are blocks at most, and none for fewer than two.
     assert len(maximal.split(DECK, 9) or ()) == 4
     assert maximal.split(DECK, 1) is None
+
+
+def test_rules_under_a_switch_that_is_off_need_not_print_a_count():
+    deck = DECK.replace("if $fillerRules", "if $recommendedRules")
+    parts = maximal.split(deck, 2)
+    assert parts is not None
+    assert maximal.checked(deck, parts[1]) == ["M1.f"]
+    plain = maximal.split(DECK, 2)
+    assert plain is not None and maximal.checked(DECK, plain[1]) == ["M1Fil.c", "M1.f"]
 
 
 @pytest.mark.parametrize(
@@ -214,8 +224,8 @@ def test_the_deck_counts_its_violations_and_sets_the_macros_pin_markers_apart(
     assert r.pin_markers[0]["rule"] == "metal1_pin_Offgrid" and r.pin_markers[0]["count"] == 1
     assert seen["inputs"] == {"layout.gds": Path("x.gds")}
     # 16 threads: the extra rules in 8 parts (here 4, one per rule), the main tables 8 at
-    # once, 4 threads each; density off, as LibreLane checks a block, and run_drc.py
-    # leaves the extra rules to the parts.
+    # once, 4 threads each; density off, as LibreLane checks a block, recommended rules off,
+    # as the chip step checks, and run_drc.py leaves the extra rules to the parts.
     assert P.drc_plan(16) == (8, 8, 4) and P.drc_plan(2) == (0, 2, 1)
     main = seen["cmds"][P.DRC_MAIN]
     assert main[0] == "py" and main[1].endswith("run_drc.py")
@@ -227,6 +237,7 @@ def test_the_deck_counts_its_violations_and_sets_the_macros_pin_markers_apart(
         "--density_thr=4",
         "--run_mode=deep",
         "--no_density",
+        "--no_recommended",
         "--disable_extra_rules",
     ]
     assert sorted(seen["decks"]) == [f"maximal_{k}.drc" for k in range(1, 5)]
@@ -238,10 +249,21 @@ def test_the_deck_counts_its_violations_and_sets_the_macros_pin_markers_apart(
         *("-rd", "input=/t/layout.gds", "-rd", "topcell=top"),
         *("-rd", "report=/t/run/layout_top_maximal_2.lyrdb"),
         *("-rd", "log=/t/run/layout_top_maximal_2.log", "-rd", "threads=4"),
-        *("-rd", "run_mode=deep", "-rd", "no_recommended=false"),
+        *("-rd", "run_mode=deep", "-rd", "no_recommended=true"),
     ]
+    assert r.ihp_drc == {"Gat.a": 1, "M1.f": 1, "M2.a": 1}
+    assert r.ihp_drc_data()["ihp_drc"]["recommended_rules"] == "not checked"
+    assert "(IHP's DRC deck included (density and recommended rules not checked))" in r.checks()
     _runs(monkeypatch, 1, [("metal1_pin_Offgrid", "RM_IHPSG13_1P_BLDRV")], {})
-    assert P.with_ihp_drc(ROUTED, pdk, "top", tmp_path, HELD).clean
+    ok = P.with_ihp_drc(ROUTED, pdk, "top", tmp_path, HELD)
+    assert ok.clean and ok.ihp_drc == {}
+    assert ok.checks().startswith(
+        "DRC, LVS and antenna clean, IHP's DRC deck included (density and recommended rules "
+        "not checked), no slew"
+    )
+    assert "IHP's DRC and antenna decks included" in replace(ok, ihp_antenna=DrcResult()).checks()
+    # With LibreLane's KLayout DRC as the check, nothing about IHP's deck.
+    assert ROUTED.ihp_drc_data() == {} and "IHP's" not in ROUTED.checks()
 
 
 def test_too_few_threads_or_a_deck_that_cannot_split_run_the_extra_rules_whole(

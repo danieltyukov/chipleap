@@ -114,6 +114,24 @@ def rules_of(text: str) -> list[str]:
     return _RULE_RE.findall(text)
 
 
+# How the deck's switches stand in ChipLeap's runs: recommended rules off (no_recommended),
+# fill and latch-up rules on (their defaults).
+SWITCHES_ON = frozenset({"$fillerRules", "$latchUpRules"})
+
+
+def checked(text: str, part: str) -> list[str]:
+    """The rules of ``part`` (one of ``split(text)``) that run, and print their counts,
+    with the switches as ``SWITCHES_ON`` has them: a rule under any other switch may not."""
+    deck = read(text)
+    switch = {
+        r: b.split("\n", 1)[0][3:].strip()
+        for b in (deck.blocks if deck else ())
+        if b.startswith("if ")
+        for r in rules_of(b)
+    }
+    return [r for r in rules_of(part) if switch.get(r, "") in SWITCHES_ON or r not in switch]
+
+
 def split(text: str, parts: int) -> list[str] | None:
     """The deck as ``parts`` decks (fewer when it has fewer rules), each a run of its rules
     in order, the runs as even in rules as they can be; None when it cannot be split."""

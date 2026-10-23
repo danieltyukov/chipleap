@@ -84,6 +84,9 @@ class PnrResult:
     # (``ihp_antenna_skipped``); neither when the flow does not run it.
     ihp_antenna: DrcResult | None = None
     ihp_antenna_skipped: str = ""
+    # IHP's DRC deck's violations by rule, counted in drc_errors, when ChipLeap ran the deck
+    # itself (``with_ihp_drc``, the soc step); None when LibreLane's KLayout DRC was the check.
+    ihp_drc: dict[str, int] | None = None
 
     @property
     def clean(self) -> bool:
@@ -111,10 +114,14 @@ class PnrResult:
         slew and capacitance violations, the drivers over their fanout limit (reported
         only), and the pin markers set apart."""
         ihp = self.ihp_antenna
+        decks = [d for d, ran in (("DRC", self.ihp_drc is not None), ("antenna", ihp)) if ran]
+        included = f"IHP's {' and '.join(decks)} deck{'s' if len(decks) > 1 else ''} included"
+        if self.ihp_drc is not None:
+            included += " (density and recommended rules not checked)"
         if self.checks_clean:
             text = "DRC, LVS and antenna clean"
-            if ihp is not None:
-                text += ", IHP's antenna deck included"
+            if decks:
+                text += f", {included}"
             text += ", no slew or capacitance violations"
         else:
             text = (
@@ -122,6 +129,8 @@ class PnrResult:
                 f"antenna violations, {self.max_slew_violations} slew and "
                 f"{self.max_cap_violations} capacitance violations"
             )
+            if self.ihp_drc is not None:
+                text += f" ({included})"
         if ihp is not None and ihp.total:
             n = ihp.total
             text += (
@@ -135,6 +144,20 @@ class PnrResult:
         if self.pin_markers:
             text += f"; {describe_markers(self.pin_markers)}"
         return text
+
+    def ihp_drc_data(self) -> dict[str, Any]:
+        """IHP's DRC deck for a step's result, as the chip step reports its own run of it;
+        empty when LibreLane's KLayout DRC was the check."""
+        if self.ihp_drc is None:
+            return {}
+        return {
+            "ihp_drc": {
+                "violations": sum(self.ihp_drc.values()),
+                "rules": self.ihp_drc,
+                "density": "not checked",
+                "recommended_rules": "not checked",
+            }
+        }
 
     def ihp_antenna_data(self) -> dict[str, Any]:
         """IHP's antenna deck for a step's result (``chipleap.verify.antenna.summary``), or
@@ -364,13 +387,14 @@ def drc_plan(threads: int) -> tuple[int, int, int]:
 def ihp_drc(
     pdk: Path, gds: Path, top: str, out: Path, held: Mapping[str, tuple[str, ...]]
 ) -> DrcResult:
-    """IHP's DRC deck (IHP-Open-PDK's ``run_drc.py``) on ``gds``, with density off and
-    recommended rules on, as LibreLane checks a block: the main deck's tables run_drc.py
-    runs several at once, and beside them the extra-rules deck in parts that run at once
-    too (``chipleap.verify.maximal``; whole, by run_drc.py, when it cannot be split or there
-    are too few threads). ``held`` names the cells of the PDK's own macros, whose off-grid
-    pin markers are set apart. A run that did not finish, or whose exit code or counts
-    disagree with its report, is an error."""
+    """IHP's DRC deck (IHP-Open-PDK's ``run_drc.py``) on ``gds``, with density off, as
+    LibreLane checks a block, and recommended rules off, as the chip step and LibreLane
+    3.0.14 check (IHP's recommended rules are guidelines, not tapeout rules): the main
+    deck's tables run_drc.py runs several at once, and beside them the extra-rules deck in
+    parts that run at once too (``chipleap.verify.maximal``; whole, by run_drc.py, when it
+    cannot be split or there are too few threads). ``held`` names the cells of the PDK's
+    own macros, whose off-grid pin markers are set apart. A run that did not finish, or
+    whose exit code or counts disagree with its report, is an error."""
     from chipleap.chip.run import ToolError, ihp_runs, klayout, klayout_threads
 
     parts, workers, threads = drc_plan(klayout_threads())
@@ -393,6 +417,7 @@ def ihp_drc(
             f"--density_thr={threads}",
             "--run_mode=deep",
             "--no_density",
+            "--no_recommended",
             *(["--disable_extra_rules"] if split else []),
         ]
 
@@ -405,7 +430,7 @@ def ihp_drc(
                 "log": d / f"layout_{top}_{name}.log",
                 "threads": threads,
                 "run_mode": "deep",
-                "no_recommended": "false",
+                "no_recommended": "true",
             }
             rd = [a for k, v in switches.items() for a in ("-rd", f"{k}={v}")]
             return [str(tool.path), "-b", "-r", str(d.parent / f"{name}.drc"), *rd]
@@ -432,8 +457,10 @@ def ihp_drc(
     result = _drc_report(report, held)
     if (code == 1) != (result.total + result.markers > 0):
         raise PnrError(f"IHP's DRC exited {code} with {result.total} violations in its report")
+    whole = deck.read_text() if split else ""
     for name, text in zip(names, split or (), strict=True):
-        result.add(_maximal_part(out, top, name, text, runs[name], held))
+        rules = maximal.checked(whole, text)
+        result.add(_maximal_part(out, top, name, rules, runs[name], held))
     if not any(PIN_OFFGRID_RE.fullmatch(rule) for rule in result.violations):
         return result
     # Off-grid pin markers not in a cell of the PDK's macros as the PDK names them: find
@@ -467,13 +494,14 @@ def _maximal_part(
     out: Path,
     top: str,
     name: str,
-    deck: str,
+    rules: list[str],
     run: tuple[int, str],
     held: Mapping[str, tuple[str, ...]],
 ) -> DrcResult:
     """The report of one part of the extra-rules deck, after checking it ran to its end:
-    KLayout exits 0, the part logs its last line, prints a count for each of its rules (the
-    deck's own ``output``) and reports something exactly when one of the counts is not 0."""
+    KLayout exits 0, the part logs its last line, prints a count for each of ``rules`` (the
+    rules it runs; the deck's own ``output`` prints them) and reports something exactly
+    when one of its counts is not 0."""
     code, tail = run
     report, log = out / f"layout_{top}_{name}.lyrdb", out / f"layout_{top}_{name}.log"
     done = log.is_file() and maximal.DONE in log.read_text(errors="replace")
@@ -482,7 +510,7 @@ def _maximal_part(
         raise PnrError(f"IHP's extra rules, {name}, did not finish (exit {code}): {last}")
     printed = (out / f"{name}.log").read_text(errors="replace")
     counts = {m[1]: int(m[2]) for m in re.finditer(r"^Rule (\S+): (\d+) error", printed, re.M)}
-    missing = sorted(set(maximal.rules_of(deck)) - set(counts))
+    missing = sorted(set(rules) - set(counts))
     if missing:
         raise PnrError(f"IHP's extra rules, {name}, did not run {', '.join(missing[:5])}")
     result = _drc_report(report, held)
@@ -517,6 +545,7 @@ def with_ihp_drc(
         r,
         drc_errors=r.drc_errors + result.total,
         pin_markers=[*r.pin_markers, *result.markers_data()],
+        ihp_drc=dict(sorted(result.violations.items())),
     )
 
 
