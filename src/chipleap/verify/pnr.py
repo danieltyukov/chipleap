@@ -233,6 +233,34 @@ def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[
     }
 
 
+# LibreLane's port diode step (Odb.DiodesOnPorts) needs the diode cell with its pin. IHP's
+# LibreLane configuration at cb7daaa (the PDK LibreLane 3.0.0.dev44 pins) names the cell
+# alone, "sg13g2_antennanp", and the step stops on it; at 22f2a25 it is this. Every other
+# step that reads DIODE_CELL takes the cell before the slash.
+DIODE_CELL = "sg13g2_antennanp/A"
+
+
+def port_diodes() -> dict[str, Any]:
+    """A diode beside each sink of each input port, for the layouts of blocks: the
+    accelerator's and an RTL project's (LibreLane's ``Odb.DiodesOnPorts``, after global
+    routing).
+
+    A block's input is driven from outside it, so the net from its pin to the first gate
+    inside has no diffusion of its own while the block is made. On LibreLane 3.0.14 hold
+    repair puts delay cells right on such nets, ahead of the port buffer: 10 to 14 of them
+    in the GEMV 1 x 4 accelerator with SRAM buffers, its read data feeding a macro whose
+    hold time is 0.88 ns. A ``sg13g2_dlygate4sd3_1`` has 0.1092 um2 of gate, so about
+    105 um of Metal3 reaches IHP's cumulative ratio of 200. In one layout ``rd_rdata_i[14]``
+    ran 108 um into one: 204.4 on IHP's antenna deck, just under 200 on OpenROAD's check,
+    and LibreLane's antenna repair after detailed routing runs only while that check finds
+    a violation (``check_antennas`` takes no margin). With a diode beside each sink the
+    layout was clean on both checks, its timing unchanged, for 74 diodes. A delay cell that
+    the repair after global routing adds later gets none. The chip step leaves this out
+    (its pads bring their own protection), and so does the SoC step, whose block ports are
+    nets inside the SoC."""
+    return {"DIODE_ON_PORTS": "in", "DIODE_CELL": DIODE_CELL}
+
+
 def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
     """The LibreLane configuration for the accelerator at ``clock_mhz``."""
     p = rtl_params(accel)
@@ -259,6 +287,7 @@ def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
         "FP_CORE_UTIL": 45 if accel.ports <= 8 else 35,
         "PL_TARGET_DENSITY_PCT": 55,
         **signoff(),
+        **port_diodes(),
     }
 
 
@@ -1107,7 +1136,8 @@ def sram_config(
     sizes: Sequence[place.Macro],
 ) -> dict[str, Any]:
     """The LibreLane configuration for ``accel`` with its buffers in SRAM macros: the
-    generated top, the floorplan ChipLeap sized, the macros and their power grid."""
+    generated top, the floorplan ChipLeap sized (no pins along its rows of macros), the
+    macros and their power grid."""
     return {
         **MACRO_REPAIR,
         **macro_reach(plan, sizes),
@@ -1125,7 +1155,9 @@ def sram_config(
         "SIGNOFF_SDC_FILE": f"dir::{SIGNOFF_SDC}",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
+        "IO_EXCLUDE_PIN_REGION": place.pin_regions(plan),
         **signoff(),
+        **port_diodes(),
     }
 
 

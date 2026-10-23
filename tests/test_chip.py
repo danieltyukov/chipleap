@@ -758,6 +758,7 @@ def test_the_flow_places_the_ring_and_routes_around_it(monkeypatch):
     assert len(obs) == 20 and obs[0] == ["Metal1", 70.0, 73.0, plan.die[0] - 70, 249.0]
     assert "KLAYOUT_DRC_THREADS" not in c
     assert not any(k in c for k in flow.PAD_VIEWS)
+    assert "DIODE_ON_PORTS" not in c  # the pads protect the core's inputs
 
 
 def test_the_chip_keeps_its_own_io_views_when_librelane_would_load_the_pdks(monkeypatch):

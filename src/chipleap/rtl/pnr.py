@@ -44,6 +44,7 @@ from chipleap.verify.pnr import (
     PnrResult,
     macro_reach,
     parse_run,
+    port_diodes,
     run_librelane,
     signoff,
     sram_output_buffers,
@@ -243,7 +244,8 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
     """LibreLane's settings for the project's hard macros: their views, the floorplan
     around them and their power, written into ``workdir``. An SRAM gets the macro grid
     over it; a package whose supply pins reach an edge gets them strapped to the rails,
-    as in a chip (``chipleap.chip.pdn``)."""
+    as in a chip (``chipleap.chip.pdn``). In a floorplan of ChipLeap's no pin goes along
+    the rows of macros (``chipleap.macro.place``)."""
     from chipleap.chip import merge, pdn
     from chipleap.chip.floorplan import Placed
     from chipleap.macro.layer import MacroImportError
@@ -322,19 +324,21 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
         workdir,
         views,
     )
+    out: dict[str, Any] = {
+        **MACRO_REPAIR,
+        **macro_reach(fp, list(sizes.values())),
+        "FP_SIZING": "absolute",
+        "DIE_AREA": [0, 0, *fp.die],
+        "CORE_AREA": list(fp.core),
+        "MACROS": entries,
+        "PDN_CFG": "dir::pdn.tcl",
+        "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
+        "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
+    }
+    if fp.no_pins:
+        out["IO_EXCLUDE_PIN_REGION"] = place.pin_regions(fp)
     return with_eco_buffers(
-        {
-            **MACRO_REPAIR,
-            **macro_reach(fp, list(sizes.values())),
-            "FP_SIZING": "absolute",
-            "DIE_AREA": [0, 0, *fp.die],
-            "CORE_AREA": list(fp.core),
-            "MACROS": entries,
-            "PDN_CFG": "dir::pdn.tcl",
-            "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
-            "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
-        },
-        sram_output_buffers((p, views[cell[p.instance]]) for p in fp.macros),
+        out, sram_output_buffers((p, views[cell[p.instance]]) for p in fp.macros)
     )
 
 
@@ -362,6 +366,7 @@ def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, A
         cfg["FP_SIZING"] = "absolute"
         cfg["DIE_AREA"] = [0, 0, w, h]
     cfg.update(signoff(*margins(project)))
+    cfg.update(port_diodes())
     cfg.update(project.pnr.librelane)
     # LibreLane hands these values to Tcl; refuse any a Tcl word could not hold as text.
     # The macros' entries are ChipLeap's own: checked names and paths it wrote.

@@ -21,6 +21,15 @@ def test_config_sets_parameters_and_clock():
     assert cfg["DEFAULT_CORNER"].startswith("nom_slow") and cfg["RUN_POST_GRT_RESIZER_TIMING"]
 
 
+def test_a_blocks_layout_puts_a_diode_at_each_input_port():
+    cfg = pnr.config(Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2), 100.0)
+    assert cfg["DIODE_ON_PORTS"] == "in"
+    # LibreLane's port diode step splits the cell from its pin.
+    assert cfg["DIODE_CELL"] == "sg13g2_antennanp/A"
+    # Not in the settings the SoC step and the chip flow share with the blocks.
+    assert not {"DIODE_ON_PORTS", "DIODE_CELL"} & (set(pnr.signoff()) | set(pnr.MACRO_REPAIR))
+
+
 def test_many_ports_get_room_to_route():
     def util(ports):
         return pnr.config(Accel("gemv", 1, 8, 8, ports=ports), 100.0)["FP_CORE_UTIL"]
@@ -121,6 +130,7 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     cfg = seen["cfg"]
     cell = "RM_IHPSG13_1P_256x64_c2_bm_bist"
     assert cfg["DESIGN_NAME"] == "chipleap_accel_sram" and cfg["FP_SIZING"] == "absolute"
+    assert {k: cfg[k] for k in pnr.port_diodes()} == pnr.port_diodes()
     # The macros' long input nets are repaired after global routing too.
     assert cfg["RUN_POST_GRT_DESIGN_REPAIR"] is True
     assert cfg["DESIGN_REPAIR_MAX_WIRE_LENGTH"] == cfg["GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH"] == 300
@@ -141,9 +151,12 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     assert set(entry["instances"]) == {"abuf_s0_m0", "abuf_s1_m0", "wbuf_s0_l0_m0", "wbuf_s1_l0_m0"}
     assert set(entry["lib"]) == {"*_typ_*", "*_slow_*", "*_fast_*"}
     assert entry["vh"] == [f"dir::macros/{cell}/{cell}_bb.v"]
-    # Two macros a row, pins facing the logic between the rows.
+    # Two macros a row, pins facing the logic between the rows, and no pin along a row.
     orients = sorted(i["orientation"] for i in entry["instances"].values())
     assert orients == ["FS", "FS", "N", "N"]
+    xs = sorted(i["location"][0] for i in entry["instances"].values())
+    span = f"{math.floor(xs[0] - 10)}-{math.ceil(xs[-1] + 784.48 + 10)}"
+    assert cfg["IO_EXCLUDE_PIN_REGION"] == [f"top:{span}", f"bottom:{span}"]
     # The band between the rows holds the build's logic with its banks' interface at 45 %,
     # not the logic of the flop-buffer build.
     x0, _, x1, _ = cfg["CORE_AREA"]
@@ -245,6 +258,33 @@ def test_the_floorplan_puts_macros_in_two_rows_under_supply_pairs():
     assert grid.tm2_pairs(fp.core[1], p.y, p.y + 64.36)
     with pytest.raises(place.PlaceError, match="utilisation"):
         place.rows(ms, 1000, util=1.5)
+
+
+def test_no_pin_goes_along_a_row_of_macros():
+    """A pin on the stretch of the top or bottom edge a row covers reaches the logic
+    through the margin under the macros: LibreLane's IO placer put read-data inputs there,
+    and their nets failed antenna checks. The left and right edges and the ends the rows
+    leave free take the pins; a floorplan a project gave has no such stretches."""
+    from chipleap.macro import place
+
+    ms = [place.Macro(f"m{i}", 784.48, 118.78) for i in range(3)]
+    fp = place.rows(ms, 287000)
+    size = {m.instance: m for m in ms}
+    for edge, orient in (("top", "N"), ("bottom", "FS")):
+        row = [p for p in fp.macros if p.orient == orient]
+        lo = min(p.x for p in row) - place.HALO_UM
+        hi = max(p.x + size[p.instance].width for p in row) + place.HALO_UM
+        ((_, a, b),) = [s for s in fp.no_pins if s[0] == edge]
+        assert a <= lo < a + 1 and b - 1 < hi <= b
+    # Two macros on top, one below: the bottom edge right of it is free.
+    bottom = next(s for s in fp.no_pins if s[0] == "bottom")
+    assert bottom[2] < next(s for s in fp.no_pins if s[0] == "top")[2] < fp.die[0]
+    assert place.pin_regions(fp) == [f"{e}:{a}-{b}" for e, a, b in fp.no_pins]
+    # One macro: a row on top only.
+    (span,) = place.rows([place.Macro("m", 784.48, 118.78)], 50000).no_pins
+    assert span[0] == "top"
+    given = place.given((1000, 400), [(place.Macro("m", 784.48, 118.78), 60, 20, "FS")])
+    assert given.no_pins == () and place.pin_regions(given) == []
 
 
 def test_the_core_ends_at_the_widest_rows_last_halo():
