@@ -1017,6 +1017,8 @@ MACRO_REPAIR = {
 SRAM_OUTPUT_BUFFER = "sg13g2_buf_2"
 GLOBAL_ROUTING = "OpenROAD.GlobalRouting"
 ECO_BUFFERS = "Odb.InsertECOBuffers"
+# The substitution that puts ECO_BUFFERS in the flow.
+ECO_BUFFERS_AT = f"+{GLOBAL_ROUTING}"
 # How far beyond its halo, from the macro's edge where the pin is, a buffer beside a macro
 # pin is put; the legaliser moves it to the nearest free site.
 BESIDE_GAP_UM = 5.0
@@ -1074,7 +1076,7 @@ def with_eco_buffers(cfg: dict[str, Any], buffers: list[dict[str, Any]]) -> dict
     meta = dict(cfg.get("meta") or {"version": 2, "flow": "Classic"})
     meta["substituting_steps"] = {
         **(meta.get("substituting_steps") or {}),
-        f"+{GLOBAL_ROUTING}": ECO_BUFFERS,
+        ECO_BUFFERS_AT: ECO_BUFFERS,
     }
     return {
         **cfg,

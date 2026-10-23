@@ -11,7 +11,7 @@ import pytest
 from chipleap.rtl import eco as E
 from chipleap.rtl.pnr import SDC_NAME, seal_routed
 from chipleap.rtl.project import EcoChange, load_project
-from chipleap.verify.pnr import signoff
+from chipleap.verify.pnr import signoff, with_eco_buffers, with_late_antenna_repair
 from chipleap.verify.tools import librelane, librelane_version_key, openroad
 
 FIXTURE = Path(__file__).parent / "fixtures" / "eco_timing"
@@ -164,6 +164,18 @@ def test_the_flow_a_routed_run_names_is_its_own_or_refused(counter_project):
     its own step list in its place, and refuses any other flow."""
     routed(counter_project, meta=E.ROUTED_META)
     p = load_project(counter_project)
+    _, sealed, _, steps = E.base(p)
+    flow = E.eco_config(p, [], steps, sealed)["meta"]["flow"]
+    assert flow == [*E.PREFIX, *STEPS[2:]]
+    # So is a project's with buffers beside its SRAMs' outputs: the state before detailed
+    # routing holds them, and the ECO's flow and configuration leave them out.
+    buffer = {"target": "m/A_DOUT[0]", "buffer": "sg13g2_buf_2", "placement": [1.0, 2.0]}
+    cfg = with_late_antenna_repair(
+        with_eco_buffers({"RUN_POST_GRT_RESIZER_TIMING": True}, [buffer])
+    )
+    assert cfg["meta"] == E.BUFFERED_META
+    shutil.rmtree(counter_project / "build")
+    routed(counter_project, meta=E.BUFFERED_META)
     _, sealed, _, steps = E.base(p)
     flow = E.eco_config(p, [], steps, sealed)["meta"]["flow"]
     assert flow == [*E.PREFIX, *STEPS[2:]]
@@ -408,6 +420,9 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
     # Timing-driven placement as ChipLeap turns it on for LibreLane 3.0.14.
     placed = {"PL_TIMING_DRIVEN": True}
     assert E._settings(p, placed, sealed) == placed
+    # The buffers beside a macro's outputs, which the routed state already holds.
+    buffer = {"target": "m/A_DOUT[0]", "buffer": "sg13g2_buf_2", "placement": [1.0, 2.0]}
+    assert E._settings(p, {**good, "INSERT_ECO_BUFFERS": [buffer]}, sealed) == good
     for bad, why in [
         ({"PLACEMENT_SCRIPT": "x.tcl"}, "does not pass on"),
         ({"PRE_GLOBAL_PLACEMENT_HOOK": 1}, "does not pass on"),
@@ -421,6 +436,7 @@ def test_the_configuration_passes_on_only_what_chipleap_writes(counter_project):
         ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": "4", "x": "1"}}, "DEFINES"),
         ({"KLAYOUT_DRC_THREADS": 4, "KLAYOUT_DRC_DEFINES": {"threads": 4}}, "DEFINES"),
         ({"PL_TIMING_DRIVEN": "true"}, "PL_TIMING_DRIVEN"),
+        ({"INSERT_ECO_BUFFERS": "m/A_DOUT[0]"}, "not a list of buffers"),
     ]:
         with pytest.raises(E.EcoError, match=why):
             E._settings(p, bad, sealed)
