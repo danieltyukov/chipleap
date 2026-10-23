@@ -703,7 +703,8 @@ def sram_config(
     macros: dict[str, Any],
 ) -> dict[str, Any]:
     """The LibreLane configuration for ``accel`` with its buffers in SRAM macros: the
-    generated top, the floorplan ChipLeap sized, the macros and their power grid."""
+    generated top, the floorplan ChipLeap sized (no pins along its rows of macros), the
+    macros and their power grid."""
     return {
         **MACRO_REPAIR,
         "DESIGN_NAME": banks.TOP,
@@ -720,6 +721,7 @@ def sram_config(
         "SIGNOFF_SDC_FILE": f"dir::{SIGNOFF_SDC}",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
+        "IO_EXCLUDE_PIN_REGION": place.pin_regions(plan),
         **signoff(),
     }
 

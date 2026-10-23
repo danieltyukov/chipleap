@@ -18,6 +18,14 @@ the core keeps its height, and the core's first TopMetal1 VDD and VSS stripes (1
 The band holds the standard cells at ``util`` of its area, from an estimate of their
 area: the die is sized here, before synthesis, so the floorplan is ChipLeap's and its
 numbers are known to the power grid.
+
+No pin goes on the stretch of the die's top or bottom edge that a row covers, from its
+first macro's halo to its last's (``Floorplan.no_pins``, LibreLane's
+``IO_EXCLUDE_PIN_REGION``): a pin there reaches the band through the margin under the
+macros or around their ends. LibreLane's IO placer put read-data inputs there, and their
+nets failed antenna checks: one of 360 um in the GEMV 1 x 4 build (IHP's deck), two of
+about 400 um in a SmolLM2 build (OpenROAD's check). The pins take the left and right
+edges and the ends of the top and bottom edges the rows leave free.
 """
 
 from __future__ import annotations
@@ -61,6 +69,9 @@ class Floorplan:
     die: tuple[float, float]
     core: tuple[float, float, float, float]
     macros: tuple[Placed, ...]
+    # The edges' stretches no pin goes on: (edge, from, to), in um along the edge from the
+    # die's lower left. A floorplan a project gave has none.
+    no_pins: tuple[tuple[str, int, int], ...] = ()
 
     @property
     def core_um2(self) -> float:
@@ -146,9 +157,20 @@ def rows(macros: Sequence[Macro], cell_um2: float, util: float = 0.45) -> Floorp
                     "supply pair of the core's grid"
                 )
             placed.append(Placed(m.instance, x, y, orient))
-    out = Floorplan(die, (x0, y0, x1, y1), tuple(placed))
+    # Each row's stretch of its edge, rounded out to whole um.
+    no_pins = tuple(
+        (edge, math.floor(xs(row)[0] - HALO_UM), math.ceil(xs(row)[-1] + row[-1].width + HALO_UM))
+        for edge, row in (("top", top), ("bottom", bottom))
+        if row
+    )
+    out = Floorplan(die, (x0, y0, x1, y1), tuple(placed), no_pins)
     check(out, macros)
     return out
+
+
+def pin_regions(plan: Floorplan) -> list[str]:
+    """LibreLane's ``IO_EXCLUDE_PIN_REGION`` for ``plan``: its ``no_pins``."""
+    return [f"{edge}:{lo}-{hi}" for edge, lo, hi in plan.no_pins]
 
 
 def check(plan: Floorplan, macros: Sequence[Macro]) -> None:

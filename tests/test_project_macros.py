@@ -203,6 +203,10 @@ def test_place_and_route_sizes_the_die_around_the_macro(
     assert "-inst_pattern {^u_mem$} -pin_pattern {^VDDARRAY!$} -power" in script
     x = entry["instances"]["u_mem"]["location"][0]
     assert x >= cfg["CORE_AREA"][0] + 40
+    # One macro, in a row on top: no pin along it.
+    ((edge, span),) = (s.split(":") for s in cfg["IO_EXCLUDE_PIN_REGION"])
+    lo, hi = map(int, span.split("-"))
+    assert edge == "top" and lo <= x - 10 < lo + 1 and hi < cfg["DIE_AREA"][2]
     assert module_check == [[CELL]]
     # Placed and routed against a slew limit under the macro's own, then the project's
     # constraints; signed off against those alone.
@@ -231,6 +235,7 @@ def test_a_die_of_the_projects_own_places_each_macro_where_it_says(
     loc = cfg["MACROS"][CELL]["instances"]["u_mem"]
     assert loc["orientation"] == "FS"
     assert loc["location"] == [cfg["CORE_AREA"][0] + 60, cfg["CORE_AREA"][1] + 20]
+    assert "IO_EXCLUDE_PIN_REGION" not in cfg  # the project's floorplan, its pins
     # Under no TopMetal2 supply pair: refused, with where it could go.
     edit(
         sram_project,

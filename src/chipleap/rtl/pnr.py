@@ -240,7 +240,8 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
     """LibreLane's settings for the project's hard macros: their views, the floorplan
     around them and their power, written into ``workdir``. An SRAM gets the macro grid
     over it; a package whose supply pins reach an edge gets them strapped to the rails,
-    as in a chip (``chipleap.chip.pdn``)."""
+    as in a chip (``chipleap.chip.pdn``). In a floorplan of ChipLeap's no pin goes along
+    the rows of macros (``chipleap.macro.place``)."""
     from chipleap.chip import merge, pdn
     from chipleap.chip.floorplan import Placed
     from chipleap.macro.layer import MacroImportError
@@ -319,7 +320,7 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
         workdir,
         views,
     )
-    return {
+    out: dict[str, Any] = {
         **MACRO_REPAIR,
         "FP_SIZING": "absolute",
         "DIE_AREA": [0, 0, *fp.die],
@@ -329,6 +330,9 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
     }
+    if fp.no_pins:
+        out["IO_EXCLUDE_PIN_REGION"] = place.pin_regions(fp)
+    return out
 
 
 def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
