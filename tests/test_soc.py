@@ -383,9 +383,10 @@ def _real_tools() -> str:
 
 
 @pytest.mark.skipif(bool(_real_tools()), reason=_real_tools() or "tools present")
-def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
+def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     """X-HEEP rendered, its sources from FuseSoC, ChipLeap's sources and the macros, as
     LibreLane will read them; LibreLane itself is not run."""
+    monkeypatch.delenv(soc_step.BUFFERS_ENV, raising=False)
     from chipleap.chip import io
     from chipleap.gen.xheep import xheep_config
     from chipleap.hw.design import Design
@@ -436,11 +437,14 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     # A buffer beside each of the accelerator's four macros drives its clock pin.
     accel = {i for i, _ in prep.instances if i.startswith(f"{soc.ACCEL_INST}.")}
     assert len(accel) == 4
-    clock = {e["target"] for e in full["INSERT_ECO_BUFFERS"] if e["target"].endswith("/A_CLK")}
-    assert clock == {f"{i}/A_CLK" for i in accel}
-    # And one after each of the 32 output bits of the eight bank macros.
-    outs = [e for e in full["INSERT_ECO_BUFFERS"] if "/A_DOUT[" in e["target"]]
+    assert {e["target"] for e in full["INSERT_ECO_BUFFERS"]} == {f"{i}/A_CLK" for i in accel}
+    # A trial run adds one after each of the 32 output bits of the eight bank macros.
+    monkeypatch.setenv(soc_step.BUFFERS_ENV, soc_step.BANK_OUTPUTS)
+    trial, _ = soc_step.with_floorplan(cfg, prep, 3.0e6, work)
+    outs = [e for e in trial["INSERT_ECO_BUFFERS"] if "/A_DOUT[" in e["target"]]
     assert len(outs) == 256 and {e["buffer"] for e in outs} == {"sg13g2_buf_2"}
+    assert trial["INSERT_ECO_BUFFERS"][: len(accel)] == full["INSERT_ECO_BUFFERS"]
+    monkeypatch.delenv(soc_step.BUFFERS_ENV)
     # More standard cells, a larger core.
     _, small = soc_step.with_floorplan(cfg, prep, 1.0e6, work)
     assert small.core_um2 < fp.core_um2
@@ -719,13 +723,53 @@ def test_clock_gates_are_read_where_placement_put_them():
         soc_step.clock_gates(_DEF.replace("UNITS DISTANCE MICRONS 1000 ;", ""))
 
 
+def test_the_layout_is_one_run_after_synthesis_without_the_gates_buffers(tmp_path, monkeypatch):
+    """By default the layout goes on from synthesis in one run, with the configuration as
+    given, as the evidence layout did."""
+    from chipleap.verify import pnr
+
+    calls: list[tuple[dict, dict]] = []
+
+    def fake(work, cfg, tag="chipleap", **kw):
+        calls.append((cfg, kw))
+        return {"done": 1}, None
+
+    monkeypatch.setattr(pnr, "run_librelane", fake)
+    full = {"INSERT_ECO_BUFFERS": [{"target": "u_accel.abuf_s0_m0/A_CLK"}]}
+    for value in (None, "", soc_step.BANK_OUTPUTS):
+        calls.clear()
+        if value is None:
+            monkeypatch.delenv(soc_step.BUFFERS_ENV, raising=False)
+        else:
+            monkeypatch.setenv(soc_step.BUFFERS_ENV, value)
+        assert soc_step.layout(tmp_path, full) == ({"done": 1}, None)
+        assert calls == [
+            (full, {"resume_from": soc_step.AFTER_SYNTHESIS, "timeout_s": soc_step.TIMEOUT_S})
+        ]
+
+
+def test_a_trial_run_names_its_buffers(monkeypatch):
+    """CHIPLEAP_SOC_BUFFERS names the trial buffers, comma-separated; anything else stops
+    the step before LibreLane runs."""
+    monkeypatch.delenv(soc_step.BUFFERS_ENV, raising=False)
+    assert soc_step.trial_buffers() == frozenset()
+    monkeypatch.setenv(soc_step.BUFFERS_ENV, " gates , bank-outputs,")
+    assert soc_step.trial_buffers() == {soc_step.GATES, soc_step.BANK_OUTPUTS}
+    for bad in ("gate", "gates,dout", "all"):
+        monkeypatch.setenv(soc_step.BUFFERS_ENV, bad)
+        with pytest.raises(soc_step.SocError, match="CHIPLEAP_SOC_BUFFERS names gates and"):
+            soc_step.trial_buffers()
+
+
 def test_the_layout_stops_after_the_clock_tree_to_buffer_the_gates(tmp_path, monkeypatch):
-    """The layout runs to the clock tree, reads the gates' places from the DEF it left,
-    and goes on from the buffers' step with a buffer after each gate besides the macros'."""
+    """With the clock gates' buffers, the layout runs to the clock tree, reads the gates'
+    places from the DEF it left, and goes on from the buffers' step with a buffer after
+    each gate besides the macros'."""
     import json
 
     from chipleap.verify import pnr
 
+    monkeypatch.setenv(soc_step.BUFFERS_ENV, soc_step.GATES)
     calls: list[tuple[dict, dict]] = []
     run = tmp_path / "runs" / "chipleap"
     outside = tmp_path / "elsewhere.def"
