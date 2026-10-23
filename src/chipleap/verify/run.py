@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chipleap.gen.rtl import rtl_params
-from chipleap.gen.xheep import EXT_LARGE, xheep_config
+from chipleap.gen.xheep import EXT_LARGE, pad_config, pads_file, xheep_config
 from chipleap.hw.design import Design
 from chipleap.hw.tech import (
     ACCEL_CDC_KGE,
@@ -289,15 +289,17 @@ def place_route(design: Design, workdir: Path) -> StepResult:
     met = r.setup_slack_ns >= 0 and r.hold_slack_ns >= 0
     clean = r.checks_clean
     checks = r.checks()
+    hold = f"; hold missed by {-r.hold_slack_ns:.3f} ns" if r.hold_slack_ns < 0 else ""
+    setup = "met" if r.setup_slack_ns >= 0 else "missed"
     if clocks is not None:
         timing = (
             f"the accelerator at {clock:g} MHz and X-HEEP's side at {bus:.4g} MHz "
-            f"{'met' if met else 'missed'} at the slow corner ({group_note(r.groups)})"
+            f"{setup} at the slow corner ({group_note(r.groups)}){hold}"
         )
     else:
         timing = (
-            f"{clock:g} MHz {'met' if met else 'missed'} at the slow corner (about "
-            f"{r.fmax_worst_mhz:.0f} MHz, and about {r.fmax_mhz:.0f} MHz at the typical one)"
+            f"{clock:g} MHz {setup} at the slow corner (about {r.fmax_worst_mhz:.0f} MHz, "
+            f"and about {r.fmax_mhz:.0f} MHz at the typical one){hold}"
         )
     msg = (
         f"placed and routed on IHP SG13G2: {r.core_um2 / 1e6:.3f} mm2 core at "
@@ -504,16 +506,21 @@ def check_xheep(bundle: Path, design: Design, checkout: Path | None, fetch: bool
     # checks the configuration ChipLeap generates from design.yaml, never the bundle's own
     # file, which could have come from anywhere. The consistency step reports drift.
     text, same = _regenerated_xheep(bundle, design)
+    pads_text = pad_config(design)
     with tempfile.TemporaryDirectory(prefix="chipleap-xheep-cfg-") as tmp:
         cfg = Path(tmp) / f"{design.name}.py"
         cfg.write_text(text)
-        v = xheep.validate(cfg, co)
+        pads = None
+        if pads_text is not None:
+            pads = Path(tmp) / pads_file(design)
+            pads.write_text(pads_text)
+        v = xheep.validate(cfg, co, pads)
         if not v.ok:
             errors = [ln for ln in v.log.splitlines() if "Error" in ln.split(":")[0]]
             reason = errors[-1].split("ERROR:")[-1].split(":", 1)[-1].strip() if errors else ""
             msg = "X-HEEP rejected the configuration" + (f": {reason}" if reason else "")
             return StepResult("xheep", "fail", msg, {"log": v.log})
-        r = xheep.render(cfg, co)
+        r = xheep.render(cfg, co, pads=pads)
     data = {
         "checkout": str(co),
         "validate": v.summary,

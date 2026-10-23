@@ -22,18 +22,19 @@ import math
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from chipleap.chip import io
+from chipleap.chip.run import klayout_threads
 from chipleap.gen import banks
 from chipleap.gen.rtl import accel_sv, cdc_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
-from chipleap.verify import antenna, launch, minarea
+from chipleap.verify import antenna, launch, librelane_pdk, minarea
 from chipleap.verify.drc import (
     DrcReportError,
     DrcResult,
@@ -42,7 +43,12 @@ from chipleap.verify.drc import (
     read_lyrdb,
 )
 from chipleap.verify.synth import _sv2v
-from chipleap.verify.tools import librelane, librelane_env, librelane_pdk_args, librelane_ran
+from chipleap.verify.tools import (
+    librelane,
+    librelane_env,
+    librelane_ran,
+    librelane_version_key,
+)
 
 PNR_WORDS = 16
 
@@ -172,6 +178,18 @@ def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[
         # Design rules are checked with IHP's own KLayout deck. Magic's IHP rules are a
         # second, single-threaded opinion that takes longer than the rest of the flow.
         "RUN_MAGIC_DRC": False,
+        # ChipLeap judges KLayout's DRC from the run's report, with off-grid pin markers
+        # inside the PDK's own macros set apart (``klayout_drc``). LibreLane counts those
+        # markers as errors, and its verdict would end the run on exit 2, which ChipLeap
+        # reads no result from.
+        "ERROR_ON_KLAYOUT_DRC": False,
+        # ChipLeap judges setup and hold at every corner from the run's metrics, and reports
+        # a run that misses them with its slack. LibreLane's checks would end such a run on
+        # exit 2: IHP's configuration checks setup at every corner from 22f2a25 on (it was
+        # the typical corner only), and LibreLane checks hold at every corner. [""] matches
+        # no corner.
+        "SETUP_VIOLATION_CORNERS": [""],
+        "HOLD_VIOLATION_CORNERS": [""],
         # Let the detailed router fix antenna violations with diodes, as a shuttle requires.
         "DRT_ANTENNA_REPAIR_ITERS": 5,
         # Optimise where the design is signed off: gate sizing, buffering, the clock tree and
@@ -183,8 +201,10 @@ def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[
         # estimated, and nothing repairs timing after it, so the repairs aim well above zero.
         "PL_RESIZER_SETUP_SLACK_MARGIN": place_margin_ns,
         "GRT_RESIZER_SETUP_SLACK_MARGIN": route_margin_ns,
-        # IHP's KLayout rule deck is the slowest step; let it use several cores.
-        "KLAYOUT_DRC_THREADS": max(1, min(8, (os.cpu_count() or 2) // 2)),
+        # IHP's KLayout rule deck is the slowest step; let it use several cores, out of the
+        # run's own (klayout_threads: LIBRELANE_MAX_CORES or the CPUs the process may use, as
+        # the chip's DRC and IHP's antenna deck take them), not the machine's.
+        "KLAYOUT_DRC_THREADS": max(1, min(8, klayout_threads() // 2)),
     }
 
 
@@ -435,6 +455,35 @@ def second_part_result(
     return metrics, next(iter(sorted((final / "gds").glob("*.gds"))), None)
 
 
+# LibreLane 3.0.14 hands KLAYOUT_DRC_THREADS to IHP's rule deck as ``thr``, which the deck
+# at 22f2a25 does not read: it reads ``threads`` and otherwise runs on every CPU the process
+# may use. KLAYOUT_DRC_DEFINES, which 3.0.0.dev44 does not know, passes ``threads`` too.
+DRC_DEFINES_FROM = (3, 0, 14, 2, 0)
+# LibreLane 3.0.0.dev44 places for timing by default (PL_TIME_DRIVEN); 3.0.14 calls it
+# PL_TIMING_DRIVEN, which 3.0.0.dev44 does not know, and leaves it off. 3.0.14's repair after
+# placement also no longer upsizes gates that break no limit: on a 12 x 12 multiplier routed
+# at 5.4 ns with no timing repair, 3.0.0.dev44's resized 97 gates and 3.0.14's none, and the
+# multiplier missed the slow corner by 1.608 ns where it had missed by 0.624. Placing it for
+# timing on 3.0.14 more than makes that up: it missed by 0.314.
+TIMING_DRIVEN_FROM = (3, 0, 14, 2, 0)
+TIMING_DRIVEN_KEYS = ("PL_TIMING_DRIVEN", "PL_TIME_DRIVEN")
+
+
+def for_librelane(cfg: dict[str, Any], version: str) -> dict[str, Any]:
+    """``cfg`` with what LibreLane ``version`` needs told: KLayout's DRC thread count also
+    passed as ``threads``, the name IHP's rule deck reads, and global placement driven by
+    timing unless ``cfg`` says otherwise, both on a LibreLane that knows the variable."""
+    key = librelane_version_key(version)
+    out = dict(cfg)
+    threads = cfg.get("KLAYOUT_DRC_THREADS")
+    if threads is not None and key >= DRC_DEFINES_FROM:
+        # LibreLane takes the defines as text.
+        out["KLAYOUT_DRC_DEFINES"] = {"threads": str(threads)}
+    if key >= TIMING_DRIVEN_FROM and not any(k in cfg for k in TIMING_DRIVEN_KEYS):
+        out["PL_TIMING_DRIVEN"] = True
+    return out
+
+
 def run_librelane(
     workdir: Path,
     cfg: dict[str, Any],
@@ -468,14 +517,15 @@ def run_librelane(
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
     try:
-        pdk_args = librelane_pdk_args()
+        pdk_root = librelane_pdk.ensure()
         env = librelane_env()
     except ValueError as exc:
         raise PnrError(str(exc)) from None
+    cfg = for_librelane(cfg, tool.version)
     if late_antenna_repair:
         cfg = with_late_antenna_repair(cfg)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
-    base = [tool.path, *pdk_args, "--run-tag", tag]
+    base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", tag]
     first = ["--from", resume_from] if resume_from else ["--overwrite"]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", timeout_s))
     start = time.monotonic()
@@ -498,7 +548,7 @@ def run_librelane(
         env,
     )
     try:
-        librelane_ran(run)
+        librelane_ran(run, pdk_root)
     except ValueError as exc:
         raise PnrError(str(exc)) from None
     routed = step_state(run, DETAILED_ROUTING)
@@ -668,10 +718,21 @@ def with_late_antenna_repair(cfg: dict[str, Any]) -> dict[str, Any]:
 # at the slow corner and changed nothing: resizing a driver cannot fix a wire, and the
 # length LibreLane derives (about 5 mm) never splits it.
 MACRO_WIRE_UM = 300
+# The repair after global routing fixes hold to MACRO_HOLD_MARGIN_NS instead of LibreLane's
+# 0.05 ns. IHP's SRAMs ask for up to 0.20 ns of hold time at their inputs at the fast
+# corner, on top of the 0.25 ns clock uncertainty, and LibreLane 3.0.14 applies the PDK's
+# 5 % derate to the accelerator's constraints (3.0.0.dev44's divided it to 0). On the
+# SmolLM2 accelerator at 100 MHz the repair left hold at +0.20 ns by its estimate, and
+# detailed routing took two macros' A_REN to -0.059 ns at the fast corner. With 0.15 ns
+# hold closed at +0.109 ns with 62 more hold cells (3397), and setup at the slow corner
+# kept +0.155 ns. With 0.10 the same two pins stayed at -0.058 ns, and 0.20 broke setup
+# (-0.164 ns): a point tuned on that design at 100 MHz, not a general constant.
+MACRO_HOLD_MARGIN_NS = 0.15
 MACRO_REPAIR = {
     "RUN_POST_GRT_DESIGN_REPAIR": True,
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
+    "GRT_RESIZER_HOLD_SLACK_MARGIN": MACRO_HOLD_MARGIN_NS,
 }
 # IHP's SRAMs allow a slew of 0.595 ns at their inputs at the slow corner, a quarter of the
 # standard cells' 2.5 ns, and OpenROAD's repair_design holds a net to its driver's limit
@@ -701,16 +762,35 @@ def macro_sdc(pnr: bool) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LibreLane 3.0.14 puts a port's buffer at its pin, where 3.0.0.dev44 put most of them by
+# the cells they drive, and its legaliser moves a cell at most PL_MAX_DISPLACEMENT_Y (100 um
+# by default) to a free row. Over a row of macros the free rows are farther than that: in
+# the SmolLM2 accelerator's layout, with 256x64 SRAMs along the core's top and bottom, the
+# band starts 161 um from the pins above and below them, 44 port buffers found no row and
+# the run stopped (DPL-0036). So a layout with macros lets the legaliser reach the band,
+# and MACRO_REACH_SLACK_UM of rows into it, for when the first rows are full.
+MACRO_REACH_SLACK_UM = 50.0
+
+
+def macro_reach(plan: place.Floorplan, macros: Sequence[place.Macro]) -> dict[str, Any]:
+    """LibreLane's displacement limit for a layout with ``macros`` (``MACRO_REACH_SLACK_UM``),
+    never below its default."""
+    reach = place.edge_reach_um(plan, macros)
+    return {"PL_MAX_DISPLACEMENT_Y": max(100, math.ceil(reach + MACRO_REACH_SLACK_UM))}
+
+
 def sram_config(
     accel: Accel,
     clock_mhz: float,
     plan: place.Floorplan,
     macros: dict[str, Any],
+    sizes: Sequence[place.Macro],
 ) -> dict[str, Any]:
     """The LibreLane configuration for ``accel`` with its buffers in SRAM macros: the
     generated top, the floorplan ChipLeap sized, the macros and their power grid."""
     return {
         **MACRO_REPAIR,
+        **macro_reach(plan, sizes),
         "DESIGN_NAME": banks.TOP,
         "VERILOG_FILES": ["dir::src/chipleap_accel.v", f"dir::src/{banks.TOP}.v"],
         "CLOCK_PORT": "clk_i",
@@ -964,13 +1044,11 @@ def sram_flow(
     views = {s.cell: sram.views(pdk, s.cell, workdir) for s in plan.cells()}
     prefix = f"{CDC_INSTANCE}." if accel_mhz else ""
     cells = {prefix + inst: cell for inst, cell in plan.instances()}
-    fp = place.rows(
-        [
-            place.Macro(prefix + inst, views[cell].view.width, views[cell].view.height)
-            for inst, cell in plan.instances()
-        ],
-        model_cell_um2(accel, banked=True, crossings=bool(accel_mhz)),
-    )
+    sizes = [
+        place.Macro(prefix + inst, views[cell].view.width, views[cell].view.height)
+        for inst, cell in plan.instances()
+    ]
+    fp = place.rows(sizes, model_cell_um2(accel, banked=True, crossings=bool(accel_mhz)))
     # Behind the crossings the core keeps as many reads in flight per port as they hold.
     (workdir / "src" / f"{banks.TOP}.v").write_text(
         banks.top_sv(plan, CDC_DEPTH if accel_mhz else None)
@@ -985,7 +1063,7 @@ def sram_flow(
     macros, _ = sram.librelane_macros(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )
-    cfg = sram_config(accel, clock_mhz, fp, macros)
+    cfg = sram_config(accel, clock_mhz, fp, macros, sizes)
     if accel_mhz:
         cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz)
     return cfg, plan

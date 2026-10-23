@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -282,34 +282,44 @@ def librelane() -> Tool:
 
 
 LIBRELANE_IMAGE_ENV = "CHIPLEAP_LIBRELANE_IMAGE"
+# The LibreLane release ChipLeap runs, the one Tiny Tapeout's GDS action uses.
+LIBRELANE_DEFAULT_IMAGE = "ghcr.io/librelane/librelane:3.0.14"
 
 
 def librelane_image() -> str:
-    """The LibreLane container image ChipLeap asks a wrapper for (``CHIPLEAP_LIBRELANE_IMAGE``,
-    passed on as ``LIBRELANE_IMAGE``); empty to leave the wrapper's own."""
-    return os.environ.get(LIBRELANE_IMAGE_ENV, "").strip()
+    """The LibreLane container image ChipLeap asks a wrapper for, passed on as
+    ``LIBRELANE_IMAGE``: ``CHIPLEAP_LIBRELANE_IMAGE``, else ``LIBRELANE_DEFAULT_IMAGE``.
+    Set empty, it leaves the wrapper's own."""
+    value = os.environ.get(LIBRELANE_IMAGE_ENV)
+    return LIBRELANE_DEFAULT_IMAGE if value is None else value.strip()
 
 
 def librelane_env() -> dict[str, str]:
     """This process's environment with the settings a LibreLane container wrapper reads:
-    ``LIBRELANE_IMAGE`` from ``CHIPLEAP_LIBRELANE_IMAGE`` (the image it starts) and
-    ``LIBRELANE_PDK_ROOT`` from ``CHIPLEAP_LIBRELANE_PDK_ROOT`` (the PDK root it mounts), so
-    a run gets the LibreLane and PDK ChipLeap was set to, whatever the wrapper's defaults."""
+    ``LIBRELANE_IMAGE`` (``librelane_image``, the image it starts) and
+    ``LIBRELANE_PDK_ROOT`` (the directory of the PDK roots it mounts,
+    ``chipleap.verify.librelane_pdk.mount_root``), so a run gets the LibreLane and PDK
+    ChipLeap chose, whatever the wrapper's defaults."""
+    from chipleap.verify import librelane_pdk
+
     env = dict(os.environ)
     if image := librelane_image():
         env["LIBRELANE_IMAGE"] = image
-    if (root := librelane_pdk_root()) is not None:
-        env["LIBRELANE_PDK_ROOT"] = str(root)
+    env["LIBRELANE_PDK_ROOT"] = str(librelane_pdk.mount_root())
     return env
 
 
-def librelane_ran(run: Path) -> str:
+def librelane_ran(run: Path, pdk_root: Path | None = None) -> str:
     """The LibreLane version that ran ``run`` (its ``resolved.json``), checked against the
     one ChipLeap expected (``librelane().version``, when that is a version): a wrapper that
     ignored ``CHIPLEAP_LIBRELANE_IMAGE`` raises ``ValueError``, since the run's
-    configuration was written for the other. Empty when the run does not say."""
+    configuration was written for the other. With ``pdk_root``, the run's PDK must be that
+    root's commit. Empty when the run does not say."""
+    from chipleap.verify import librelane_pdk
+
     try:
-        meta = json.loads((run / "resolved.json").read_text()).get("meta") or {}
+        resolved = json.loads((run / "resolved.json").read_text())
+        meta = resolved.get("meta") or {}
     except (OSError, ValueError, AttributeError):
         return ""
     ran = str(meta.get("librelane_version") or "") if isinstance(meta, dict) else ""
@@ -323,6 +333,15 @@ def librelane_ran(run: Path) -> str:
                 else ""
             )
         )
+    ran_root = resolved.get("PDK_ROOT")
+    if pdk_root is not None and isinstance(ran_root, str) and ran_root:
+        want = librelane_pdk.commit_of(pdk_root / librelane_pdk.PDK)
+        got = librelane_pdk.commit_of(Path(ran_root) / librelane_pdk.PDK)
+        if got != want:
+            raise ValueError(
+                f"LibreLane ran on IHP-Open-PDK {got[:7] or 'of no known commit'} "
+                f"({ran_root}), not {want[:7]} ({pdk_root})"
+            )
     return ran
 
 
@@ -342,50 +361,6 @@ def librelane_loads_pad_views() -> bool:
     May 2026)."""
     tool = librelane()
     return tool.found and librelane_version_key(tool.version) >= (3, 0, 0, 2, 0)
-
-
-LIBRELANE_PDK_ENV = "CHIPLEAP_LIBRELANE_PDK_ROOT"
-LIBRELANE_PDK = "ihp-sg13g2"
-
-
-def librelane_pdk_root() -> Path | None:
-    """The PDK root LibreLane runs on, when ``CHIPLEAP_LIBRELANE_PDK_ROOT`` names one: a
-    directory holding ``ihp-sg13g2`` (a ciel root with the commit of the chip's PDK
-    checkout enabled). ``None`` when it is unset: LibreLane then installs the version it
-    pins itself, through ciel. A setting that is not an absolute directory with
-    ``ihp-sg13g2`` in it raises ``ValueError``, so a run never falls back silently."""
-    value = os.environ.get(LIBRELANE_PDK_ENV, "")
-    if not value:
-        return None
-    if not os.path.isabs(value):
-        raise ValueError(f"{LIBRELANE_PDK_ENV} is a relative path, {value}; give an absolute one")
-    root = Path(value)
-    if not (root / LIBRELANE_PDK).is_dir():
-        raise ValueError(f"{LIBRELANE_PDK_ENV} names {value}, which holds no {LIBRELANE_PDK}")
-    return root
-
-
-def librelane_pdk_args() -> list[str]:
-    """LibreLane's PDK arguments: the PDK and, with ``CHIPLEAP_LIBRELANE_PDK_ROOT``,
-    ``--manual-pdk --pdk-root`` it (``librelane_pdk_root``)."""
-    root = librelane_pdk_root()
-    args = ["--pdk", LIBRELANE_PDK]
-    if root is not None:
-        args += ["--manual-pdk", "--pdk-root", str(root)]
-    return args
-
-
-def librelane_pdk_commit(root: Path) -> str:
-    """The commit of the PDK under a ciel root: ciel keeps each version in
-    ``ciel/<family>/versions/<commit>``, which ``ihp-sg13g2`` links to. Empty when the
-    path does not say."""
-    real = (root / LIBRELANE_PDK).resolve()
-    parts = real.parts
-    if "versions" in parts:
-        i = parts.index("versions")
-        if i + 1 < len(parts):
-            return parts[i + 1]
-    return ""
 
 
 def iverilog() -> Tool:
@@ -655,18 +630,16 @@ PDK_ROOTS = (
 
 def pdk_roots() -> tuple[Path, ...]:
     """Where PDKs live on this machine: ``PDK_ROOT``, the usual install directories and
-    the PDK root LibreLane runs on (``librelane_pdk_root``), resolved. Files the
+    the PDK roots LibreLane runs on (``librelane_pdk.mount_root``), resolved. Files the
     implementation steps take from a PDK must be under one of them, or beside the liberty
     ``CHIPLEAP_LIBERTY`` names. Relative settings count for nothing
     (``liberty_settings_problem``)."""
     pdk_root = os.environ.get("PDK_ROOT", "")
     roots = [pdk_root if os.path.isabs(pdk_root) else "", *PDK_ROOTS]
-    try:
-        librelane_root = librelane_pdk_root()
-    except ValueError:
-        librelane_root = None
-    if librelane_root is not None:
-        roots.append(str(librelane_root))
+    from chipleap.verify import librelane_pdk
+
+    with suppress(ValueError):  # a bad CHIPLEAP_LIBRELANE_PDK_ROOT trusts nothing
+        roots.append(str(librelane_pdk.mount_root()))
     out = [Path(r).expanduser().resolve() for r in roots if r and Path(r).expanduser().is_dir()]
     env = os.environ.get("CHIPLEAP_LIBERTY")
     if env and os.path.isabs(env) and Path(env).is_file():

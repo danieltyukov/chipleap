@@ -29,7 +29,7 @@ from chipleap.hw.cpu import CPUS
 from chipleap.hw.design import DATAFLOWS, Accel, Design, DesignError
 from chipleap.hw.memory import MEMORIES, NONE_KEY
 from chipleap.hw.tech import TECHNOLOGIES
-from chipleap.model.evaluate import Evaluation, evaluate
+from chipleap.model.evaluate import XHEEP_LABELS, Evaluation, evaluate
 from chipleap.spec import Spec
 from chipleap.workload.ops import Workload
 
@@ -134,6 +134,16 @@ def diagnose(c: Candidate, spec: Spec) -> list[str]:
         lines.append(
             f"External memory delivers {ev.bandwidth['external'] / 1e9:.3g} GB/s; each "
             f"{unit} reads {ev.ext_bytes / 1e6:.4g} MB from it."
+        )
+    optional = sorted(
+        ((k, v) for k, v in ev.soc_logic_mm2.items() if k in XHEEP_LABELS.values()),
+        key=lambda kv: -kv[1],
+    )
+    if ev.design.platform == "xheep" and optional:
+        lines.append(
+            f"X-HEEP's optional peripherals take {sum(v for _, v in optional):.3g} mm2 "
+            "(" + ", ".join(f"{k} {v:.2g}" for k, v in optional) + "); the spec's "
+            "peripherals section chooses them."
         )
     return lines
 
@@ -241,7 +251,12 @@ def baseline_point(spec: Spec) -> Point:
     freq = float(max(f for f in FREQ_STEPS if f <= min(100.0, _freq_limit(spec, tech))))
     wl = spec.workload()
     design = Design(
-        name=f"{spec.name}-baseline", tech=tech, freq_mhz=freq, cpu=cpu, platform=spec.platform
+        name=f"{spec.name}-baseline",
+        tech=tech,
+        freq_mhz=freq,
+        cpu=cpu,
+        platform=spec.platform,
+        peripherals=spec.peripherals,
     )
     on_chip = design.sram_kib * 1024 - spec.firmware_kib * 1024
     if wl.storage.total > on_chip:
@@ -293,6 +308,7 @@ def random_point(spec: Spec, rng: random.Random, workload: Workload) -> Point | 
         ext_channels=rng.choice((1, 1, 2, 4)) if mem != NONE_KEY else 1,
         accel=accel,
         platform=spec.platform,
+        peripherals=spec.peripherals,
     )
     limit = _freq_limit(spec, tech, accel)
     if design.freq_mhz > limit:

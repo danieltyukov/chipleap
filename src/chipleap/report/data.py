@@ -37,6 +37,7 @@ def evaluation_dict(ev: Evaluation, ops: bool = True) -> dict[str, Any]:
         "bottleneck": ev.bound,
         "time_share": {k: round(v, 4) for k, v in ev.bound_share().items()},
         "area_mm2": {k: round(v, 5) for k, v in ev.area_mm2.items()},
+        "soc_logic_mm2": {k: round(v, 5) for k, v in ev.soc_logic_mm2.items()},
         "energy_mj_per_step": {k: round(v / 1e9, 6) for k, v in ev.energy_pj_by.items()},
         "placement_on_chip": {k: round(v, 4) for k, v in ev.placement.items()},
         "external_mb_per_step": round(ev.ext_bytes / 1e6, 4),
