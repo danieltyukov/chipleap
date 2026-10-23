@@ -592,6 +592,16 @@ def riscv_gcc() -> Tool:
     return Tool("riscv-gcc", None, "", "compile the firmware driver")
 
 
+def fusesoc() -> Tool:
+    return find(
+        "fusesoc",
+        ["--version"],
+        r"(\S+)",
+        "X-HEEP's sources for place and route of the SoC (X-HEEP's FuseSoC)",
+        "CHIPLEAP_FUSESOC",
+    )
+
+
 def cxx() -> Tool:
     return find("c++", ["--version"], r"(\d+\.\d+\.\d+)", "build the Verilator testbench")
 
@@ -605,6 +615,7 @@ def all_tools() -> list[Tool]:
         sta(),
         librelane(),
         riscv_gcc(),
+        fusesoc(),
         iverilog(),
         slang(),
         sby(),
