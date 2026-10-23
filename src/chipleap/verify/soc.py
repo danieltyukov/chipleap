@@ -474,18 +474,17 @@ def config(sources: Sources, clock_mhz: float, accel_mhz: float = 0.0) -> dict[s
     (``--extern-modules``) and without X-HEEP's assertions; LibreLane's Verilator lint is
     off, since X-HEEP is linted with its own waivers; the constraints are ChipLeap's
     (``chipleap.gen.soc.sdc``), and the signoff is the accelerator's. With ``accel_mhz``
-    the accelerator's clock is a second clock port, as in its own layout
-    (``chipleap.verify.pnr.with_crossings``)."""
+    the accelerator's clock is a second clock port.
+
+    LibreLane reads one ``CLOCK_PERIOD``, for its own base SDC (which ChipLeap's replaces)
+    and as ABC's delay target in synthesis. It stays X-HEEP's even with the accelerator's
+    faster clock beside it: X-HEEP is most of the SoC's logic, and the accelerator's own
+    layout (``chipleap.verify.pnr.with_crossings``), which takes the faster one, is almost
+    all accelerator. Both clocks' paths are timed and repaired against ChipLeap's SDC."""
     clocks: dict[str, Any] = {
-        "CLOCK_PORT": "clk_i",
+        "CLOCK_PORT": ["clk_i", soc.ACCEL_CLOCK] if accel_mhz else "clk_i",
         "CLOCK_PERIOD": round(1000.0 / clock_mhz, 3),
     }
-    if accel_mhz:
-        clocks = {
-            "CLOCK_PORT": ["clk_i", soc.ACCEL_CLOCK],
-            # LibreLane reads one period: the faster clock's.
-            "CLOCK_PERIOD": round(1000.0 / max(clock_mhz, accel_mhz), 3),
-        }
     return {
         **pnr.MACRO_REPAIR,
         "DESIGN_NAME": soc.TOP,

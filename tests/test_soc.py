@@ -463,7 +463,8 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path):
     own = design.with_(accel_mhz=90.0)
     cfg2, prep2 = soc_step.prepare(own, xheep_config(own), co, work, pdk, clock_mhz=35.0)
     assert cfg2["CLOCK_PORT"] == ["clk_i", "accel_clk_i"]
-    assert cfg2["CLOCK_PERIOD"] == pytest.approx(11.111)
+    # Synthesis aims at X-HEEP's period, most of the SoC's logic; the SDC times both.
+    assert cfg2["CLOCK_PERIOD"] == pytest.approx(28.571)
     assert "src/chipleap_accel_cdc.sv" in prep2.sources.files
     accel2 = {i for i, _ in prep2.instances if i.startswith(f"{soc.ACCEL_INST}.")}
     assert len(accel2) == 4 and all(i.startswith("u_accel.u_accel.") for i in accel2)
