@@ -789,7 +789,7 @@ def test_the_soc_takes_its_settings_from_the_librelane_that_runs(monkeypatch):
 
 
 def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
-    """The SoC's repairs keep 0.8 and 1.6 ns of estimated setup slack from LibreLane 3.0.14
+    """The SoC's repairs keep 2.0 and 3.0 ns of estimated setup slack from LibreLane 3.0.14
     on, 6 and 5 ns on 3.0.0.dev44 (#20's evidence), and 0.2 ns of hold after global
     routing; CHIPLEAP_SOC_SETUP_MARGINS and CHIPLEAP_SOC_HOLD_MARGIN set others for a
     trial run."""
@@ -801,11 +801,11 @@ def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
         cfg = soc_step.config(sources, 36.0, version=version)
         return cfg["PL_RESIZER_SETUP_SLACK_MARGIN"], cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"]
 
-    assert margins("3.0.14") == margins("3.1.0") == (0.8, 1.6)
+    assert margins("3.0.14") == margins("3.1.0") == (2.0, 3.0)
     assert margins("3.0.0.dev44") == margins("3.0.0rc1") == (6.0, 5.0)
-    assert margins("unknown") == (0.8, 1.6)  # as the LibreLane run by default
-    monkeypatch.setenv(soc_step.SETUP_MARGINS_ENV, " 2.0, 3 ")
-    assert margins("3.0.14") == margins("3.0.0.dev44") == (2.0, 3.0)
+    assert margins("unknown") == (2.0, 3.0)  # as the LibreLane run by default
+    monkeypatch.setenv(soc_step.SETUP_MARGINS_ENV, " 0.8, 1.6 ")
+    assert margins("3.0.14") == margins("3.0.0.dev44") == (0.8, 1.6)
     for bad in ("2", "x,1", "1,2,3", "-1,2", "1,11"):
         monkeypatch.setenv(soc_step.SETUP_MARGINS_ENV, bad)
         with pytest.raises(soc_step.SocError, match="CHIPLEAP_SOC_SETUP_MARGINS must be"):

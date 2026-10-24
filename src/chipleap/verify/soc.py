@@ -483,8 +483,14 @@ def librelane_from_3014(version: str | None = None) -> bool:
 # (SETUP_MARGINS_DEV44_NS). 3.0.14 estimates with IHP's ORFS fit of the layers' RC, and
 # there the estimate is the pessimistic side: on the SmolLM2 accelerator laid out on two
 # clocks, routing took at most 0.38 ns from it on any path group, and gave the accelerator's
-# paths a median 0.5 ns back. So from 3.0.14 the repairs keep the accelerator's own 0.8 and
-# 1.6 ns. Margins as large as dev44's lock hold repair out of a faster clock: OpenROAD's
+# paths a median 0.5 ns back, as it did on the SoC (median +0.56 to +0.69 ns on its
+# accelerator's clock). From 3.0.14 the repairs keep 2.0 and 3.0 ns. The accelerator's own
+# 0.8 and 1.6 ns were too little for the SoC: there the estimate after CTS, with placement's
+# parasitics, sat 1.10 ns above setup, over the 0.8 ns margin, so the repair after CTS sized
+# nothing, and the one after global routing (whose estimate was 2.5 ns lower) stalled at
+# -0.93 ns. The SmolLM2 SoC at 36 MHz with the accelerator at 90 MHz then missed setup by
+# 0.202 ns on its macros' read paths; with 2.0 and 3.0 ns it met at +0.216 ns, the read paths
+# at +1.065 ns. Margins as large as dev44's lock hold repair out of a faster clock: OpenROAD's
 # hold repair adds no delay that takes an endpoint's setup slack below the margin, and at
 # 90 MHz almost every path of the accelerator has less than 5 ns. In the dev44 layout of the
 # SmolLM2 SoC with the accelerator at 90 MHz, three flip-flops of a DMA read port's phase
@@ -493,7 +499,7 @@ def librelane_from_3014(version: str | None = None) -> bool:
 # them.
 # CHIPLEAP_SOC_SETUP_MARGINS sets other margins for a trial run.
 SETUP_MARGINS_DEV44_NS = (6.0, 5.0)
-SETUP_MARGINS_NS = (0.8, 1.6)
+SETUP_MARGINS_NS = (2.0, 3.0)
 SETUP_MARGINS_ENV = "CHIPLEAP_SOC_SETUP_MARGINS"
 
 
