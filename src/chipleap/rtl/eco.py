@@ -59,11 +59,14 @@ from chipleap.verify import launch, librelane_pdk
 from chipleap.verify.pnr import (
     DEF_TO_ODB,
     DETAILED_ROUTING,
+    ECO_BUFFERS,
+    ECO_BUFFERS_AT,
     PnrError,
     PnrResult,
     begin_second_part,
     for_librelane,
     klayout_drc,
+    klayout_gds,
     klayout_report,
     parse,
     parse_run,
@@ -90,6 +93,13 @@ REPAIR = "OpenROAD.ResizerTimingPostGRT"
 # repaired again after the timing repair (chipleap.verify.pnr.run_librelane). An ECO writes
 # its own step list instead.
 ROUTED_META = with_late_antenna_repair({"RUN_POST_GRT_RESIZER_TIMING": True})["meta"]
+# A project with the PDK's SRAMs adds buffers beside their outputs (chipleap.verify.pnr.
+# with_eco_buffers), which the state an ECO resumes from already holds: its step is not
+# among those the ECO repeats, and their list is not passed on.
+BUFFERED_META = {
+    **ROUTED_META,
+    "substituting_steps": {**ROUTED_META["substituting_steps"], ECO_BUFFERS_AT: ECO_BUFFERS},
+}
 STEP_ID_RE = re.compile(r"[A-Z][A-Za-z]*\.[A-Z][A-Za-z0-9]*")
 # The LibreLane variables ChipLeap's place and route writes (chipleap.rtl.pnr.config,
 # chipleap.verify.pnr.signoff and for_librelane), by the kind of value each takes. An ECO resumes LibreLane
@@ -129,10 +139,15 @@ TEMPLATE_KEYS = {
     "FP_MACRO_VERTICAL_HALO": "number",
     "PL_MAX_DISPLACEMENT_Y": "number",
     "MACROS": "macros",
+    "INSERT_ECO_BUFFERS": "eco_buffers",
     "PDN_CFG": "pdn",
     "RUN_POST_GRT_DESIGN_REPAIR": "bool",
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": "number",
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": "number",
+    "IO_EXCLUDE_PIN_REGION": "text",
+    # Every project's layout (chipleap.verify.pnr.port_diodes).
+    "DIODE_ON_PORTS": "text",
+    "DIODE_CELL": "text",
 }
 # The entries of a hard macro in MACROS that name files, and the corners of its liberty.
 MACRO_FILES = ("gds", "lef", "vh", "spice", "nl", "pnl")
@@ -419,11 +434,12 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
     """The routed run's configuration as an ECO passes it on: only ``TEMPLATE_KEYS`` and
     the project's own numeric or boolean ``pnr.librelane`` settings, each with a plain
     value, and every file it names one the run recorded beside it, unchanged. Its flow
-    (``ROUTED_META``, the only one accepted) is left out for the ECO's own."""
+    (``ROUTED_META``, or ``BUFFERED_META`` with buffers beside a macro's outputs, the only
+    ones accepted) is left out for the ECO's own, and so are the buffers."""
     out = dict(cfg)
     for key, value in cfg.items():
         if key == "meta":
-            if value != ROUTED_META:
+            if value not in (ROUTED_META, BUFFERED_META):
                 raise EcoError(
                     f"the routed run's configuration sets meta to {value!r}, not the flow "
                     "ChipLeap's place and route writes; run the pnr step again"
@@ -433,6 +449,11 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
         kind = TEMPLATE_KEYS.get(key)
         if kind == "macros":
             _macros(value, sealed)
+            continue
+        if kind == "eco_buffers":
+            if not isinstance(value, list) or not all(isinstance(b, dict) for b in value):
+                raise EcoError(f"the routed run's {key} is not a list of buffers")
+            del out[key]
             continue
         if kind == "drc_defines":
             # ChipLeap's own (``chipleap.verify.pnr.for_librelane``), which the ECO's
@@ -597,9 +618,9 @@ def _run_librelane(
     try:
         pdk_root = librelane_pdk.ensure()
         env = librelane_env()
+        cfg = for_librelane(cfg, tool.version)
     except ValueError as exc:
         raise EcoError(str(exc)) from None
-    cfg = for_librelane(cfg, tool.version)
     builddir.write_text(work, "config.eco.json", json.dumps(cfg, indent=2))
     base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", ECO_TAG]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
@@ -698,14 +719,28 @@ def apply_eco(project: Project, changes: list[EcoChange]) -> EcoResult:
         raise EcoError(f"macros: {exc}") from None
     sealed_metrics = _read(sealed, run / "final" / "metrics.json")
     report = klayout_report(run)
+    # The GDS the sealed run's KLayout DRC read, for the PDK's macros under other names;
+    # one the record does not hold unchanged is not read, and the PDK's names alone count.
+    checked = klayout_gds(report) if report else None
+    if checked is not None:
+        try:
+            checked = sealed.check(checked)
+        except SealError:
+            checked = None
     try:
         before = parse(
             sealed_metrics,
             mhz,
             None,
-            klayout_drc(sealed_metrics, report and _check(sealed, report, "DRC report"), held),
+            klayout_drc(
+                sealed_metrics,
+                report and _check(sealed, report, "DRC report"),
+                held,
+                checked,
+                io.pdk_dir(),
+            ),
         )
-        after = parse_run(metrics, mhz, gds, run_dir_of(work), held)
+        after = parse_run(metrics, mhz, gds, run_dir_of(work), held, io.pdk_dir())
         after = with_ihp_antenna(after, io.pdk_dir(), project.top, edit_dir)
     except PnrError as exc:
         raise EcoError(str(exc)) from None

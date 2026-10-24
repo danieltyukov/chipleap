@@ -37,6 +37,7 @@ import yaml
 from chipleap.chip import merge
 from chipleap.gen import banks, soc
 from chipleap.gen.rtl import accel_sv
+from chipleap.gen.xheep import absent_pins, pad_config, pads_file
 from chipleap.hw.design import Design
 from chipleap.hw.memory import NONE_KEY
 from chipleap.hw.tech import get_tech
@@ -177,8 +178,9 @@ def _tools_env(fs: Tool, gcc: Tool, tree: Path) -> dict[str, str]:
     return env
 
 
-def render(tree: Path, config: Path, env: dict[str, str]) -> None:
-    """X-HEEP's mcu-gen on its own copy, for ``config``."""
+def render(tree: Path, config: Path, env: dict[str, str], pads: Path | None = None) -> None:
+    """X-HEEP's mcu-gen on its own copy, for ``config`` and the pad configuration ``pads``
+    (X-HEEP's default without one)."""
     _run(
         [
             str(Path(env["PATH"].split(os.pathsep)[0]) / "python"),
@@ -186,7 +188,7 @@ def render(tree: Path, config: Path, env: dict[str, str]) -> None:
             "--config",
             str(config),
             "--pads_cfg",
-            "configs/pad_cfg.py",
+            str(pads) if pads is not None else "configs/pad_cfg.py",
             "--outtpl",
             " ".join(templates(tree)),
         ],
@@ -303,7 +305,10 @@ def generate(
         "chipleap_accel.sv": accel_sv(),
         f"{banks.TOP}.v": banks.top_sv(accel_banks),
         f"{soc.TOP}.sv": soc.top_sv(
-            ports, design.accel.ports, ext_memory=design.ext_mem != NONE_KEY
+            ports,
+            design.accel.ports,
+            ext_memory=design.ext_mem != NONE_KEY,
+            absent=absent_pins(design.peripherals),
         ),
     }
     for name, text in out.items():
@@ -476,7 +481,7 @@ SRAM_CLOCK_PIN = "A_CLK"
 CLOCK_PIN_BUFFER = "sg13g2_buf_4"
 # How far beyond its halo, from the macro's edge where the pin is, the buffer is put; the
 # legaliser moves it to the nearest free site.
-CLOCK_PIN_GAP_UM = 5.0
+CLOCK_PIN_GAP_UM = pnr.BESIDE_GAP_UM
 
 
 @dataclass(frozen=True)
@@ -526,6 +531,11 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # the detailed router resolves it, and DRC is the judge.
         "GRT_ALLOW_CONGESTION": True,
         "PDN_CFG": "dir::pdn.tcl",
+        # IHP's DRC deck runs after LibreLane, in parallel parts (``pnr.with_ihp_drc``),
+        # with its extra rules: LibreLane 3.0.14's KLayout DRC of the 36 MHz SoC, the main
+        # deck alone at 8 threads, took 2 h 0 min (3.0.0.dev44's 3 h 48 min), and ChipLeap's
+        # run of both decks at 16 threads 1 h 37 min.
+        "RUN_KLAYOUT_DRC": False,
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
         # The repairs keep SETUP_MARGINS_NS of estimated setup slack, after CTS and after
@@ -561,18 +571,7 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
     }
 
 
-def _pin_at(p: place.Placed, view: MacroView, pin: str) -> tuple[float, float] | None:
-    """The centre of ``pin``'s first shape on the placed macro ``p``, in the core's um."""
-    shapes = [rect for mp in view.pins if mp.name == pin for _, rect in mp.shapes]
-    if not shapes:
-        return None
-    x0, y0, x1, y1 = shapes[0]
-    x, y = (x0 + x1) / 2, (y0 + y1) / 2
-    if p.orient in ("S", "FN"):
-        x = view.width - x
-    if p.orient in ("S", "FS"):
-        y = view.height - y
-    return p.x + x, p.y + y
+_pin_at = pnr.macro_pin_at
 
 
 # IHP's integrated clock gate, which X-HEEP's clock gates are (``chipleap.gen.soc``), and
@@ -644,19 +643,7 @@ def clock_pin_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> li
     return out
 
 
-def _beside(
-    p: place.Placed, view: MacroView, pin: str, at: tuple[float, float], buffer: str
-) -> dict[str, Any]:
-    """An ``INSERT_ECO_BUFFERS`` entry for ``buffer`` at ``pin`` of the placed macro ``p``
-    (the pin at ``at``), just past the halo off the macro's edge where the pin is."""
-    x, y = at
-    off = place.HALO_UM + CLOCK_PIN_GAP_UM
-    y = p.y - off if y - p.y < view.height / 2 else p.y + view.height + off
-    return {
-        "target": f"{p.instance}/{pin}",
-        "buffer": buffer,
-        "placement": [round(x, 3), round(y, 3)],
-    }
+_beside = pnr.beside_pin
 
 
 # What drives a bank's output wire from beside the macro (0.6 pF limit, about ten times
@@ -763,8 +750,14 @@ def prepare(
     tree = builddir.work_dir(work, "x-heep", empty=True)
     copy_xheep(checkout, tree)
     cfg = builddir.write_text(work, f"xheep_cfg/{design.name}.py", config_text)
+    pads_text = pad_config(design)
+    pads = (
+        builddir.write_text(work, f"xheep_cfg/{pads_file(design)}", pads_text)
+        if pads_text is not None
+        else None
+    )
     env = _tools_env(fs, gcc, tree)
-    render(tree, cfg, env)
+    render(tree, cfg, env, pads)
     builddir.work_dir(work, "fusesoc", empty=True)
     base, data = edam(work, fs, env)
     files, includes = x_heep_files(data, base, work, design.cpu)
@@ -868,8 +861,9 @@ def routed(
 ) -> SocResult:
     """What the SoC LibreLane laid out in ``work`` measures, from its final metrics and
     GDS: its names merged once (``chipleap.rtl.pnr.check_merged``), the PDK
-    macros' own pin markers set apart, IHP's antenna deck on the GDS, as every layout
-    ChipLeap signs off gets it (``chipleap.verify.pnr.with_ihp_antenna``), and the
+    macros' own pin markers set apart, IHP's DRC deck in parallel parts
+    (``chipleap.verify.pnr.with_ihp_drc``) and its antenna deck on the GDS, as every
+    layout ChipLeap signs off gets it (``chipleap.verify.pnr.with_ihp_antenna``), and the
     measures against the model's."""
     from chipleap.rtl.pnr import check_merged
 
@@ -885,10 +879,11 @@ def routed(
         (soc.TOP,),
     )
     result = replace(
-        pnr.parse_run(metrics, clock, gds, run, held),
+        pnr.parse_run(metrics, clock, gds, run, held, pdk),
         synth_cell_um2=synth_um2,
         macros=placed,
         macro_um2=sum(area[cell] for _, cell in placed),
     )
+    result = pnr.with_ihp_drc(result, pdk, soc.TOP, work, held)
     result = pnr.with_ihp_antenna(result, pdk, soc.TOP, work)
     return SocResult(result, placed, *model_areas_um2(design))

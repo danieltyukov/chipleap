@@ -2,6 +2,9 @@
 
 import shutil
 import subprocess
+import sys
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +38,70 @@ def test_bit_exact_and_cycle_exact(accel):
             assert r.cycles == r.predicted, r.case
         else:
             assert abs(r.error) < 0.08, (r.case, r.cycles, r.predicted)
+
+
+# Arrays large enough that Verilator does not unroll the loops over their PEs. Verilator
+# 5.020 (Ubuntu 24.04's, as in CI) rejects a nonblocking assignment to an unpacked array
+# inside such a loop (BLKLOOPINIT); the 32 x 32 and larger tie off bank read data wider
+# than the 8k bits past which -Wall takes a fill for a mistake (WIDTHCONCAT).
+@pytest.mark.parametrize(
+    ("dataflow", "rows", "cols", "ports"),
+    [
+        ("gemv", 64, 64, 1),
+        ("ws", 32, 32, 2),
+        ("ws", 64, 8, 4),
+        ("os", 32, 16, 2),
+        ("os", 64, 8, 2),
+        ("os", 16, 16, 16),
+        ("os", 64, 64, 1),
+    ],
+)
+def test_large_arrays_lint_clean(tmp_path, dataflow, rows, cols, ports):
+    from chipleap.gen.rtl import accel_sv, rtl_params
+
+    (tmp_path / "chipleap_accel.sv").write_text(accel_sv())
+    p = rtl_params(Accel(dataflow, rows, cols, 8, ports=ports, abuf_kib=8, wbuf_kib=8))
+    out = subprocess.run(
+        [
+            "verilator",
+            "--lint-only",
+            "-Wall",
+            "--top-module",
+            "chipleap_accel",
+            *p.verilator_args(),
+            str(tmp_path / "chipleap_accel.sv"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert out.returncode == 0 and "%" not in out.stdout + out.stderr, out.stderr
+
+
+def test_the_kws_example_explores_to_a_design_that_builds(tmp_path):
+    # The keyword-spotting example explores to an output-stationary 32 x 16 engine with two
+    # ports, whose loops over its PEs Verilator does not unroll.
+    examples = Path(__file__).resolve().parent.parent / "examples"
+    out = tmp_path / "out"
+    cli = [sys.executable, "-m", "chipleap"]
+    subprocess.run(
+        [*cli, "explore", str(examples / "kws-dscnn.yaml"), "-o", str(out)],
+        check=True,
+        capture_output=True,
+    )
+    res = subprocess.run(
+        [*cli, "verify", str(out), "--steps", "lint,sim"], capture_output=True, text=True
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_a_model_is_built_again_for_another_verilator(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHIPLEAP_CACHE", str(tmp_path))
+    accel = Accel("gemv", 1, 8, 8, ports=1, abuf_kib=1, wbuf_kib=1, double_buffer=False)
+    first = sim.build(accel)
+    real = sim.verilator()
+    monkeypatch.setattr(sim, "verilator", lambda: replace(real, version=f"{real.version}-other"))
+    second = sim.build(accel)
+    assert first != second and first.exists() and second.exists()
 
 
 # The buffers as SRAM banks (chipleap.gen.banks), each macro simulated by ChipLeap's model of

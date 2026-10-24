@@ -396,6 +396,41 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     assert "-name clk -period 18.182" in (work / soc_step.SDC).read_text()
 
 
+@pytest.mark.skipif(bool(_real_tools()), reason=_real_tools() or "tools present")
+def test_a_soc_without_optional_peripherals_has_no_pins_for_them(tmp_path):
+    """No UART, no GPIO, no SPI slave: X-HEEP rendered with ChipLeap's pad configuration,
+    the top without their pins, the constraints without the SPI slave's clock."""
+    from chipleap.chip import io
+    from chipleap.gen.xheep import xheep_config
+    from chipleap.hw.design import Design, Peripherals
+    from chipleap.verify import xheep
+
+    design = Design(
+        name="bare",
+        tech="ihp-sg13g2",
+        cpu="cv32e20",
+        bus="onetoM",
+        banks=1,
+        bank_kib=32,
+        peripherals=Peripherals(uart=False, gpio=0, timers=2, spi_slave=False, dma_channels=1),
+        accel=Accel("gemv", 1, 8, 8, ports=1, abuf_kib=2, wbuf_kib=2),
+    )
+    work = tmp_path / "soc"
+    work.mkdir()
+    pdk, co = io.pdk_dir(), xheep.find_checkout()
+    assert pdk is not None and co is not None
+    soc_step.prepare(design, xheep_config(design), co, work, pdk)
+    assert (work / "xheep_cfg" / "bare_pads.py").is_file()
+    top = (work / "src" / f"{soc.TOP}.sv").read_text()
+    head = top[: top.index(");")]
+    for name in ("uart_tx_o", "gpio_0_o", "gpio_20_i", "spi_slave_sck_i", "spi_sck_o", "i2c_"):
+        assert name not in head
+    assert "spi_flash_sck_o" in head and "jtag_tck_i" in head
+    mcu = (work / "x-heep/hw/core-v-mini-mcu/core_v_mini_mcu.sv").read_text()
+    assert "input logic spi_slave_sck_i" not in mcu
+    assert "-name spi_slave_sck " not in (work / soc_step.SDC).read_text()
+
+
 def _check_report(run: Path, text: str) -> None:
     rpt = run / "02-yosys-synthesis" / "reports" / "chk.rpt"
     rpt.parent.mkdir(parents=True)
@@ -607,6 +642,8 @@ def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
     assert cfg["PL_RESIZER_SETUP_SLACK_MARGIN"] == 6.0
     assert cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"] == 5.0
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.2
+    # IHP's DRC deck runs after LibreLane, in parallel parts, not as LibreLane's step.
+    assert cfg["RUN_KLAYOUT_DRC"] is False
     monkeypatch.setenv(soc_step.HOLD_MARGIN_ENV, "0.3")
     assert soc_step.config(sources, 36.0)["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.3
     for bad in ("x", "nan", "-0.1", "2"):

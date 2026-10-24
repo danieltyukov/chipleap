@@ -22,7 +22,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -34,16 +34,20 @@ from chipleap.gen.rtl import accel_sv, cdc_sv, rtl_params
 from chipleap.hw.design import Accel
 from chipleap.macro import grid, layer, place, sram
 from chipleap.rtl import builddir
-from chipleap.verify import antenna, launch, librelane_pdk, minarea
+from chipleap.verify import antenna, launch, librelane_pdk, maximal, minarea
 from chipleap.verify.drc import (
+    PIN_OFFGRID_RE,
     DrcReportError,
     DrcResult,
     describe_markers,
+    macro_layout,
     pdk_cells,
     read_lyrdb,
 )
 from chipleap.verify.synth import _sv2v
 from chipleap.verify.tools import (
+    LIBRELANE_IMAGE_ENV,
+    UNKNOWN_VERSION,
     librelane,
     librelane_env,
     librelane_ran,
@@ -88,6 +92,9 @@ class PnrResult:
     # (``ihp_antenna_skipped``); neither when the flow does not run it.
     ihp_antenna: DrcResult | None = None
     ihp_antenna_skipped: str = ""
+    # IHP's DRC deck's violations by rule, counted in drc_errors, when ChipLeap ran the deck
+    # itself (``with_ihp_drc``, the soc step); None when LibreLane's KLayout DRC was the check.
+    ihp_drc: dict[str, int] | None = None
     # With two clocks: each clock's period, and the worst slack of each path group (each
     # clock, and "path delay" for the crossings) at each corner, for setup and for hold
     # (``group_slacks``).
@@ -120,10 +127,14 @@ class PnrResult:
         slew and capacitance violations, the drivers over their fanout limit (reported
         only), and the pin markers set apart."""
         ihp = self.ihp_antenna
+        decks = [d for d, ran in (("DRC", self.ihp_drc is not None), ("antenna", ihp)) if ran]
+        included = f"IHP's {' and '.join(decks)} deck{'s' if len(decks) > 1 else ''} included"
+        if self.ihp_drc is not None:
+            included += " (density and recommended rules not checked)"
         if self.checks_clean:
             text = "DRC, LVS and antenna clean"
-            if ihp is not None:
-                text += ", IHP's antenna deck included"
+            if decks:
+                text += f", {included}"
             text += ", no slew or capacitance violations"
         else:
             text = (
@@ -131,6 +142,8 @@ class PnrResult:
                 f"antenna violations, {self.max_slew_violations} slew and "
                 f"{self.max_cap_violations} capacitance violations"
             )
+            if self.ihp_drc is not None:
+                text += f" ({included})"
         if ihp is not None and ihp.total:
             n = ihp.total
             text += (
@@ -144,6 +157,20 @@ class PnrResult:
         if self.pin_markers:
             text += f"; {describe_markers(self.pin_markers)}"
         return text
+
+    def ihp_drc_data(self) -> dict[str, Any]:
+        """IHP's DRC deck for a step's result, as the chip step reports its own run of it;
+        empty when LibreLane's KLayout DRC was the check."""
+        if self.ihp_drc is None:
+            return {}
+        return {
+            "ihp_drc": {
+                "violations": sum(self.ihp_drc.values()),
+                "rules": self.ihp_drc,
+                "density": "not checked",
+                "recommended_rules": "not checked",
+            }
+        }
 
     def ihp_antenna_data(self) -> dict[str, Any]:
         """IHP's antenna deck for a step's result (``chipleap.verify.antenna.summary``), or
@@ -208,6 +235,34 @@ def signoff(place_margin_ns: float = 0.8, route_margin_ns: float = 1.6) -> dict[
     }
 
 
+# LibreLane's port diode step (Odb.DiodesOnPorts) needs the diode cell with its pin. IHP's
+# LibreLane configuration at cb7daaa (the PDK LibreLane 3.0.0.dev44 pins) names the cell
+# alone, "sg13g2_antennanp", and the step stops on it; at 22f2a25 it is this. Every other
+# step that reads DIODE_CELL takes the cell before the slash.
+DIODE_CELL = "sg13g2_antennanp/A"
+
+
+def port_diodes() -> dict[str, Any]:
+    """A diode beside each sink of each input port, for the layouts of blocks: the
+    accelerator's and an RTL project's (LibreLane's ``Odb.DiodesOnPorts``, after global
+    routing).
+
+    A block's input is driven from outside it, so the net from its pin to the first gate
+    inside has no diffusion of its own while the block is made. On LibreLane 3.0.14 hold
+    repair puts delay cells right on such nets, ahead of the port buffer: 10 to 14 of them
+    in the GEMV 1 x 4 accelerator with SRAM buffers, its read data feeding a macro whose
+    hold time is 0.88 ns. A ``sg13g2_dlygate4sd3_1`` has 0.1092 um2 of gate, so about
+    105 um of Metal3 reaches IHP's cumulative ratio of 200. In one layout ``rd_rdata_i[14]``
+    ran 108 um into one: 204.4 on IHP's antenna deck, just under 200 on OpenROAD's check,
+    and LibreLane's antenna repair after detailed routing runs only while that check finds
+    a violation (``check_antennas`` takes no margin). With a diode beside each sink the
+    layout was clean on both checks, its timing unchanged, for 74 diodes. A delay cell that
+    the repair after global routing adds later gets none. The chip step leaves this out
+    (its pads bring their own protection), and so does the SoC step, whose block ports are
+    nets inside the SoC."""
+    return {"DIODE_ON_PORTS": "in", "DIODE_CELL": DIODE_CELL}
+
+
 def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
     """The LibreLane configuration for the accelerator at ``clock_mhz``."""
     p = rtl_params(accel)
@@ -234,6 +289,7 @@ def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
         "FP_CORE_UTIL": 45 if accel.ports <= 8 else 35,
         "PL_TARGET_DENSITY_PCT": 55,
         **signoff(),
+        **port_diodes(),
     }
 
 
@@ -315,12 +371,29 @@ def klayout_report(run: Path) -> Path | None:
     return report if report is not None and report.is_file() else None
 
 
+def klayout_gds(report: Path) -> Path | None:
+    """The GDS a run's KLayout DRC (whose report is ``report``) read: its step's
+    ``state_in.json`` names it; None when that does not."""
+    try:
+        state = json.loads((report.parent.parent / "state_in.json").read_text())
+    except (OSError, ValueError):
+        return None
+    gds = state.get("gds") if isinstance(state, dict) else None
+    return Path(gds) if isinstance(gds, str) and gds else None
+
+
 def klayout_drc(
-    metrics: dict[str, Any], report: Path | None, held: Mapping[str, tuple[str, ...]]
+    metrics: dict[str, Any],
+    report: Path | None,
+    held: Mapping[str, tuple[str, ...]],
+    gds: Path | None = None,
+    pdk: Path | None = None,
 ) -> DrcResult | None:
     """A run's KLayout DRC report read as the chip step reads IHP's (``chipleap.verify.drc``),
-    ``held`` naming the cells of the PDK's own macros; None when the run counted no KLayout
-    violation. The report must hold what LibreLane counted."""
+    ``held`` naming the cells of the PDK's own macros, and with ``gds`` (the GDS the run
+    checked) and ``pdk`` the macros found in the layout too when their names there are not
+    the PDK's (``_by_layout``); None when the run counted no KLayout violation. The report
+    must hold what LibreLane counted."""
     counted = int(_num(metrics, "klayout__drc_error__count"))
     if counted == 0:
         return None
@@ -336,7 +409,7 @@ def klayout_drc(
             f"LibreLane's KLayout DRC counted {counted} violations, its report holds "
             f"{result.total + result.markers}"
         )
-    return result
+    return _by_layout(result, [report], held, gds, pdk, "", "LibreLane's KLayout DRC")
 
 
 def parse_run(
@@ -345,9 +418,12 @@ def parse_run(
     gds: Path | None,
     run: Path,
     held: Mapping[str, tuple[str, ...]],
+    pdk: Path | None = None,
 ) -> PnrResult:
-    """``parse`` with the run's own KLayout DRC report (``klayout_drc``)."""
-    return parse(metrics, clock_mhz, gds, klayout_drc(metrics, klayout_report(run), held))
+    """``parse`` with the run's own KLayout DRC report (``klayout_drc``), the PDK's macros
+    found in ``gds`` with ``pdk`` when the report's names for their cells are not the PDK's."""
+    drc = klayout_drc(metrics, klayout_report(run), held, gds, pdk)
+    return parse(metrics, clock_mhz, gds, drc)
 
 
 ANTENNA_DIR = "antenna"  # beside the run: IHP's antenna deck's report and log
@@ -368,6 +444,202 @@ def with_ihp_antenna(
         return replace(r, ihp_antenna=antenna.check(pdk, r.gds, top, out, limit))
     except antenna.AntennaError as exc:
         raise PnrError(str(exc)) from None
+
+
+DRC_DIR = "drc"  # beside the run: IHP's DRC deck's reports and logs, when ChipLeap runs it
+DRC_MAIN = "drc"  # run_drc.py's output, among the runs of ``ihp_drc``
+MAXIMAL_PARTS = 8  # at most, so many layouts in memory at once stay a few tens of GB
+
+
+def drc_plan(threads: int) -> tuple[int, int, int]:
+    """How ``ihp_drc`` shares ``threads``: the extra-rules deck's parts (0: run whole by
+    run_drc.py), the main tables run_drc.py runs at once, and each KLayout's threads.
+    KLayout in deep mode keeps about one CPU busy whatever its threads (16 threads ran the
+    SoC's deck at 2.6 CPUs on average), so there is about one process per thread."""
+    parts = min(MAXIMAL_PARTS, threads // 2) if threads >= 4 else 0
+    return parts, max(1, min(8, threads - parts)), max(1, min(4, threads // 4))
+
+
+def ihp_drc(
+    pdk: Path, gds: Path, top: str, out: Path, held: Mapping[str, tuple[str, ...]]
+) -> DrcResult:
+    """IHP's DRC deck (IHP-Open-PDK's ``run_drc.py``) on ``gds``, with density off, as
+    LibreLane checks a block, and recommended rules off, as the chip step and LibreLane
+    3.0.14 check (IHP's recommended rules are guidelines, not tapeout rules): the main
+    deck's tables run_drc.py runs several at once, and beside them the extra-rules deck in
+    parts that run at once too (``chipleap.verify.maximal``; whole, by run_drc.py, when it
+    cannot be split or there are too few threads). ``held`` names the cells of the PDK's
+    own macros, whose off-grid pin markers are set apart. A run that did not finish, or
+    whose exit code or counts disagree with its report, is an error."""
+    from chipleap.chip.run import ToolError, ihp_runs, klayout
+
+    parts, workers, threads = drc_plan(klayout_threads())
+    tech = pdk / "libs.tech" / "klayout" / "tech" / "drc"
+    deck = tech / "rule_decks" / maximal.DECK
+    split = maximal.split(deck.read_text(), parts) if parts and deck.is_file() else None
+    tool = klayout()
+    if split and tool.path is None:
+        raise PnrError(f"IHP's DRC: {tool.missing('KLayout')}")
+    names = [f"maximal_{k}" for k in range(1, len(split or ()) + 1)]
+
+    def main(d: Path, python: str) -> list[str]:
+        return [
+            python,
+            str(tech / "run_drc.py"),
+            f"--path={d.parent / 'layout.gds'}",
+            f"--topcell={top}",
+            f"--run_dir={d}",
+            f"--mp={workers}",
+            f"--density_thr={threads}",
+            "--run_mode=deep",
+            "--no_density",
+            "--no_recommended",
+            *(["--disable_extra_rules"] if split else []),
+        ]
+
+    def part(name: str) -> Callable[[Path, str], list[str]]:
+        def build(d: Path, python: str) -> list[str]:
+            switches = {
+                "input": d.parent / "layout.gds",
+                "topcell": top,
+                "report": d / f"layout_{top}_{name}.lyrdb",
+                "log": d / f"layout_{top}_{name}.log",
+                "threads": threads,
+                "run_mode": "deep",
+                "no_recommended": "true",
+            }
+            rd = [a for k, v in switches.items() for a in ("-rd", f"{k}={v}")]
+            return [str(tool.path), "-b", "-r", str(d.parent / f"{name}.drc"), *rd]
+
+        return build
+
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    try:
+        runs = ihp_runs(
+            pdk,
+            out,
+            {"layout.gds": gds},
+            {f"{n}.drc": text for n, text in zip(names, split or (), strict=True)},
+            {DRC_MAIN: main, **{n: part(n) for n in names}},
+            limit,
+        )
+    except ToolError as exc:
+        raise PnrError(f"IHP's DRC: {exc}") from None
+    code, log = runs[DRC_MAIN]
+    report = out / f"layout_{top}_full.lyrdb"
+    if code not in (0, 1) or not report.is_file():
+        last = next((ln for ln in reversed(log.splitlines()) if ln.strip()), "")
+        raise PnrError(f"IHP's DRC did not finish (exit {code}): {last}")
+    result = _drc_report(report, held)
+    if (code == 1) != (result.total + result.markers > 0):
+        raise PnrError(f"IHP's DRC exited {code} with {result.total} violations in its report")
+    whole = deck.read_text() if split else ""
+    for name, text in zip(names, split or (), strict=True):
+        rules = maximal.checked(whole, text)
+        result.add(_maximal_part(out, top, name, rules, runs[name], held))
+    reports = [report, *(out / f"layout_{top}_{n}.lyrdb" for n in names)]
+    return _by_layout(result, reports, held, gds, pdk, top, "IHP's DRC")
+
+
+def _by_layout(
+    result: DrcResult,
+    reports: list[Path],
+    held: Mapping[str, tuple[str, ...]],
+    gds: Path | None,
+    pdk: Path | None,
+    top: str,
+    what: str,
+) -> DrcResult:
+    """``result`` (``reports`` read with ``held``), or, when off-grid pin markers counted
+    in it may be in the PDK's macros under other names, ``reports`` read again with the
+    macros as the GDS has them: their cells under the GDS's names and their outlines in
+    the top cell (``chipleap.verify.drc.macro_layout``; ``top`` empty for the GDS's own).
+    Without the GDS or the PDK, ``result`` as it is."""
+    pins = any(PIN_OFFGRID_RE.fullmatch(rule) for rule in result.violations)
+    macros = {m for ms in held.values() for m in ms}
+    if not pins or not macros or gds is None or pdk is None:
+        return result
+    sizes = {s.cell: (s.width_um, s.height_um) for s in sram.catalog(pdk) if s.cell in macros}
+    try:
+        found = macro_layout(gds.read_bytes(), top, sizes)
+    except (layer.MacroImportError, OSError) as exc:
+        raise PnrError(f"{what}: the GDS's macros: {exc}") from None
+    every = {**held, **found.cells}
+    again = DrcResult()
+    for f in reports:
+        try:
+            read_lyrdb(f, again, every, found.outlines, found.top)
+        except (DrcReportError, OSError) as exc:
+            raise PnrError(f"{what} report: {exc}") from None
+    return again
+
+
+def _drc_report(report: Path, held: Mapping[str, tuple[str, ...]]) -> DrcResult:
+    result = DrcResult()
+    try:
+        read_lyrdb(report, result, held)
+    except (DrcReportError, OSError) as exc:
+        raise PnrError(f"IHP's DRC report: {exc}") from None
+    return result
+
+
+def _maximal_part(
+    out: Path,
+    top: str,
+    name: str,
+    rules: list[str],
+    run: tuple[int, str],
+    held: Mapping[str, tuple[str, ...]],
+) -> DrcResult:
+    """The report of one part of the extra-rules deck, after checking it ran to its end:
+    KLayout exits 0, the part logs its last line, prints a count for each of ``rules`` (the
+    rules it runs; the deck's own ``output`` prints them) and reports something exactly
+    when one of its counts is not 0."""
+    code, tail = run
+    report, log = out / f"layout_{top}_{name}.lyrdb", out / f"layout_{top}_{name}.log"
+    done = log.is_file() and maximal.DONE in log.read_text(errors="replace")
+    if code != 0 or not report.is_file() or not done:
+        last = next((ln for ln in reversed(tail.splitlines()) if ln.strip()), "")
+        raise PnrError(f"IHP's extra rules, {name}, did not finish (exit {code}): {last}")
+    printed = (out / f"{name}.log").read_text(errors="replace")
+    counts = {m[1]: int(m[2]) for m in re.finditer(r"^Rule (\S+): (\d+) error", printed, re.M)}
+    missing = sorted(set(rules) - set(counts))
+    if missing:
+        raise PnrError(f"IHP's extra rules, {name}, did not run {', '.join(missing[:5])}")
+    result = _drc_report(report, held)
+    if (sum(counts.values()) > 0) != (result.total + result.markers > 0):
+        raise PnrError(
+            f"IHP's extra rules, {name}, counted {sum(counts.values())} violations and "
+            f"reported {result.total + result.markers}"
+        )
+    return result
+
+
+def with_ihp_drc(
+    r: PnrResult,
+    pdk: Path | None,
+    top: str,
+    work: Path,
+    held: Mapping[str, tuple[str, ...]],
+    name: str = DRC_DIR,
+) -> PnrResult:
+    """``r``, from a run with LibreLane's KLayout DRC off, with IHP's DRC deck run on its
+    GDS (``ihp_drc``, its reports in ``work/name``): its violations added to the DRC count
+    and the PDK macros' off-grid pin markers set apart. Signoff needs it, so a deck that
+    cannot run here is an error, not a skipped check."""
+    if r.gds is None:
+        raise PnrError("the run left no GDS for IHP's DRC")
+    why = antenna.unavailable(pdk)
+    if why or pdk is None:
+        raise PnrError(f"IHP's DRC cannot run: {why}")
+    out = builddir.work_dir(work, name, empty=True)
+    result = ihp_drc(pdk, r.gds, top, out, held)
+    return replace(
+        r,
+        drc_errors=r.drc_errors + result.total,
+        pin_markers=[*r.pin_markers, *result.markers_data()],
+        ihp_drc=dict(sorted(result.violations.items())),
+    )
 
 
 DETAILED_ROUTING = "OpenROAD.DetailedRouting"
@@ -472,8 +744,17 @@ TIMING_DRIVEN_KEYS = ("PL_TIMING_DRIVEN", "PL_TIME_DRIVEN")
 def for_librelane(cfg: dict[str, Any], version: str) -> dict[str, Any]:
     """``cfg`` with what LibreLane ``version`` needs told: KLayout's DRC thread count also
     passed as ``threads``, the name IHP's rule deck reads, and global placement driven by
-    timing unless ``cfg`` says otherwise, both on a LibreLane that knows the variable."""
+    timing unless ``cfg`` says otherwise, both on a LibreLane that knows the variable.
+    ``ValueError`` for a version it cannot read: the run would go without that version's
+    settings and say nothing (``chipleap.verify.tools.librelane`` names the image's tag
+    when LibreLane gives no version)."""
     key = librelane_version_key(version)
+    if key == UNKNOWN_VERSION:
+        raise ValueError(
+            f"ChipLeap cannot tell which LibreLane runs (it gives {version or 'no version'}), "
+            f"so it cannot write the settings that version needs; set {LIBRELANE_IMAGE_ENV} "
+            "to the image the wrapper starts, with its version as the tag"
+        )
     out = dict(cfg)
     threads = cfg.get("KLAYOUT_DRC_THREADS")
     if threads is not None and key >= DRC_DEFINES_FROM:
@@ -519,9 +800,9 @@ def run_librelane(
     try:
         pdk_root = librelane_pdk.ensure()
         env = librelane_env()
+        cfg = for_librelane(cfg, tool.version)
     except ValueError as exc:
         raise PnrError(str(exc)) from None
-    cfg = for_librelane(cfg, tool.version)
     if late_antenna_repair:
         cfg = with_late_antenna_repair(cfg)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))
@@ -734,6 +1015,93 @@ MACRO_REPAIR = {
     "GRT_DESIGN_REPAIR_MAX_WIRE_LENGTH": MACRO_WIRE_UM,
     "GRT_RESIZER_HOLD_SLACK_MARGIN": MACRO_HOLD_MARGIN_NS,
 }
+# IHP's SRAMs allow 0.064 pF on each output, and the global router's estimate, which the
+# repair after global routing works against, does not see what their output words carry
+# after routing: in the SmolLM2 accelerator's layout (four 256 x 64), the 256 outputs ran
+# side by side on Metal5 along the macros' edges, and their routed wire capacitance was a
+# median 0.84 and at most 2.57 times the estimate. abuf_s1_m0's A_DOUT[63] was estimated
+# at 0.0297 pF and came out 0.0650 pF, the same net 0.0517 pF in a layout whose
+# neighbours ran elsewhere. No repair margin makes up for that without buffering most of
+# the macros' outputs and a few hundred other nets: so each SRAM output gets a buffer
+# beside its pin (SRAM_OUTPUT_BUFFER), and the macro drives a few um of wire into it.
+# The buffers go in after the last timing repair, right before detailed routing
+# (ECO_BUFFERS_AT); LibreLane's step legalises them and routes their nets globally again.
+# Put in after global routing, ahead of the repair, they set it off: in the GEMV 1 x 8
+# with 2048 x 64 macros it put in 529 buffers where it had put 329 and took setup at the
+# slow corner from -3.024 to -4.162 ns, on a path into a macro's address, and in the
+# 2 x 8 with six 256 x 64 macros it left a macro's A_REN at -0.011 ns of hold. Before
+# detailed routing they cost the read path their own delay, 0.112 and 0.152 ns there,
+# and hold moved by 0.006 ns at most.
+SRAM_OUTPUT_BUFFER = "sg13g2_buf_2"
+ECO_BUFFERS = "Odb.InsertECOBuffers"
+# The substitution that puts ECO_BUFFERS in the flow.
+ECO_BUFFERS_AT = f"-{DETAILED_ROUTING}"
+# How far beyond its halo, from the macro's edge where the pin is, a buffer beside a macro
+# pin is put; the legaliser moves it to the nearest free site.
+BESIDE_GAP_UM = 5.0
+
+
+def macro_pin_at(p: place.Placed, view: layer.MacroView, pin: str) -> tuple[float, float] | None:
+    """The centre of ``pin``'s first shape on the placed macro ``p``, in the core's um."""
+    shapes = [rect for mp in view.pins if mp.name == pin for _, rect in mp.shapes]
+    if not shapes:
+        return None
+    x0, y0, x1, y1 = shapes[0]
+    x, y = (x0 + x1) / 2, (y0 + y1) / 2
+    if p.orient in ("S", "FN"):
+        x = view.width - x
+    if p.orient in ("S", "FS"):
+        y = view.height - y
+    return p.x + x, p.y + y
+
+
+def beside_pin(
+    p: place.Placed, view: layer.MacroView, pin: str, at: tuple[float, float], buffer: str
+) -> dict[str, Any]:
+    """An ``INSERT_ECO_BUFFERS`` entry for ``buffer`` at ``pin`` of the placed macro ``p``
+    (the pin at ``at``), just past the halo off the macro's edge where the pin is."""
+    x, y = at
+    off = place.HALO_UM + BESIDE_GAP_UM
+    y = p.y - off if y - p.y < view.height / 2 else p.y + view.height + off
+    return {
+        "target": f"{p.instance}/{pin}",
+        "buffer": buffer,
+        "placement": [round(x, 3), round(y, 3)],
+    }
+
+
+def sram_output_buffers(
+    placed: Iterable[tuple[place.Placed, layer.MacroView]],
+) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer (``SRAM_OUTPUT_BUFFER``) beside each
+    output pin of the PDK's own macros among ``placed``."""
+    out = []
+    for p, view in placed:
+        if view.source != "pdk":
+            continue
+        for mp in view.pins:
+            if mp.direction == "output" and (at := macro_pin_at(p, view, mp.name)):
+                out.append(beside_pin(p, view, mp.name, at, SRAM_OUTPUT_BUFFER))
+    return out
+
+
+def with_eco_buffers(cfg: dict[str, Any], buffers: list[dict[str, Any]]) -> dict[str, Any]:
+    """``cfg`` with ``buffers`` inserted right before detailed routing (``ECO_BUFFERS``),
+    after the timing repair. Unchanged without any."""
+    if not buffers:
+        return cfg
+    meta = dict(cfg.get("meta") or {"version": 2, "flow": "Classic"})
+    meta["substituting_steps"] = {
+        **(meta.get("substituting_steps") or {}),
+        ECO_BUFFERS_AT: ECO_BUFFERS,
+    }
+    return {
+        **cfg,
+        "INSERT_ECO_BUFFERS": [*cfg.get("INSERT_ECO_BUFFERS", []), *buffers],
+        "meta": meta,
+    }
+
+
 # IHP's SRAMs allow a slew of 0.595 ns at their inputs at the slow corner, a quarter of the
 # standard cells' 2.5 ns, and OpenROAD's repair_design holds a net to its driver's limit
 # and the design's, not to its loads': in the macro-backed GEMV 1 x 4 build, an address bit
@@ -787,7 +1155,8 @@ def sram_config(
     sizes: Sequence[place.Macro],
 ) -> dict[str, Any]:
     """The LibreLane configuration for ``accel`` with its buffers in SRAM macros: the
-    generated top, the floorplan ChipLeap sized, the macros and their power grid."""
+    generated top, the floorplan ChipLeap sized (no pins along its rows of macros), the
+    macros and their power grid."""
     return {
         **MACRO_REPAIR,
         **macro_reach(plan, sizes),
@@ -805,7 +1174,9 @@ def sram_config(
         "SIGNOFF_SDC_FILE": f"dir::{SIGNOFF_SDC}",
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
+        "IO_EXCLUDE_PIN_REGION": place.pin_regions(plan),
         **signoff(),
+        **port_diodes(),
     }
 
 
@@ -1020,7 +1391,7 @@ def place_and_route(
         ((s.cell, layer.pdk_macro_cells(pdk, s.cell, sram.LIBRARY)) for s in plan.cells()),
         (top,),
     )
-    result = replace(parse_run(metrics, clock, gds, run, held), synth_cell_um2=synth_area(run))
+    result = replace(parse_run(metrics, clock, gds, run, held, pdk), synth_cell_um2=synth_area(run))
     result = with_ihp_antenna(timed(result), pdk, top, workdir)
     counts: dict[str, int] = {}
     for _, cell in plan.instances():
@@ -1064,6 +1435,9 @@ def sram_flow(
         views, [(p.instance, cells[p.instance], p.x, p.y, p.orient) for p in fp.macros], workdir
     )
     cfg = sram_config(accel, clock_mhz, fp, macros, sizes)
+    cfg = with_eco_buffers(
+        cfg, sram_output_buffers((p, views[cells[p.instance]].view) for p in fp.macros)
+    )
     if accel_mhz:
         cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz)
     return cfg, plan

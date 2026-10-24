@@ -36,9 +36,41 @@ allow:
   weights: [int8, int4]             # precisions the explorer may choose between
 objective: energy                   # energy | area | throughput | edp
 platform: xheep                     # xheep | standalone, see docs/platforms.md
+peripherals:                        # X-HEEP's peripherals the chip needs; defaults shown
+  uart: true
+  gpio: 32                          # pins: 0, up to 8 (always-on), up to 24, or 32
+  timers: 4                         # 2 (always-on) or 4
+  spi_hosts: 0                      # 0, 1 or 2
+  i2c: false
+  i2s: false
+  pdm2pcm: false                    # PDM microphone input
+  spi_slave: true                   # the debug module's SPI slave
+  dma_channels: 2
+  dma_ports: 1                      # 1, 2 or 4; channels a multiple of it
 start:                              # optional design the agent starts from
   tech: ihp-sg13g2
 ```
+
+## Peripherals
+
+The `peripherals` section lists what the chip needs from X-HEEP besides the workload, and
+the X-HEEP configuration keeps exactly that: every peripheral the section does not ask for
+is left out, its pins tied off in the SoC's top, and the model stops charging for it. A key
+the section leaves out keeps its default, which is the configuration ChipLeap wrote before
+the section existed (X-HEEP's default without the SPI hosts, the I2C and the I2S).
+
+X-HEEP's always-on peripherals are in every SoC: SoC control, the boot ROM, the flash's
+SPI host and controller, the power manager, timers 0 and 1, the fast interrupt controller,
+pad control, the DMA and the debug module with its JTAG port. GPIO pins come in X-HEEP's
+blocks, 8 always-on and 24 more, and timers in pairs, so a request rounds up. The platform
+interrupt controller (PLIC) is there when the UART, the GPIO beyond the always-on eight,
+the I2C, the second SPI host or the I2S is. Without the debug SPI slave the bundle has a
+pad configuration as well (`xheep/<name>_pads.py`, X-HEEP's default without the slave's
+pins).
+
+Every design the explorer makes has these peripherals, and a design that lacks one the
+spec asks for is infeasible. [docs/model.md](model.md#area) lists what each costs; the
+reports break the SoC's logic down block by block.
 
 ## Custom workloads
 
@@ -83,7 +115,10 @@ accel:                              # or null
   abuf_kib: 16
   wbuf_kib: 8
   double_buffer: true
+  buffers: auto                     # auto (SRAM macros where the build takes them) | flops
 platform: xheep                     # xheep (an X-HEEP SoC) | standalone (AXI4 IP, any host)
+peripherals:                        # as in a spec; gpio 0, 8, 24 or 32, timers 2 or 4
+  uart: false
 ```
 
 ## LLM presets

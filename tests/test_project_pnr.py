@@ -31,8 +31,15 @@ def test_config_from_the_project(counter_project, tmp_path):
     assert cfg["FP_PDN_VPITCH"] == 25  # the project's own LibreLane keys come last
     # The accelerator's signoff settings, with margins for a 10 ns clock.
     assert {k: cfg[k] for k in accel_pnr.signoff()} == accel_pnr.signoff(0.8, 1.6)
+    assert cfg["DIODE_ON_PORTS"] == "in" and cfg["DIODE_CELL"] == accel_pnr.DIODE_CELL
     for f in cfg["VERILOG_FILES"]:
         assert f.startswith("dir::src/") and (tmp_path / f[5:]).is_file()
+
+
+def test_a_project_can_leave_the_port_diodes_out(counter_project, tmp_path):
+    proj = counter_project / "project.yaml"
+    proj.write_text(proj.read_text() + "pnr: {librelane: {DIODE_ON_PORTS: none}}\n")
+    assert config(load_project(counter_project), tmp_path)["DIODE_ON_PORTS"] == "none"
 
 
 def test_margins_scale_with_the_clock(counter_project):
