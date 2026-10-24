@@ -34,6 +34,15 @@
 // operand registers, so the schedule is the same cycle for cycle. chipleap_accel below
 // is the core with its buffers inside; ChipLeap's layout top puts the macros beside it.
 //
+// With EXT_DIRECT the accelerator has a direct read path to external memory: ext_* is a
+// second set of read ports, one per rd_* port, with the same OBI semantics. A transfer
+// whose source address lies in the EXT_SIZE bytes at EXT_BASE (X-HEEP's external slave
+// window, which X-HEEP's own bus does not let an external master reach) goes out on
+// ext_* instead of rd_*, through the same address generators and response queues, with
+// up to EXT_OUTSTANDING reads in flight per port to cover the memory's latency. Whether a
+// transfer is external is decided from its row base, so an operand lies wholly inside or
+// wholly outside the window. Stores always leave through wr_*.
+//
 // SPDX-License-Identifier: MIT
 
 /* verilator lint_off DECLFILENAME */  // the core, then chipleap_accel at the end of the file
@@ -49,6 +58,11 @@ module chipleap_accel_core #(
     parameter int unsigned ACC_ROWS = 8,
     parameter int unsigned MAX_OUTSTANDING = 4,
     parameter int unsigned SRAM_BUF = 0,
+    // The direct read path to external memory (above): off, or on for the window.
+    parameter int unsigned EXT_DIRECT = 0,
+    parameter logic [31:0] EXT_BASE = 32'hC0000000,
+    parameter logic [31:0] EXT_SIZE = 32'h40000000,  // a power of two, EXT_BASE aligned to it
+    parameter int unsigned EXT_OUTSTANDING = 16,
     // The banks' shape, from the parameters above; not set on their own.
     parameter int unsigned BANK_BITS = 32 * (COLS >= 4 ? COLS / 4 : 1),
     parameter int unsigned NAB = DOUBLE_BUF != 0 ? 2 : 1,
@@ -86,6 +100,13 @@ module chipleap_accel_core #(
     output logic [ 3:0] wr_be_o,
     input  logic        wr_rvalid_i,
 
+    // OBI read masters of the direct path to external memory (EXT_DIRECT)
+    output logic [PORTS-1:0]       ext_req_o,
+    input  logic [PORTS-1:0]       ext_gnt_i,
+    output logic [PORTS-1:0][31:0] ext_addr_o,
+    input  logic [PORTS-1:0]       ext_rvalid_i,
+    input  logic [PORTS-1:0][31:0] ext_rdata_i,
+
     // SRAM banks (SRAM_BUF): a read, a write, the word address, and the data and bit mask
     // every write shares; the word read comes back a cycle later.
     output logic [NAB-1:0]            abank_re_o,
@@ -114,6 +135,12 @@ module chipleap_accel_core #(
   localparam int unsigned W_SLOT = DB ? WBUF_WORDS / 2 : WBUF_WORDS;
   localparam int unsigned NSLOT = DB ? 2 : 1;
   localparam int unsigned OSTW = $clog2(MAX_OUTSTANDING + 1);
+  // Reads in flight per port: MAX_OUTSTANDING on rd_*, EXT_OUTSTANDING on the direct path,
+  // and each port's response queue holds the larger.
+  localparam bit EXT = EXT_DIRECT != 0;
+  localparam int unsigned QD = EXT && EXT_OUTSTANDING > MAX_OUTSTANDING ?
+                               EXT_OUTSTANDING : MAX_OUTSTANDING;
+  localparam int unsigned QW = $clog2(QD + 1);
   localparam int unsigned AWA = $clog2(ABUF_WORDS);
   localparam int unsigned AWW = $clog2(WBUF_WORDS);
   localparam int unsigned AW = AWA > AWW ? AWA : AWW;
@@ -308,25 +335,38 @@ module chipleap_accel_core #(
   logic [PORTS-1:0] pend_v;
   logic [PORTS-1:0][31:0] pend_addr;
   logic [PORTS-1:0][AW-1:0] pend_dst;
-  logic [AW-1:0] fifo[PORTS*MAX_OUTSTANDING];  // per-port response queues, flattened
-  logic [PORTS-1:0][$clog2(MAX_OUTSTANDING)-1:0] fifo_wp, fifo_rp;
-  logic [PORTS-1:0][OSTW-1:0] outst;
+  logic [AW-1:0] fifo[PORTS*QD];  // per-port response queues, flattened
+  logic [PORTS-1:0][$clog2(QD)-1:0] fifo_wp, fifo_rp;
+  logic [PORTS-1:0][QW-1:0] outst;
+
+  // The path of the transfer: rd_*, or with EXT_DIRECT the direct ports when its source
+  // lies in the external window. Set as the transfer starts; the next one starts only
+  // once every response of this one has come back, so the path never changes under a read
+  // in flight. p_* are the chosen path's grants and responses.
+  wire dma_ext = EXT && (dma_src & ~(EXT_SIZE - 32'd1)) == EXT_BASE;
+  logic dma_ext_q;
+  logic [PORTS-1:0] p_gnt, p_rvalid;
+  logic [PORTS-1:0][31:0] p_rdata;
+  assign p_gnt = dma_ext_q ? ext_gnt_i : rd_gnt_i;
+  assign p_rvalid = dma_ext_q ? ext_rvalid_i : rd_rvalid_i;
+  assign p_rdata = dma_ext_q ? ext_rdata_i : rd_rdata_i;
 
   // A port issues its next word when it has one, its request slot frees up this cycle and
-  // it stays within MAX_OUTSTANDING reads in flight. Each port decides on its own.
+  // it stays within its path's reads in flight. Each port decides on its own.
   logic [PORTS-1:0] alloc;
   always_comb begin
     for (int p = 0; p < PORTS; p++) begin
-      logic [OSTW:0] after;
-      after = (OSTW + 1)'(outst[p]) + (OSTW + 1)'(pend_v[p] && rd_gnt_i[p])
-              - (OSTW + 1)'(rd_rvalid_i[p]);
-      alloc[p] = dma_active && !dma_setup && po_act[p] && (!pend_v[p] || rd_gnt_i[p]) &&
-                 after < (OSTW + 1)'(MAX_OUTSTANDING);
+      logic [QW:0] after;
+      after = (QW + 1)'(outst[p]) + (QW + 1)'(pend_v[p] && p_gnt[p]) - (QW + 1)'(p_rvalid[p]);
+      alloc[p] = dma_active && !dma_setup && po_act[p] && (!pend_v[p] || p_gnt[p]) &&
+                 after < (QW + 1)'(dma_ext_q ? EXT_OUTSTANDING : MAX_OUTSTANDING);
     end
   end
 
-  assign rd_req_o = pend_v;
+  assign rd_req_o = dma_ext_q ? '0 : pend_v;
   assign rd_addr_o = pend_addr;
+  assign ext_req_o = dma_ext_q ? pend_v : '0;
+  assign ext_addr_o = pend_addr;
 
   logic any_outstanding;
   always_comb begin
@@ -342,6 +382,7 @@ module chipleap_accel_core #(
       dma_active <= 1'b0;
       dma_setup <= 1'b0;
       dma_tow_q <= 1'b0;
+      dma_ext_q <= 1'b0;
       iss_src <= '0;
       iss_off <= '0;
       iss_sstride <= '0;
@@ -376,6 +417,7 @@ module chipleap_accel_core #(
       if (dma_start) begin
         dma_active <= 1'b1;
         dma_tow_q <= dma_to_w;
+        dma_ext_q <= dma_ext;
         dma_setup <= 1'b1;
         iss_src <= dma_src;
         iss_off <= dma_src_off;
@@ -412,16 +454,16 @@ module chipleap_accel_core #(
       end
       for (int p = 0; p < PORTS; p++) begin
         logic g, v;
-        g = pend_v[p] && rd_gnt_i[p];
-        v = rd_rvalid_i[p];
+        g = pend_v[p] && p_gnt[p];
+        v = p_rvalid[p];
         if (g) begin
-          fifo[p*MAX_OUTSTANDING+int'(fifo_wp[p])] <= pend_dst[p];
+          fifo[p*QD+int'(fifo_wp[p])] <= pend_dst[p];
           fifo_wp[p] <= fifo_wp[p] + 1'b1;
         end
         if (v) begin
           fifo_rp[p] <= fifo_rp[p] + 1'b1;
         end
-        outst[p] <= outst[p] + OSTW'(g) - OSTW'(v);
+        outst[p] <= outst[p] + QW'(g) - QW'(v);
         if (alloc[p]) begin
           pend_v[p] <= 1'b1;
           pend_addr[p] <= po_addr[p];
@@ -451,9 +493,9 @@ module chipleap_accel_core #(
   if (!SB) begin : g_buf_write
     always_ff @(posedge clk_i) begin
       for (int p = 0; p < PORTS; p++) begin
-        if (rd_rvalid_i[p]) begin
-          if (dma_tow_q) wbuf[AWW'(fifo[p*MAX_OUTSTANDING+int'(fifo_rp[p])])] <= rd_rdata_i[p];
-          else abuf[AWA'(fifo[p*MAX_OUTSTANDING+int'(fifo_rp[p])])] <= rd_rdata_i[p];
+        if (p_rvalid[p]) begin
+          if (dma_tow_q) wbuf[AWW'(fifo[p*QD+int'(fifo_rp[p])])] <= p_rdata[p];
+          else abuf[AWA'(fifo[p*QD+int'(fifo_rp[p])])] <= p_rdata[p];
         end
       end
     end
@@ -955,7 +997,7 @@ module chipleap_accel_core #(
         wbank_re_o = '0;
         wbank_we_o = '0;
         wbank_addr_o = '0;
-        bank_wdata_o = {WPM{rd_rdata_i[0]}};
+        bank_wdata_o = {WPM{p_rdata[0]}};
         bank_wmask_o = BANK_BITS'({32{1'b1}}) << (32 * int'(bw_dst % WPM));
         if (pf) begin
           abank_re_o[int'(xa / A_SLOT)] = 1'b1;
@@ -969,7 +1011,7 @@ module chipleap_accel_core #(
             wbank_addr_o[int'(c_slot) * L + l] = WBA'((wbit >> 5) / WPM);
           end
         end
-        if (rd_rvalid_i[0]) begin
+        if (p_rvalid[0]) begin
           if (dma_tow_q) begin
             wbank_we_o[int'(bw_dst / W_SLOT) * L + int'(bw_dst % W_SLOT / W_ROW)] = 1'b1;
             wbank_addr_o[int'(bw_dst / W_SLOT) * L + int'(bw_dst % W_SLOT / W_ROW)] =
@@ -1492,7 +1534,11 @@ module chipleap_accel #(
     parameter int unsigned WBUF_WORDS = 1024,
     parameter int unsigned DOUBLE_BUF = 1,
     parameter int unsigned ACC_ROWS = 8,
-    parameter int unsigned MAX_OUTSTANDING = 4
+    parameter int unsigned MAX_OUTSTANDING = 4,
+    parameter int unsigned EXT_DIRECT = 0,
+    parameter logic [31:0] EXT_BASE = 32'hC0000000,
+    parameter logic [31:0] EXT_SIZE = 32'h40000000,
+    parameter int unsigned EXT_OUTSTANDING = 16
 ) (
     input logic clk_i,
     input logic rst_ni,
@@ -1515,6 +1561,11 @@ module chipleap_accel #(
     output logic [31:0] wr_wdata_o,
     output logic [ 3:0] wr_be_o,
     input  logic        wr_rvalid_i,
+    output logic [PORTS-1:0]       ext_req_o,
+    input  logic [PORTS-1:0]       ext_gnt_i,
+    output logic [PORTS-1:0][31:0] ext_addr_o,
+    input  logic [PORTS-1:0]       ext_rvalid_i,
+    input  logic [PORTS-1:0][31:0] ext_rdata_i,
     output logic irq_o
 );
   /* verilator lint_off PINCONNECTEMPTY */  // the banks, unused with the buffers inside
@@ -1530,7 +1581,11 @@ module chipleap_accel #(
       .DOUBLE_BUF(DOUBLE_BUF),
       .ACC_ROWS(ACC_ROWS),
       .MAX_OUTSTANDING(MAX_OUTSTANDING),
-      .SRAM_BUF(0)
+      .SRAM_BUF(0),
+      .EXT_DIRECT(EXT_DIRECT),
+      .EXT_BASE(EXT_BASE),
+      .EXT_SIZE(EXT_SIZE),
+      .EXT_OUTSTANDING(EXT_OUTSTANDING)
   ) u_core (
       .clk_i,
       .rst_ni,
@@ -1553,6 +1608,11 @@ module chipleap_accel #(
       .wr_wdata_o,
       .wr_be_o,
       .wr_rvalid_i,
+      .ext_req_o,
+      .ext_gnt_i,
+      .ext_addr_o,
+      .ext_rvalid_i,
+      .ext_rdata_i,
       .abank_re_o(),
       .abank_we_o(),
       .abank_addr_o(),

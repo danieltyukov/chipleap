@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import struct
 import sys
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 
@@ -208,6 +209,128 @@ def _runs(
 
 ROUTED = P.PnrResult(36.0, 1.0, 1.0, 1.0, 0.5, 10, 0.4, 1.0, 0.05, 0, 0, 0, 1.0, Path("x.gds"))
 HELD = {"RM_IHPSG13_1P_BLDRV": ("RM_IHPSG13_1P_1024x32_c2_bm_bist",)}
+FLAT_VIAS = P.flat_vias
+
+
+@pytest.fixture(autouse=True)
+def _vias_as_they_are(monkeypatch):
+    """The deck's tests stand in for KLayout; the vias' flattening has a test of its own."""
+    monkeypatch.setattr(P, "flat_vias", lambda gds, top, out, timeout, keep=(): nullcontext(gds))
+
+
+def test_the_deck_reads_a_copy_with_the_vias_flattened(tmp_path, monkeypatch):
+    monkeypatch.setattr(antenna, "unavailable", lambda pdk: "")
+    monkeypatch.delenv("CHIPLEAP_PNR_TIMEOUT", raising=False)
+    seen: dict = {}
+    calls: list = []
+
+    @contextmanager
+    def flat(gds, top, out, timeout, keep=()):
+        calls.append((gds, top, out, timeout, sorted(keep)))
+        yield tmp_path / "flat.gds"
+
+    _runs(monkeypatch, 0, [], seen)
+    monkeypatch.setattr(P, "flat_vias", flat)
+    P.with_ihp_drc(ROUTED, _pdk(tmp_path), "top", tmp_path, HELD)
+    assert seen["inputs"] == {"layout.gds": tmp_path / "flat.gds"}
+    # The macros' cells, both the held ones and the macros holding them, are never vias.
+    macros = ["RM_IHPSG13_1P_1024x32_c2_bm_bist", "RM_IHPSG13_1P_BLDRV"]
+    assert calls == [(Path("x.gds"), "top", tmp_path.resolve() / P.DRC_DIR, 10800.0, macros)]
+
+
+_GDS = """\
+import sys
+import klayout.db as db
+
+ly = db.Layout()
+ly.dbu = 0.001
+L = {(n, d): ly.layer(n, d) for n, d in ((1, 0), (6, 0), (8, 0), (8, 2), (10, 0), (19, 0))}
+box = db.Box(0, 0, 100, 100)
+top = ly.create_cell("top")
+via = ly.create_cell("via1_2_SoC")  # a via: Metal1, Via1, Metal2 (and a pin datatype)
+for n in ((8, 0), (8, 2), (19, 0), (10, 0)):
+    via.shapes(L[n]).insert(box)
+alone = ly.create_cell("Via1_YX")  # another, instanced only in the top
+for n in ((8, 0), (19, 0), (10, 0)):
+    alone.shapes(L[n]).insert(box)
+inv = ly.create_cell("sg13g2_inv_1")  # a standard cell: Activ, Cont, Metal1
+for n in ((1, 0), (6, 0), (8, 0)):
+    inv.shapes(L[n]).insert(box)
+sram = ly.create_cell("RM_IHPSG13_1P_X")  # a macro with metal and via shapes and Activ
+for n in ((1, 0), (8, 0), (19, 0), (10, 0)):
+    sram.shapes(L[n]).insert(box)
+wrap = ly.create_cell("wrap")  # not a leaf: kept, and its via with it
+wrap.insert(db.CellInstArray(via.cell_index(), db.Trans(db.Point(500, 0))))
+cont = ly.create_cell("Cont_M1")  # a via on Cont and Metal1 alone
+for n in ((6, 0), (8, 0)):
+    cont.shapes(L[n]).insert(box)
+named = []  # named like vias, made like vias, but cells to keep: by keep and by prefix
+for name in ("VIA_Via1_held", "sg13g2_via_tap"):
+    c = ly.create_cell(name)
+    for n in ((8, 0), (19, 0), (10, 0)):
+        c.shapes(L[n]).insert(box)
+    named.append(c)
+active = ly.create_cell("VIA_M1_Activ")  # named like a via, with Activ: a cell
+for n in ((1, 0), (6, 0), (8, 0)):
+    active.shapes(L[n]).insert(box)
+t = db.Trans
+top.insert(db.CellInstArray(via.cell_index(), t(db.Point(1000, 0))))
+top.insert(db.CellInstArray(via.cell_index(), t(db.Point(0, 2000)), db.Vector(200, 0),
+                            db.Vector(0, 200), 2, 2))
+top.insert(db.CellInstArray(alone.cell_index(), t(1, False, db.Point(3000, 0))))
+for c in (inv, sram, wrap, cont, *named, active):
+    top.insert(db.CellInstArray(c.cell_index(), t(db.Point(5000, 0))))
+ly.write(sys.argv[1])
+"""
+
+_READ = """\
+import json, sys
+import klayout.db as db
+
+ly = db.Layout()
+ly.read(sys.argv[1])
+top = ly.cell("top")
+cut = ly.find_layer(19, 0)
+print(json.dumps({
+    "cells": sorted(c.name for c in ly.each_cell()),
+    "top_insts": sorted(ly.cell(i.cell_index).name for i in top.each_inst()),
+    "top_cuts": top.shapes(cut).size(),
+    "pins": top.shapes(ly.find_layer(8, 2)).size(),
+}))
+"""
+
+
+@pytest.mark.skipif(chip_run.python_with_klayout() is None, reason="no Python with KLayout")
+def test_via_cells_in_the_top_are_flattened_and_every_other_cell_kept(tmp_path):
+    """LibreLane 3.0.14's via instances go into the top cell's shapes (an array's each
+    element); a standard cell, a macro and a cell with children stay as they were."""
+    import json
+    import subprocess
+
+    found = chip_run.python_with_klayout()
+    assert found is not None
+    python = found[0]
+    (tmp_path / "make.py").write_text(_GDS)
+    (tmp_path / "read.py").write_text(_READ)
+    subprocess.run([python, str(tmp_path / "make.py"), str(tmp_path / "in.gds")], check=True)
+    out = tmp_path / "drc"
+    out.mkdir()
+    with FLAT_VIAS(tmp_path / "in.gds", "top", out, 60, ["VIA_Via1_held"]) as flat:
+        read = subprocess.run(
+            [python, str(tmp_path / "read.py"), str(flat)], check=True, capture_output=True
+        )
+    data = json.loads(read.stdout)
+    kept = ["RM_IHPSG13_1P_X", "VIA_M1_Activ", "VIA_Via1_held", "sg13g2_inv_1"]
+    kept += ["sg13g2_via_tap", "wrap"]
+    assert data["top_insts"] == sorted(kept)
+    assert data["top_cuts"] == 6 and data["pins"] == 5  # 1 + 2 x 2 + 1 vias; 5 with pins
+    # Via1_YX and Cont_M1 are gone with their only instances; via1_2_SoC stays for wrap's.
+    assert data["cells"] == sorted([*kept, "top", "via1_2_SoC"])
+    assert (
+        "flattened 7 instances of 3 via cells into top, which keeps 6"
+        in (out / P.FLAT_VIAS_LOG).read_text()
+    )
+    assert (tmp_path / "in.gds").is_file()  # the delivered GDS is left as it was
 
 
 def test_the_deck_counts_its_violations_and_sets_the_macros_pin_markers_apart(
@@ -264,6 +387,28 @@ def test_the_deck_counts_its_violations_and_sets_the_macros_pin_markers_apart(
     assert "IHP's DRC and antenna decks included" in replace(ok, ihp_antenna=DrcResult()).checks()
     # With LibreLane's KLayout DRC as the check, nothing about IHP's deck.
     assert ROUTED.ihp_drc_data() == {} and "IHP's" not in ROUTED.checks()
+
+
+def test_the_decks_time_limit_is_the_callers_unless_set(tmp_path, monkeypatch):
+    """A block's deck runs under 3 h, the SoC's under its own layout's limit (the soc step
+    passes it), and CHIPLEAP_PNR_TIMEOUT sets another for any."""
+    monkeypatch.setattr(antenna, "unavailable", lambda pdk: "")
+    monkeypatch.delenv("CHIPLEAP_PNR_TIMEOUT", raising=False)
+    pdk = _pdk(tmp_path)
+    limits: list[float] = []
+
+    def timed(pdk_, out_dir, inputs, decks, cmds, timeout):
+        limits.append(timeout)
+        return fake(pdk_, out_dir, inputs, decks, cmds, timeout)
+
+    _runs(monkeypatch, 0, [], {})
+    fake = chip_run.ihp_runs
+    monkeypatch.setattr(chip_run, "ihp_runs", timed)
+    P.with_ihp_drc(ROUTED, pdk, "top", tmp_path, HELD)
+    P.with_ihp_drc(ROUTED, pdk, "top", tmp_path, HELD, timeout_s=86400)
+    monkeypatch.setenv("CHIPLEAP_PNR_TIMEOUT", "600")
+    P.with_ihp_drc(ROUTED, pdk, "top", tmp_path, HELD, timeout_s=86400)
+    assert limits == [10800, 86400, 600.0]
 
 
 def test_too_few_threads_or_a_deck_that_cannot_split_run_the_extra_rules_whole(

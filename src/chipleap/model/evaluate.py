@@ -19,13 +19,26 @@ from chipleap.hw.tech import (
     ACCEL_CDC_KGE,
     ACCEL_CDC_PORT_KGE,
     AXI_ADAPTER_KGE,
+    DIRECT_ENTRY_KGE,
+    DIRECT_PORT_CDC_KGE,
+    DIRECT_PORT_KGE,
+    MEM_ARB_KGE,
+    MEM_CDC_KGE,
     Technology,
     accel_bank_kge,
     accel_logic_kge,
     get_tech,
     soc_signoff_mhz,
 )
-from chipleap.model.accel import Bandwidth, TilingError, crossed, job_timing
+from chipleap.model.accel import (
+    DIRECT_OUTSTANDING,
+    Bandwidth,
+    TilingError,
+    crossed,
+    direct_outstanding,
+    ext_latency,
+    job_timing,
+)
 from chipleap.workload.ops import MatMul, Operand, VectorKind, VectorOp, Workload
 
 # X-HEEP's logic outside the CPU, the memories and the accelerator, per block, in kGE on
@@ -240,15 +253,17 @@ def _bandwidth(
     ext_bps = 0.0
     ext_limit = "external memory"
     if mem is not None:
-        ext_ports = ports if d.bus == "NtoM" else 1
+        # Each read port streams a word per cycle from external memory: over its direct
+        # port to the memory controller on X-HEEP (chipleap_mem), over its AXI4 master on
+        # the standalone platform. Several ports need the NtoM bus (Design.validate).
         mem_bps = mem.sustained_bps_at(io_mts) * d.ext_channels
-        port_bps = 4.0 * ext_ports * f
+        port_bps = 4.0 * ports * f
         ext_bps = min(mem_bps, port_bps)
         if d.accel and port_bps < mem_bps:
             # The memory could deliver more than the accelerator's 32-bit ports take in, so
             # more ports (or a faster clock), not a faster memory, would speed the stream.
             ext_limit = "accelerator ports"
-    lat_ext = 24 if mem is None else max(8, round(60e-9 * f) + 4)
+    lat_ext = 24 if mem is None else ext_latency(f)
     # Without external memory, data that does not fit is a violation. Its timing then
     # assumes the slowest interface (quad SPI flash), so an unbuildable design never looks
     # faster than a buildable one.
@@ -678,7 +693,7 @@ def area_breakdown(
     if d.accel:
         a = d.accel
         cdc = ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * a.ports if d.accel_mhz else 0.0
-        area["accelerator logic"] = tech.logic_mm2(accel_kge(a, tech) + cdc)
+        area["accelerator logic"] = tech.logic_mm2(accel_kge(a, tech) + cdc + direct_kge(d))
         area["accelerator buffers"] = buffer_mm2(a, tech)
         if d.platform == "standalone":
             area["axi adapter"] = tech.logic_mm2(AXI_ADAPTER_KGE)
@@ -687,6 +702,31 @@ def area_breakdown(
             mem.phy_kge * d.ext_channels
         )
     return area
+
+
+def direct_kge(d: Design) -> float:
+    """The logic of the accelerator's direct path to external memory, when it has one: its
+    ports' longer response queues (``direct_port_kge``), the arbiters of chipleap_mem and,
+    on the accelerator's own clock, the crossing of X-HEEP's side."""
+    if d.accel is None or not d.direct_memory:
+        return 0.0
+    return direct_port_kge(d) + MEM_ARB_KGE + (MEM_CDC_KGE if d.accel_mhz else 0.0)
+
+
+def direct_port_kge(d: Design, crossings: bool | None = None) -> float:
+    """The direct path's logic inside the accelerator, when it has one: each port's
+    response queue for ``direct_outstanding`` reads and the choice of path. ``crossings``
+    (by default, whether the accelerator has its own clock) for the build behind its
+    crossings, whose queues hold eight reads already."""
+    if d.accel is None or not d.direct_memory:
+        return 0.0
+    a = d.accel
+    own = bool(d.accel_mhz) if crossings is None else crossings
+    port = DIRECT_PORT_CDC_KGE if own else DIRECT_PORT_KGE
+    # Each entry holds a buffer word's address.
+    bits = max(1, (max(a.abuf_kib, a.wbuf_kib) * 256 - 1).bit_length())
+    port += DIRECT_ENTRY_KGE * bits * (direct_outstanding(d) - DIRECT_OUTSTANDING)
+    return port * a.ports
 
 
 def soc_limit_mhz(design: Design, tech: Technology) -> float | None:
@@ -764,8 +804,13 @@ def evaluate(
     f_acc = design.accel_mhz * 1e6
     if f_acc and design.accel:
         # On its own clock the accelerator sees the bus's rates and latencies through its
-        # crossings (chipleap.model.accel.crossed).
+        # crossings (chipleap.model.accel.crossed). Its direct path to external memory
+        # and the memory controller's ports run on its clock (chipleap_mem), so that
+        # stream crosses nothing: its rate and latency are those of its own clock.
         bw = crossed(bw, f_acc / f, design.accel.ports)
+        if design.direct_memory:
+            ext, _, ext_limit = _bandwidth(design, mem, f_acc, tech.max_io_mts)
+            bw = replace(bw, w_ext=ext.w_ext, lat_ext=ext.lat_ext)
     e_cpu = cpu.kge * tech.cpu_pj_per_kge_cycle
     ctx = _Ctx(
         design,

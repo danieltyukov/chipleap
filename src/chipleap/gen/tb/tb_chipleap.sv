@@ -83,6 +83,11 @@ module tb_chipleap;
       .wr_wdata_o(wr_wdata),
       .wr_be_o(wr_be),
       .wr_rvalid_i(wr_rvalid),
+      .ext_req_o(),
+      .ext_gnt_i('0),
+      .ext_addr_o(),
+      .ext_rvalid_i('0),
+      .ext_rdata_i('0),
       .irq_o(irq)
   );
 

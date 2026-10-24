@@ -310,6 +310,22 @@ def test_place_and_route_runs_the_deck_on_its_gds(tmp_path, monkeypatch):
     )
     assert "CHIPLEAP_IHP_PDK" in P.with_ihp_antenna(ROUTED, None, "top", work).ihp_antenna_skipped
 
+    # A block's deck runs under 3 h, the SoC's under its layout's limit, unless
+    # CHIPLEAP_PNR_TIMEOUT sets another.
+    limits: list[float] = []
+
+    def timed(pdk_, gds, top, out, limit):
+        limits.append(limit)
+        return drc.DrcResult(top=top)
+
+    monkeypatch.setattr(antenna, "check", timed)
+    monkeypatch.delenv("CHIPLEAP_PNR_TIMEOUT", raising=False)
+    P.with_ihp_antenna(ROUTED, pdk, "top", work)
+    P.with_ihp_antenna(ROUTED, pdk, "top", work, timeout_s=86400)
+    monkeypatch.setenv("CHIPLEAP_PNR_TIMEOUT", "600")
+    P.with_ihp_antenna(ROUTED, pdk, "top", work, timeout_s=86400)
+    assert limits == [10800, 86400, 600.0]
+
     def crashed(*a):
         raise antenna.AntennaError(
             "IHP's antenna deck did not finish (exit -11): Segmentation fault"

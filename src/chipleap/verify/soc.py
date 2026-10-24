@@ -36,17 +36,24 @@ import yaml
 
 from chipleap.chip import merge
 from chipleap.gen import banks, soc
-from chipleap.gen.rtl import accel_sv
+from chipleap.gen.rtl import accel_sv, cdc_sv, mem_sv
 from chipleap.gen.xheep import absent_pins, pad_config, pads_file
 from chipleap.hw.design import Design
-from chipleap.hw.memory import NONE_KEY
 from chipleap.hw.tech import get_tech
 from chipleap.macro import grid, layer, place, sram
 from chipleap.macro.layer import MacroView
 from chipleap.rtl import builddir
 from chipleap.verify import pnr
 from chipleap.verify.drc import pdk_cells
-from chipleap.verify.tools import Tool, clean_env, fusesoc, riscv_gcc
+from chipleap.verify.tools import (
+    UNKNOWN_VERSION,
+    Tool,
+    clean_env,
+    fusesoc,
+    librelane,
+    librelane_version_key,
+    riscv_gcc,
+)
 
 CORE = "chipleap:soc:xheep:0"
 TARGET = "asic_yosys_synthesis"
@@ -299,15 +306,24 @@ def generate(
     plans = tuple(soc.plan_banks(depths, srams))
     accel_banks = banks.plan(design.accel, srams)
     src = builddir.work_dir(work, "src", empty=True)
+    # With external memory the accelerator reads it over its direct path, which shares the
+    # memory ports with X-HEEP's external slave ports (chipleap_mem). On a clock of its
+    # own it sits behind its crossings, its macro build inside them keeping as many reads
+    # in flight per port as they hold, and the memory ports run on its clock.
+    direct = design.direct_memory
+    own = bool(design.accel_mhz)
     out = {
         "chipleap_clock_cells.sv": soc.clock_cells_sv(),
         "sram_wrapper.sv": soc.sram_wrapper_sv(plans),
         "chipleap_accel.sv": accel_sv(),
-        f"{banks.TOP}.v": banks.top_sv(accel_banks),
+        f"{banks.TOP}.v": banks.top_sv(accel_banks, pnr.CDC_DEPTH if own else None),
+        **({"chipleap_accel_cdc.sv": cdc_sv(banks.TOP)} if own else {}),
+        **({"chipleap_mem.sv": mem_sv()} if direct else {}),
         f"{soc.TOP}.sv": soc.top_sv(
             ports,
             design.accel.ports,
-            ext_memory=design.ext_mem != NONE_KEY,
+            ext_memory=direct,
+            accel_clock=own,
             absent=absent_pins(design.peripherals),
         ),
     }
@@ -315,7 +331,7 @@ def generate(
         builddir.write_text(src, name, text)
     wrappers = [f"x-heep/{w}" for w in CLOCK_WRAPPERS]
     order = ["chipleap_clock_cells.sv"]
-    tail = ["sram_wrapper.sv", "chipleap_accel.sv", f"{banks.TOP}.v", f"{soc.TOP}.sv"]
+    tail = [n for n in out if n != order[0]]
     return (
         [f"src/{order[0]}", *wrappers, *(f"src/{n}" for n in tail)],
         plans,
@@ -415,13 +431,97 @@ def pin_order(inputs: int, outputs: int, fp: place.Floorplan, heights: dict[str,
 # The layout of the SoC takes 6 to 10 hours on 22 cores, most of it in detailed routing.
 TIMEOUT_S = 86400
 SDC = "chipleap_soc.sdc"
+# Place and route's constraints on LibreLane 3.0.14 (``pnr_sdc``): SDC with the macros' slew
+# target (``chipleap.verify.pnr.MACRO_PNR_SLEW_NS``) and, when the accelerator has a clock of
+# its own, the crossings' bounds counting both clocks' latency; signoff keeps SDC. The slew
+# target, because IHP's SRAM inputs allow 0.595 ns and 3.0.14's repair holds a net to its
+# driver's 2.5 ns: two SoC layouts at 36 MHz ended with the same 8 or 9 bank inputs over
+# (bank_m7's A_WEN at 0.849 ns), where dev44 had none. 3.0.14's OpenROAD (dcf3613) segfaults in the SoC's timing-driven global
+# placement: the rebuffering after each timing-driven pass (``Resizer::findResizeSlacks``,
+# which always runs ``fullyRebuffer`` before routing) ends in OpenSTA's
+# ``Search::pathClkPathArrival``, which it reaches only for a path delay set with
+# ``-ignore_clock_latency``, the crossings' bounds. It crashed at the same place from the
+# same state twice, and with PL_KEEP_RESIZE_BELOW_OVERFLOW 0 too; with these bounds it
+# went past that place. The SmolLM2 accelerator's own layouts, which bound their crossings
+# the same way, place on 3.0.14 as they are. (OpenROAD #8351, the closest report, was
+# closed on 16 July 2026 without a fix.) The repairs after the clock tree and after global
+# routing rebuffer too, so every place and route step takes these bounds, not placement
+# alone. Before the clock tree the bounds count clk_i's latency through its one unbuffered
+# net (48 ns in a 3.0.14 placement without timing), so timing-driven placement sees the
+# paths from clk into the accelerator's clock far worse than they are; after it, the trees'
+# latencies are real, and signoff times the crossings' data path alone.
+PNR_SDC = "chipleap_soc.pnr.sdc"
 PINS = "pins.cfg"
 # The step LibreLane's Classic flow runs after synthesis: the layout run resumes there.
 AFTER_SYNTHESIS = "Checker.YosysUnmappedCells"
 
 
-# The estimated setup slack the repairs keep after CTS and after global routing (``config``).
-SETUP_MARGINS_NS = (6.0, 5.0)
+# The LibreLane from which the SoC's layout takes the settings measured on it
+# (``librelane_from_3014``): the setup margins (``setup_margins_ns``), a buffer beside each
+# SRAM output (``output_buffers``) and the second antenna repair (``layout``). Before it,
+# on 3.0.0.dev44, the layout keeps #20's settings, those its evidence layout was made with.
+FROM_3014 = (3, 0, 14, 2, 0)
+
+
+def librelane_version() -> str:
+    """The version of the LibreLane that runs: the one it reports, else the tag of the image
+    ChipLeap asks a wrapper for (``chipleap.verify.tools.librelane``)."""
+    return librelane().version
+
+
+def librelane_from_3014(version: str | None = None) -> bool:
+    """Whether LibreLane ``version`` (``librelane_version``, by default) takes 3.0.14's
+    settings; a version ChipLeap cannot read does, as the LibreLane it runs by default,
+    and place and route then refuses to start it (``pnr.for_librelane``)."""
+    key = librelane_version_key(librelane_version() if version is None else version)
+    return key == UNKNOWN_VERSION or key >= FROM_3014
+
+
+# The estimated setup slack the repairs keep after CTS and after global routing
+# (``setup_margins_ns``). LibreLane 3.0.0.dev44's estimate after global routing showed
+# 4 to 5 ns more than routing left on the SoC's long paths, and its repairs keep 6 and 5 ns
+# (SETUP_MARGINS_DEV44_NS). 3.0.14 estimates with IHP's ORFS fit of the layers' RC, and
+# there the estimate is the pessimistic side: on the SmolLM2 accelerator laid out on two
+# clocks, routing took at most 0.38 ns from it on any path group, and gave the accelerator's
+# paths a median 0.5 ns back, as it did on the SoC (median +0.56 to +0.69 ns on its
+# accelerator's clock). From 3.0.14 the repairs keep 2.0 and 3.0 ns. The accelerator's own
+# 0.8 and 1.6 ns were too little for the SoC: there the estimate after CTS, with placement's
+# parasitics, sat 1.10 ns above setup, over the 0.8 ns margin, so the repair after CTS sized
+# nothing, and the one after global routing (whose estimate was 2.5 ns lower) stalled at
+# -0.93 ns. The SmolLM2 SoC at 36 MHz with the accelerator at 90 MHz then missed setup by
+# 0.202 ns on its macros' read paths; with 2.0 and 3.0 ns it met at +0.216 ns, the read paths
+# at +1.065 ns. Margins as large as dev44's lock hold repair out of a faster clock: OpenROAD's
+# hold repair adds no delay that takes an endpoint's setup slack below the margin, and at
+# 90 MHz almost every path of the accelerator has less than 5 ns. In the dev44 layout of the
+# SmolLM2 SoC with the accelerator at 90 MHz, three flip-flops of a DMA read port's phase
+# counter, each feeding back to itself through two gates, missed hold by up to 0.043 ns at
+# the fast corner; with a 3 ns margin after global routing, hold repair put delay cells on
+# them.
+# CHIPLEAP_SOC_SETUP_MARGINS sets other margins for a trial run.
+SETUP_MARGINS_DEV44_NS = (6.0, 5.0)
+SETUP_MARGINS_NS = (2.0, 3.0)
+SETUP_MARGINS_ENV = "CHIPLEAP_SOC_SETUP_MARGINS"
+
+
+def setup_margins_ns(version: str | None = None) -> tuple[float, float]:
+    """The setup margins after CTS and after global routing: ``SETUP_MARGINS_ENV`` when
+    set (two numbers of ns from 0 to 10, comma-separated), else ``SETUP_MARGINS_NS`` from
+    LibreLane 3.0.14 on and ``SETUP_MARGINS_DEV44_NS`` before it."""
+    raw = os.environ.get(SETUP_MARGINS_ENV, "").strip()
+    if not raw:
+        return SETUP_MARGINS_NS if librelane_from_3014(version) else SETUP_MARGINS_DEV44_NS
+    try:
+        values = tuple(float(v) for v in raw.split(","))
+    except ValueError:
+        values = ()
+    if len(values) != 2 or not all(0.0 <= v <= 10.0 for v in values):
+        raise SocError(
+            f"{SETUP_MARGINS_ENV} must be two numbers of ns from 0 to 10, comma-separated, "
+            f"not {raw[:20]!r}"
+        )
+    return values[0], values[1]
+
+
 # The hold slack the repair after global routing keeps, in ns. The worst hold endpoints
 # after routing are DMA0's registers, whose clock gate hangs on the clock tree's long
 # first-level net with the accelerator's macros, and routing moves them by more than the
@@ -447,11 +547,12 @@ def hold_margin_ns() -> float:
 
 
 # Buffers a trial run may add, by name in CHIPLEAP_SOC_BUFFERS (``trial_buffers``): one
-# after each of X-HEEP's clock gates (``gate_buffers``) and one after each output bit of
-# X-HEEP's bank macros (``bank_output_buffers``). The SmolLM2 SoC's evidence layout has
-# neither. At 36 MHz, the gates' buffers left +0.429 ns of setup and +0.053 ns of hold
-# against its +0.627 and +0.070 ns, and both together +1.271 and +0.070 ns with one net
-# failing OpenROAD's antenna check after routing (a bank output's, on Metal2).
+# after each of X-HEEP's clock gates (``gate_buffers``), and on LibreLane 3.0.0.dev44 one
+# after each SRAM output bit (``output_buffers``), which 3.0.14's layouts always have. #20's
+# evidence layout (dev44, 36 MHz) has neither: the gates' buffers left +0.429 ns of setup
+# and +0.053 ns of hold against its +0.627 and +0.070 ns, and with the banks' outputs
+# buffered too +1.271 and +0.070 ns, with one net failing OpenROAD's antenna check after
+# routing (a bank output's, on Metal2), without the second antenna repair.
 BUFFERS_ENV = "CHIPLEAP_SOC_BUFFERS"
 GATES = "gates"
 BANK_OUTPUTS = "bank-outputs"
@@ -493,12 +594,32 @@ class Prepared:
     views: dict[str, sram.SramViews]
 
 
-def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
+def pnr_sdc(version: str | None = None) -> str:
+    """The constraints place and route works to: ``PNR_SDC`` on LibreLane 3.0.14 (for
+    ``version``, the one that runs by default), else ``SDC``, which signoff always takes."""
+    return PNR_SDC if librelane_from_3014(version) else SDC
+
+
+def config(
+    sources: Sources, clock_mhz: float, accel_mhz: float = 0.0, version: str | None = None
+) -> dict[str, Any]:
     """LibreLane's configuration for the SoC without its floorplan: slang reads the
     SystemVerilog, with the macros' and IHP's clock gate's black boxes that Yosys holds
     (``--extern-modules``) and without X-HEEP's assertions; LibreLane's Verilator lint is
     off, since X-HEEP is linted with its own waivers; the constraints are ChipLeap's
-    (``chipleap.gen.soc.sdc``), and the signoff is the accelerator's."""
+    (``chipleap.gen.soc.sdc``), and the signoff is the accelerator's. With ``accel_mhz``
+    the accelerator's clock is a second clock port. The repairs' setup margins are those
+    of the LibreLane ``version`` that runs (``setup_margins_ns``).
+
+    LibreLane reads one ``CLOCK_PERIOD``, for its own base SDC (which ChipLeap's replaces)
+    and as ABC's delay target in synthesis. It stays X-HEEP's even with the accelerator's
+    faster clock beside it: X-HEEP is most of the SoC's logic, and the accelerator's own
+    layout (``chipleap.verify.pnr.with_crossings``), which takes the faster one, is almost
+    all accelerator. Both clocks' paths are timed and repaired against ChipLeap's SDC."""
+    clocks: dict[str, Any] = {
+        "CLOCK_PORT": ["clk_i", soc.ACCEL_CLOCK] if accel_mhz else "clk_i",
+        "CLOCK_PERIOD": round(1000.0 / clock_mhz, 3),
+    }
     return {
         **pnr.MACRO_REPAIR,
         "DESIGN_NAME": soc.TOP,
@@ -514,9 +635,8 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         # alert inputs are unconnected. ChipLeap checks the synthesized netlist instead,
         # bit by bit (``netlist_problems``), and stops on any problem there.
         "ERROR_ON_SYNTH_CHECKS": False,
-        "CLOCK_PORT": "clk_i",
-        "CLOCK_PERIOD": round(1000.0 / clock_mhz, 3),
-        "PNR_SDC_FILE": f"dir::{SDC}",
+        **clocks,
+        "PNR_SDC_FILE": f"dir::{pnr_sdc(version)}",
         "SIGNOFF_SDC_FILE": f"dir::{SDC}",
         "PL_TARGET_DENSITY_PCT": 55,
         # No buffer between an output port and its net before the clock tree: X-HEEP's
@@ -538,14 +658,13 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
         "RUN_KLAYOUT_DRC": False,
         "FP_MACRO_HORIZONTAL_HALO": place.HALO_UM,
         "FP_MACRO_VERTICAL_HALO": place.HALO_UM,
-        # The repairs keep SETUP_MARGINS_NS of estimated setup slack, after CTS and after
-        # global routing, where the accelerator keeps 0.8 and 1.6 ns. Hold repair puts its
-        # delay cells wherever the estimate shows setup slack, and on the SoC's long paths
-        # the estimate after global routing shows 4 to 5 ns more than routing leaves (36 MHz:
-        # +4.56 ns there, -0.22 ns after routing). From one 36 MHz placement, routed:
-        # 0.8 and 1.6 ns left +0.259 ns of setup and -0.060 ns of hold, 6 and 5 ns +0.349
-        # and +0.047 ns.
-        **pnr.signoff(*SETUP_MARGINS_NS),
+        # The repairs keep ``setup_margins_ns`` of estimated setup slack, after CTS and after
+        # global routing. Hold repair puts its delay cells wherever the estimate shows setup
+        # slack above them. On 3.0.0.dev44, on the SoC's long paths the estimate after global
+        # routing showed 4 to 5 ns more than routing left (36 MHz: +4.56 ns there, -0.22 ns
+        # after routing), and from one 36 MHz placement, routed, 0.8 and 1.6 ns left +0.259 ns
+        # of setup and -0.060 ns of hold, 6 and 5 ns +0.349 and +0.047 ns.
+        **pnr.signoff(*setup_margins_ns(version)),
         # The SoC's wires are millimetres long, and the extraction after detailed routing
         # puts 14 to 20 % more capacitance on them than the global router's estimate that
         # the repairs work against: at 50 MHz a 0.0576 pF net (LibreLane's 10 % margin
@@ -646,51 +765,55 @@ def clock_pin_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> li
 _beside = pnr.beside_pin
 
 
-# What drives a bank's output wire from beside the macro (0.6 pF limit, about ten times
-# the most a routed bank output carried).
-BANK_OUTPUT_BUFFER = "sg13g2_buf_2"
-BANK_OUTPUT_PIN = "A_DOUT["
+# What drives an SRAM output's wire from beside the macro (0.6 pF limit, about ten times
+# the most a routed SRAM output carried).
+OUTPUT_BUFFER = "sg13g2_buf_2"
+OUTPUT_PIN = "A_DOUT["
 
 
-def bank_output_buffers(
-    fp: place.Floorplan, views: Mapping[str, MacroView]
-) -> list[dict[str, Any]]:
-    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer after each output bit of X-HEEP's bank
-    macros (``views`` by instance), placed just off the macro's edge beside the pin.
+def output_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer after each output bit of every SRAM
+    macro in the SoC, X-HEEP's banks' and the accelerator's buffers' (``views`` by
+    instance), placed just off the macro's edge beside the pin.
 
-    A bank's 32 output bits run side by side on Metal3 for about 230 um, and the global
-    router's estimate, which the repairs work against, has the layers' capacitance from
-    the LEF without the coupling between neighbours: on the SmolLM2 SoC routed at 36 MHz,
-    the 256 bank outputs carried a median 1.19 times and at most 2.39 times their
-    estimate, over the same length of wire (bank_m6's A_DOUT[4]: 0.0288 pF estimated,
-    0.0687 pF routed, against the macro's 0.064 pF). A design-wide limit would buffer
-    every heavy net of X-HEEP, and OpenSTA does not apply a limit set on the macros' pins
-    to them. With a buffer beside the pin, the macro drives a few um and the buffer the
-    wire."""
+    A macro's output bits run side by side for hundreds of um, and the global router's
+    estimate, which the repairs work against, leaves out most of the coupling between
+    them. On the SmolLM2 SoC routed at 36 MHz with LibreLane 3.0.0.dev44, the 256 bank
+    outputs carried a median 1.19 times and at most 2.39 times their estimate over the
+    same length of wire (bank_m6's A_DOUT[4]: 0.0288 pF estimated, 0.0687 pF routed,
+    against the macro's 0.064 pF), and on 3.0.14 an accelerator's buffer output was
+    estimated at 0.0297 pF and came out 0.0650 pF. A design-wide limit would buffer every
+    heavy net of X-HEEP, and OpenSTA does not apply a limit set on the macros' pins to
+    them. With a buffer beside the pin, the macro drives a few um and the buffer the wire."""
     out: list[dict[str, Any]] = []
     for p in fp.macros:
-        if not p.instance.startswith(f"{soc.MCU_INST}."):
-            continue
         view = views[p.instance]
         for mp in view.pins:
-            if not mp.name.startswith(BANK_OUTPUT_PIN):
+            if not mp.name.startswith(OUTPUT_PIN):
                 continue
             at = _pin_at(p, view, mp.name)
             if at is not None:
-                out.append(_beside(p, view, mp.name, at, BANK_OUTPUT_BUFFER))
-    if any(p.instance.startswith(f"{soc.MCU_INST}.") for p in fp.macros) and not out:
-        raise SocError(f"X-HEEP's bank macros have no {BANK_OUTPUT_PIN}...] pins")
+                out.append(_beside(p, view, mp.name, at, OUTPUT_BUFFER))
+    if fp.macros and not out:
+        raise SocError(f"the SoC's SRAM macros have no {OUTPUT_PIN}...] pins")
     return out
 
 
 def with_floorplan(
-    cfg: dict[str, Any], prep: Prepared, cell_um2: float, work: Path
+    cfg: dict[str, Any],
+    prep: Prepared,
+    cell_um2: float,
+    work: Path,
+    version: str | None = None,
 ) -> tuple[dict[str, Any], place.Floorplan]:
     """``cfg`` with a floorplan for ``cell_um2`` of standard cells: the die, the macros
     where ChipLeap puts them, their power grid (``pdn.tcl``) and the buffers beside the
-    accelerator's macros' clock pins (``clock_pin_buffers``), and beside X-HEEP's banks'
-    outputs when a trial run asks for them (``trial_buffers``, ``bank_output_buffers``)."""
+    accelerator's macros' clock pins (``clock_pin_buffers``), and beside every SRAM
+    output (``output_buffers``) from LibreLane 3.0.14 on (``librelane_from_3014`` for
+    ``version``, the one that runs by default) or when a trial run asks for them
+    (``trial_buffers``)."""
     trial = trial_buffers()
+    outputs = BANK_OUTPUTS in trial or librelane_from_3014(version)
     fp = floorplan(prep.instances, prep.views, cell_um2)
     by_inst = dict(prep.instances)
     by_instance = {i: prep.views[c].view for i, c in prep.instances}
@@ -712,7 +835,7 @@ def with_floorplan(
         "MACROS": macros,
         "INSERT_ECO_BUFFERS": [
             *clock_pin_buffers(fp, by_instance),
-            *(bank_output_buffers(fp, by_instance) if BANK_OUTPUTS in trial else []),
+            *(output_buffers(fp, by_instance) if outputs else []),
         ],
     }
     netlists = sorted((work / "runs" / "chipleap").glob("*-yosys-synthesis/*.nl.v"))
@@ -731,12 +854,15 @@ def prepare(
     work: Path,
     pdk: Path,
     clock_mhz: float | None = None,
+    version: str | None = None,
 ) -> tuple[dict[str, Any], Prepared]:
     """Everything the LibreLane runs read, in ``work``: X-HEEP rendered for the design,
     its sources from FuseSoC, ChipLeap's sources and constraints, the macros' views. The
-    configuration without its floorplan, and what was prepared. The clock is the design's
-    unless ``clock_mhz`` says otherwise."""
+    configuration without its floorplan, for LibreLane ``version`` (the one that runs, by
+    default), and what was prepared. The clock is the design's unless ``clock_mhz`` says
+    otherwise; the accelerator's own clock, when it has one, is ``accel_clock_mhz``'s."""
     clock = clock_mhz or design.freq_mhz
+    accel = accel_clock_mhz(design)
     if design.platform != "xheep":
         raise SocError("not an X-HEEP design (standalone AXI4 IP)")
     fs, gcc = fusesoc(), riscv_gcc()
@@ -764,9 +890,23 @@ def prepare(
     ours, plans, accel_banks = generate(design, tree, work, srams)
     sources = Sources(tuple(files + ours), tuple(includes), plans, accel_banks)
     ports = soc.mcu_ports((tree / "hw/core-v-mini-mcu/core_v_mini_mcu.sv").read_text())
-    builddir.write_text(work, SDC, soc.sdc(ports, round(1000.0 / clock, 3)))
+    accel_ns = round(1000.0 / accel, 3) if accel else 0.0
+    period = round(1000.0 / clock, 3)
+    builddir.write_text(work, SDC, soc.sdc(ports, period, accel_ns, design.direct_memory))
+    if pnr_sdc(version) == PNR_SDC:
+        text = soc.sdc(
+            ports,
+            period,
+            accel_ns,
+            design.direct_memory,
+            ignore_clock_latency=False,
+            slew_ns=pnr.MACRO_PNR_SLEW_NS,
+        )
+        builddir.write_text(work, PNR_SDC, text)
+    # Behind the crossings the accelerator's macros are one level further down.
+    under = f"{soc.ACCEL_INST}.{pnr.CDC_INSTANCE}" if accel else soc.ACCEL_INST
     instances = bank_instances(tree, plans) + [
-        (f"{soc.ACCEL_INST}.{inst}", cell) for inst, cell in accel_banks.instances()
+        (f"{under}.{inst}", cell) for inst, cell in accel_banks.instances()
     ]
     views = {cell: sram.views(pdk, cell, work) for cell in sorted({c for _, c in instances})}
     # The macros' cells go into one layout and one netlist with the rest; a clash among
@@ -775,7 +915,15 @@ def prepare(
         merge.check_macros(v.view for v in views.values())
     except merge.MergeError as exc:
         raise SocError(f"merged names: {exc}") from None
-    return config(sources, clock), Prepared(sources, instances, views)
+    return config(sources, clock, accel, version), Prepared(sources, instances, views)
+
+
+def accel_clock_mhz(design: Design) -> float:
+    """The accelerator's own clock in the SoC (0 when it shares X-HEEP's): the design's,
+    capped at what IHP SG13G2 allows."""
+    if not design.accel_mhz:
+        return 0.0
+    return min(design.accel_mhz, get_tech("ihp-sg13g2").max_freq_mhz)
 
 
 _CHECK_RE = re.compile(r"Found and reported (\d+) problems")
@@ -810,8 +958,9 @@ def place_and_route(
     peripherals are most of them, which the model's estimate does not follow), then the
     layout, in the same LibreLane run."""
     clock = clock_mhz or design.freq_mhz
-    cfg, prep = prepare(design, config_text, checkout, work, pdk, clock)
-    first, _ = with_floorplan(cfg, prep, model_areas_um2(design)[0], work)
+    version = librelane_version()
+    cfg, prep = prepare(design, config_text, checkout, work, pdk, clock, version)
+    first, _ = with_floorplan(cfg, prep, model_areas_um2(design)[0], work, version)
     pnr.run_librelane(work, first, to="Yosys.Synthesis", timeout_s=TIMEOUT_S)
     run = work / "runs" / "chipleap"
     if problems := netlist_problems(run):
@@ -819,21 +968,38 @@ def place_and_route(
     synth = pnr.synth_area(run)
     if synth <= 0:
         raise SocError("LibreLane's synthesis reported no standard-cell area")
-    full, _ = with_floorplan(cfg, prep, synth, work)
-    metrics, gds = layout(work, full)
+    full, _ = with_floorplan(cfg, prep, synth, work, version)
+    metrics, gds = layout(work, full, version)
     return routed(design, work, pdk, clock, prep.instances, synth, metrics, gds)
 
 
-def layout(work: Path, full: dict[str, Any]) -> tuple[dict[str, Any], Path | None]:
+def layout(
+    work: Path, full: dict[str, Any], version: str | None = None
+) -> tuple[dict[str, Any], Path | None]:
     """The layout, resumed after synthesis; the final metrics and GDS. With the clock
     gates' buffers (``trial_buffers``) it runs in two parts: up to the clock tree, then
     the rest from the buffers inserted after it (``ECO_BUFFERS``), with a buffer after
-    each clock gate where placement put the gate (``gate_buffers``) besides the others."""
-    # Without the second antenna repair (``late_antenna_repair``): the SoC's evidence was
-    # routed without it, and it is turned on once a SoC run with it has been checked.
+    each clock gate where placement put the gate (``gate_buffers``) besides the others.
+    From LibreLane 3.0.14 on (``librelane_from_3014`` for ``version``) antennas are
+    repaired a second time after the timing repair, as in the accelerator's layout."""
+    # The second antenna repair (``late_antenna_repair``) catches nets the timing repair
+    # after global routing leaves over the antenna ratios: the one net over OpenROAD's
+    # check in the dev44 layout with buffers after the banks' outputs, a buffer's output
+    # on Metal2, was at 1.06 of its limit after global routing and 1.27 after routing.
+    # #20's evidence (dev44) was routed without it, and dev44 keeps that.
+    late = librelane_from_3014(version)
     if GATES not in trial_buffers():
-        return pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S)
-    pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, to=CTS, timeout_s=TIMEOUT_S)
+        return pnr.run_librelane(
+            work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S, late_antenna_repair=late
+        )
+    pnr.run_librelane(
+        work,
+        full,
+        resume_from=AFTER_SYNTHESIS,
+        to=CTS,
+        timeout_s=TIMEOUT_S,
+        late_antenna_repair=late,
+    )
     run = work / "runs" / "chipleap"
     state = pnr.step_state(run, CTS)
     if state is None:
@@ -846,7 +1012,9 @@ def layout(work: Path, full: dict[str, Any]) -> tuple[dict[str, Any], Path | Non
         raise SocError("LibreLane's state after the clock tree names no DEF in its run")
     gates = clock_gates(def_path.read_text(errors="replace"))
     full = {**full, "INSERT_ECO_BUFFERS": [*full["INSERT_ECO_BUFFERS"], *gate_buffers(gates)]}
-    return pnr.run_librelane(work, full, resume_from=ECO_BUFFERS, timeout_s=TIMEOUT_S)
+    return pnr.run_librelane(
+        work, full, resume_from=ECO_BUFFERS, timeout_s=TIMEOUT_S, late_antenna_repair=late
+    )
 
 
 def routed(
@@ -884,6 +1052,15 @@ def routed(
         macros=placed,
         macro_um2=sum(area[cell] for _, cell in placed),
     )
-    result = pnr.with_ihp_drc(result, pdk, soc.TOP, work, held)
-    result = pnr.with_ihp_antenna(result, pdk, soc.TOP, work)
+    if accel := accel_clock_mhz(design):
+        # Two clocks: each one's paths and the crossings between them, as path groups.
+        result = replace(
+            result,
+            clocks={"clk": round(1000.0 / clock, 3), soc.ACCEL_CLOCK: round(1000.0 / accel, 3)},
+            groups=pnr.group_slacks(run, ("clk", soc.ACCEL_CLOCK)),
+        )
+    # The SoC's DRC and antenna decks take hours longer than a block's (IHP's DRC ran 3 h
+    # on the SmolLM2 SoC without finishing), so they get the layout's own limit.
+    result = pnr.with_ihp_drc(result, pdk, soc.TOP, work, held, timeout_s=TIMEOUT_S)
+    result = pnr.with_ihp_antenna(result, pdk, soc.TOP, work, timeout_s=TIMEOUT_S)
     return SocResult(result, placed, *model_areas_um2(design))

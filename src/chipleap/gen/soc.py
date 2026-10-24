@@ -5,9 +5,13 @@ leaves to a technology, written for IHP SG13G2.
 - ``chipleap_soc``, the top. The accelerator's read and write masters are X-HEEP's
   external crossbar masters, its registers the external peripheral slave and its
   interrupt the external peripheral interrupt, as the datasheet tells an integrator.
-  Every other port of ``core_v_mini_mcu`` that a chip brings out (the pads' signals of
-  the peripherals the configuration has, the external memory's OBI ports that something
-  uses, ``EXT_SLAVE_USED``, the pad control bus) is a port of the top, with X-HEEP's own
+  With external memory, X-HEEP's external slave ports that something uses
+  (``EXT_SLAVE_USED``) and the accelerator's direct read ports go into ``chipleap_mem``,
+  which puts them on the memory controller's ports, ``mem_req_o`` and ``mem_resp_i``
+  (one per accelerator read port, X-HEEP's on the first): X-HEEP's bus does not let an
+  external master reach its external slave window. Every other port of
+  ``core_v_mini_mcu`` that a chip brings out (the pads' signals of the peripherals the
+  configuration has, the pad control bus) is a port of the top, with X-HEEP's own
   types; the rest is tied off as a chip without coprocessor, external power domains or
   hardware FIFOs ties it (``TIED``, ``OPEN``, and the pads of the peripherals the
   configuration leaves out, ``chipleap.gen.xheep.absent_pins``). A port this module
@@ -101,6 +105,7 @@ THROUGH_TYPED = {"pad_req_o", "pad_resp_i"}
 # firmware runs from the banks; the debug module and the DMA's address port, its address
 # mode off, have nothing there. Their ports, and every port of a design without external
 # memory, are tied off inside the top as X-HEEP ties its own absent slave: never granted.
+# The used ones go to chipleap_mem in this order, the DMA's as many as it has master ports.
 EXT_SLAVES = (
     "ext_core_instr",
     "ext_core_data",
@@ -111,6 +116,11 @@ EXT_SLAVES = (
 )
 EXT_SLAVE_USED = ("ext_core_data", "ext_dma_read", "ext_dma_write")
 
+MEM_INST = "u_mem"
+# The accelerator behind its crossings, and its own clock's port on the top.
+CDC_MODULE = "chipleap_accel_cdc"
+ACCEL_CLOCK = "accel_clk_i"
+_DIMS_RE = re.compile(r"\[(.+)-1:0\]")
 _HEADER_RE = re.compile(rf"\bmodule\s+{MCU}\s*#\s*\((.*?)\)\s*\((.*?)\);", re.S)
 _PORT_RE = re.compile(r"^(input|output)\s+(\w+)\s*((?:\[[^\]]+\]\s*)*)([A-Za-z_]\w*)$")
 _IF_RE = re.compile(r"^if_xif\.(\w+)\s+([A-Za-z_]\w*)$")
@@ -168,28 +178,47 @@ def top_sv(
     accel_ports: int,
     accel_module: str = banks.TOP,
     ext_memory: bool = True,
+    accel_clock: bool = False,
     absent: Sequence[str] = absent_pins(Peripherals()),
 ) -> str:
     """``chipleap_soc``: ``core_v_mini_mcu`` and the accelerator (``accel_module``, the
     flat ports of ``chipleap_accel``, one OBI master per read port and one for writes).
-    With ``ext_memory`` the ports of ``EXT_SLAVE_USED`` are ports of the top; the other
-    external slave ports are tied off, and so are the pads' ports that start with one of
-    ``absent``, those of the peripherals the configuration leaves out."""
+    With ``ext_memory`` the ports of ``EXT_SLAVE_USED`` and the accelerator's direct read
+    ports go into ``chipleap_mem``, whose memory ports are ports of the top; the other
+    external slave ports are tied off. So are the pads' ports that start with one of
+    ``absent``, those of the peripherals the configuration leaves out. With ``accel_clock``
+    the accelerator runs on a clock of its own, ``accel_clk_i`` (a port of the top), behind
+    its crossings (``chipleap_accel_cdc`` with ``accel_module`` inside), and so do the
+    memory ports."""
     names = {p.name for p in ports}
     for known in ACCEL:
         if known not in names:
             raise SocError(f"{MCU} has no port {known}, which the accelerator needs")
     tied, open_, through = dict(TIED), dict(OPEN), set(THROUGH_TYPED)
+    # With external memory, X-HEEP's used external slave ports go to chipleap_mem, each a
+    # slice of xs_req and xs_rsp: (port, slice).
+    to_mem: dict[str, str] = {}
+    widths: list[str] = []
+    by_name = {p.name: p for p in ports}
     for slave in EXT_SLAVES:
-        if ext_memory and slave in EXT_SLAVE_USED:
-            through |= {f"{slave}_req_o", f"{slave}_resp_i"}
+        req = by_name.get(f"{slave}_req_o")
+        if ext_memory and slave in EXT_SLAVE_USED and req is not None:
+            width = _width(req)
+            low = " + ".join(widths) or "0"
+            at = low if width == "1" and not req.dims else f"{low} + {width} - 1:{low}"
+            to_mem[f"{slave}_req_o"] = f"xs_req[{at}]"
+            to_mem[f"{slave}_resp_i"] = f"xs_rsp[{at}]"
+            widths.append(width)
         else:
             tied[f"{slave}_resp_i"] = "'0"
             open_[f"{slave}_req_o"] = ""
+    direct = bool(widths)
     head: list[str] = []
     conns: list[str] = []
     for p in ports:
-        if p.kind == "if_xif":
+        if p.name in to_mem:
+            conns.append(f".{p.name}({to_mem[p.name]})")
+        elif p.kind == "if_xif":
             conns.append(f".{p.name}(xif)")
         elif p.name in ACCEL:
             conns.append(f".{p.name}({ACCEL[p.name]})")
@@ -208,6 +237,13 @@ def top_sv(
         else:
             raise SocError(f"port {p.name} ({p.kind}) of {MCU} has no place in the SoC top")
     n = accel_ports
+    if accel_clock:
+        head.append("    input logic accel_clk_i")
+    if direct:
+        head += [
+            f"    output xheep_obi_pkg::xheep_obi_req_t [{n - 1}:0] mem_req_o",
+            f"    input xheep_obi_pkg::xheep_obi_rsp_t [{n - 1}:0] mem_resp_i",
+        ]
     lines = [
         "// Written by ChipLeap: X-HEEP with the accelerator on its external ports.",
         f"module {TOP} (",
@@ -226,6 +262,7 @@ def top_sv(
         "  // No coprocessor on the CORE-V eXtension Interface.",
         "  if_xif xif ();",
         "",
+        *(_mem_lines(" + ".join(widths), n, accel_clock) if direct else []),
         f"  {MCU} #(",
         f"      .EXT_XBAR_NMASTER({n + 1})",
         f"  ) {MCU_INST} (",
@@ -253,8 +290,7 @@ def top_sv(
         f"  assign acc_obi_req[{n}].addr = wr_addr;",
         f"  assign acc_obi_req[{n}].wdata = wr_wdata;",
         "",
-        f"  {accel_module} {ACCEL_INST} (",
-        "      .clk_i(clk_i),",
+        *_accel_head(accel_module, n, direct, accel_clock),
         "      .rst_ni(rst_ni),",
         "      .reg_valid_i(acc_reg_req.valid),",
         "      .reg_write_i(acc_reg_req.write),",
@@ -275,6 +311,23 @@ def top_sv(
         "      .wr_wdata_o(wr_wdata),",
         "      .wr_be_o(wr_be),",
         f"      .wr_rvalid_i(acc_obi_rsp[{n}].rvalid),",
+        *(
+            [
+                "      .ext_req_o(ext_req),",
+                "      .ext_gnt_i(ext_gnt),",
+                "      .ext_addr_o(ext_addr),",
+                "      .ext_rvalid_i(ext_rvalid),",
+                "      .ext_rdata_i(ext_rdata),",
+            ]
+            if direct
+            else [
+                "      .ext_req_o(),",
+                "      .ext_gnt_i('0),",
+                "      .ext_addr_o(),",
+                "      .ext_rvalid_i('0),",
+                "      .ext_rdata_i('0),",
+            ]
+        ),
         "      .irq_o(acc_irq)",
         "  );",
         "endmodule",
@@ -283,6 +336,124 @@ def top_sv(
         if need not in names:
             raise SocError(f"{MCU} has no port {need}")
     return "\n".join(lines) + "\n"
+
+
+# The accelerator's direct path reads X-HEEP's own external slave window.
+_DIRECT_PARAMS = (
+    " #(\n"
+    "      .EXT_DIRECT(1),\n"
+    "      .EXT_BASE(core_v_mini_mcu_pkg::EXT_SLAVE_START_ADDRESS),\n"
+    "      .EXT_SIZE(core_v_mini_mcu_pkg::EXT_SLAVE_SIZE)\n"
+    "  )"
+)
+
+
+def _width(port: Port) -> str:
+    """How many OBI ports an external slave port of the MCU is, as SystemVerilog."""
+    if not port.dims:
+        return "1"
+    m = _DIMS_RE.fullmatch(port.dims)
+    if m is None:
+        raise SocError(f"port {port.name} of {MCU} has dimensions {port.dims} this top cannot read")
+    return m.group(1)
+
+
+def _accel_head(module: str, n: int, direct: bool, accel_clock: bool) -> list[str]:
+    """The accelerator's instance up to its bus clock: ``module``, or on a clock of its own
+    ``module`` behind ``chipleap_accel_cdc``, with the direct path's parameters when it
+    has one."""
+    if not accel_clock:
+        return [
+            f"  {module}{_DIRECT_PARAMS if direct else ''} {ACCEL_INST} (",
+            "      .clk_i(clk_i),",
+        ]
+    params = [f"      .PORTS({n})"]
+    if direct:
+        params += [
+            "      .EXT_DIRECT(1)",
+            "      .EXT_BASE(core_v_mini_mcu_pkg::EXT_SLAVE_START_ADDRESS)",
+            "      .EXT_SIZE(core_v_mini_mcu_pkg::EXT_SLAVE_SIZE)",
+        ]
+    return [
+        f"  // The accelerator on its own clock: {module} behind its crossings.",
+        f"  {CDC_MODULE} #(",
+        ",\n".join(params),
+        f"  ) {ACCEL_INST} (",
+        "      .clk_i(clk_i),",
+        "      .accel_clk_i(accel_clk_i),",
+    ]
+
+
+def _mem_lines(nx: str, n: int, accel_clock: bool = False) -> list[str]:
+    """X-HEEP's used external slave ports (``xs_req``, ``xs_rsp``, ``nx`` of them) and the
+    accelerator's direct read ports into ``chipleap_mem``, its memory ports out of the top;
+    with ``accel_clock`` those run on ``accel_clk_i`` and X-HEEP's side crosses into it."""
+    return [
+        "  // X-HEEP's external slave ports and the accelerator's direct read ports, to the",
+        "  // memory controller's ports (chipleap_mem.sv).",
+        f"  localparam int unsigned NX = {nx};",
+        "  xheep_obi_pkg::xheep_obi_req_t [NX-1:0] xs_req;",
+        "  xheep_obi_pkg::xheep_obi_rsp_t [NX-1:0] xs_rsp;",
+        "  logic [NX-1:0] x_req, x_gnt, x_we, x_rvalid;",
+        "  logic [NX-1:0][3:0] x_be;",
+        "  logic [NX-1:0][31:0] x_addr, x_wdata, x_rdata;",
+        "  for (genvar i = 0; i < NX; i++) begin : g_xs",
+        "    assign x_req[i] = xs_req[i].req;",
+        "    assign x_we[i] = xs_req[i].we;",
+        "    assign x_be[i] = xs_req[i].be;",
+        "    assign x_addr[i] = xs_req[i].addr;",
+        "    assign x_wdata[i] = xs_req[i].wdata;",
+        "    assign xs_rsp[i].gnt = x_gnt[i];",
+        "    assign xs_rsp[i].rvalid = x_rvalid[i];",
+        "    assign xs_rsp[i].rdata = x_rdata[i];",
+        "  end",
+        f"  logic [{n - 1}:0] ext_req, ext_gnt, ext_rvalid;",
+        f"  logic [{n - 1}:0][31:0] ext_addr, ext_rdata;",
+        f"  logic [{n - 1}:0] m_req, m_gnt, m_we, m_rvalid;",
+        f"  logic [{n - 1}:0][3:0] m_be;",
+        f"  logic [{n - 1}:0][31:0] m_addr, m_wdata, m_rdata;",
+        f"  for (genvar i = 0; i < {n}; i++) begin : g_mem",
+        "    assign mem_req_o[i].req = m_req[i];",
+        "    assign mem_req_o[i].we = m_we[i];",
+        "    assign mem_req_o[i].be = m_be[i];",
+        "    assign mem_req_o[i].addr = m_addr[i];",
+        "    assign mem_req_o[i].wdata = m_wdata[i];",
+        "    assign m_gnt[i] = mem_resp_i[i].gnt;",
+        "    assign m_rvalid[i] = mem_resp_i[i].rvalid;",
+        "    assign m_rdata[i] = mem_resp_i[i].rdata;",
+        "  end",
+        "  chipleap_mem #(",
+        f"      .PORTS({n}),",
+        "      .NX(NX),",
+        f"      .CDC({int(accel_clock)})",
+        f"  ) {MEM_INST} (",
+        "      .clk_i(clk_i),",
+        "      .rst_ni(rst_ni),",
+        f"      .accel_clk_i({'accel_clk_i' if accel_clock else 'clk_i'}),",
+        "      .x_req_i(x_req),",
+        "      .x_gnt_o(x_gnt),",
+        "      .x_we_i(x_we),",
+        "      .x_be_i(x_be),",
+        "      .x_addr_i(x_addr),",
+        "      .x_wdata_i(x_wdata),",
+        "      .x_rvalid_o(x_rvalid),",
+        "      .x_rdata_o(x_rdata),",
+        "      .a_req_i(ext_req),",
+        "      .a_gnt_o(ext_gnt),",
+        "      .a_addr_i(ext_addr),",
+        "      .a_rvalid_o(ext_rvalid),",
+        "      .a_rdata_o(ext_rdata),",
+        "      .mem_req_o(m_req),",
+        "      .mem_gnt_i(m_gnt),",
+        "      .mem_we_o(m_we),",
+        "      .mem_be_o(m_be),",
+        "      .mem_addr_o(m_addr),",
+        "      .mem_wdata_o(m_wdata),",
+        "      .mem_rvalid_i(m_rvalid),",
+        "      .mem_rdata_i(m_rdata)",
+        "  );",
+        "",
+    ]
 
 
 @dataclass(frozen=True)
@@ -480,10 +651,28 @@ EXTRA_CLOCKS = (
 )
 
 
-def sdc(ports: Sequence[Port], period_ns: float) -> str:
+def sdc(
+    ports: Sequence[Port],
+    period_ns: float,
+    accel_period_ns: float = 0.0,
+    direct: bool = False,
+    ignore_clock_latency: bool = True,
+    slew_ns: float | None = None,
+) -> str:
     """Timing constraints for the SoC: clk_i at ``period_ns``, X-HEEP's other clocks
     (``EXTRA_CLOCKS``, those whose port the top has), all asynchronous to one another,
-    and LibreLane's base SDC for the rest, inputs and outputs against clk_i."""
+    and LibreLane's base SDC for the rest, inputs and outputs against clk_i.
+
+    With ``accel_period_ns`` the accelerator's own clock (``ACCEL_CLOCK``) too, and with
+    ``direct`` the memory ports, on it, timed against it. The paths between clk and the
+    accelerator's clock are its crossings and X-HEEP's side's into the memory ports, as
+    ``chipleap.verify.pnr.two_clock_sdc`` bounds them: ``set_max_delay
+    -ignore_clock_latency`` at the faster period both ways and no hold check, and that
+    clock in no ``set_clock_groups``, which in OpenSTA drops those bounds. Without
+    ``ignore_clock_latency`` the bounds count both clocks' latency, as the soc step's
+    place and route constraints on LibreLane 3.0.14 have them
+    (``chipleap.verify.soc.PNR_SDC``). ``slew_ns`` adds a design-wide slew target, those
+    constraints' too."""
     from chipleap.rtl.pnr import io_lines
 
     names = {p.name for p in ports}
@@ -492,6 +681,10 @@ def sdc(ports: Sequence[Port], period_ns: float) -> str:
         f"# Written by ChipLeap: constraints for {TOP}.",
         f"create_clock [get_ports clk_i] -name clk -period {period_ns:g}",
     ]
+    if accel_period_ns:
+        lines.append(
+            f"create_clock [get_ports {ACCEL_CLOCK}] -name {ACCEL_CLOCK} -period {accel_period_ns:g}"
+        )
     for name, _, source, period in clocks:
         lines += [
             f"set src {source}",
@@ -500,6 +693,7 @@ def sdc(ports: Sequence[Port], period_ns: float) -> str:
             "}",
         ]
     inputs = ["clk_i", *(port for _, port, _, _ in clocks if port.endswith("_i"))]
+    inputs += [ACCEL_CLOCK] if accel_period_ns else []
     lines += [
         "set clock_inputs {}",
         "set data_inputs [all_inputs]",
@@ -526,4 +720,41 @@ def sdc(ports: Sequence[Port], period_ns: float) -> str:
         "}",
         "set_clock_groups -asynchronous {*}$groups",
     ]
+    if accel_period_ns:
+        bound = min(period_ns, accel_period_ns)
+        if direct:
+            lines += [
+                "# The memory ports run on the accelerator's clock.",
+                f"set mem_delay [expr {accel_period_ns:g} * $::env(IO_DELAY_CONSTRAINT) / 100]",
+                "set mem_in [get_ports -quiet {mem_resp_i*}]",
+                "set mem_out [get_ports -quiet {mem_req_o*}]",
+                "if { [llength $mem_in] } {",
+                f"    set_input_delay $mem_delay -clock [get_clocks {ACCEL_CLOCK}] $mem_in",
+                "}",
+                "if { [llength $mem_out] } {",
+                f"    set_output_delay $mem_delay -clock [get_clocks {ACCEL_CLOCK}] $mem_out",
+                "}",
+            ]
+        lines += [
+            "# Between X-HEEP's clock and the accelerator's every path is a crossing ChipLeap's",
+            "# CDC step checked: its data path bounded by the faster period, no hold check.",
+        ]
+        if not ignore_clock_latency:
+            lines.append("# For place and route only: the bound counts both clocks' latency.")
+        flag = "-ignore_clock_latency " if ignore_clock_latency else ""
+        lines += [
+            *(
+                f"set_max_delay {flag}{bound:g} -from [get_clocks {a}] -to [get_clocks {b}]"
+                for a, b in (("clk", ACCEL_CLOCK), (ACCEL_CLOCK, "clk"))
+            ),
+            *(
+                f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]"
+                for a, b in (("clk", ACCEL_CLOCK), (ACCEL_CLOCK, "clk"))
+            ),
+        ]
+    if slew_ns is not None:
+        lines += [
+            "# A slew target for repair under the SRAM macros' input limit.",
+            f"set_max_transition {slew_ns:g} [current_design]",
+        ]
     return "\n".join(lines) + "\n"

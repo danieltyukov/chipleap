@@ -23,6 +23,10 @@
 // rst_ni is asserted asynchronously in both domains and released in each through its own
 // reset synchronizer.
 //
+// The direct read ports to external memory (ext_*, with EXT_DIRECT) cross nothing: they
+// stay on accel_clk_i, and the memory ports run on that clock too, with X-HEEP's side
+// crossing into it instead (chipleap_mem.sv).
+//
 // SPDX-License-Identifier: MIT
 
 /* verilator lint_off DECLFILENAME */  // the crossing blocks, then chipleap_accel_cdc
@@ -322,7 +326,11 @@ module chipleap_accel_cdc #(
     parameter int unsigned WBUF_WORDS = 1024,
     parameter int unsigned DOUBLE_BUF = 1,
     parameter int unsigned ACC_ROWS = 8,
-    parameter int unsigned CDC_AW = 3  // each crossing FIFO holds 2^CDC_AW words
+    parameter int unsigned CDC_AW = 3,  // each crossing FIFO holds 2^CDC_AW words
+    parameter int unsigned EXT_DIRECT = 0,
+    parameter logic [31:0] EXT_BASE = 32'hC0000000,
+    parameter logic [31:0] EXT_SIZE = 32'h40000000,
+    parameter int unsigned EXT_OUTSTANDING = 16
 ) (
     input logic clk_i,  // the bus's clock
     input logic rst_ni,
@@ -346,6 +354,12 @@ module chipleap_accel_cdc #(
     output logic [31:0] wr_wdata_o,
     output logic [ 3:0] wr_be_o,
     input  logic        wr_rvalid_i,
+    // on accel_clk_i
+    output logic [PORTS-1:0]       ext_req_o,
+    input  logic [PORTS-1:0]       ext_gnt_i,
+    output logic [PORTS-1:0][31:0] ext_addr_o,
+    input  logic [PORTS-1:0]       ext_rvalid_i,
+    input  logic [PORTS-1:0][31:0] ext_rdata_i,
     output logic irq_o
 );
   /* verilator lint_on DECLFILENAME */
@@ -381,7 +395,11 @@ module chipleap_accel_cdc #(
       .DOUBLE_BUF(DOUBLE_BUF),
       .ACC_ROWS(ACC_ROWS),
       // As many reads in flight per port as its crossing holds.
-      .MAX_OUTSTANDING(1 << CDC_AW)
+      .MAX_OUTSTANDING(1 << CDC_AW),
+      .EXT_DIRECT(EXT_DIRECT),
+      .EXT_BASE(EXT_BASE),
+      .EXT_SIZE(EXT_SIZE),
+      .EXT_OUTSTANDING(EXT_OUTSTANDING)
   ) u_accel (
       .clk_i(accel_clk_i),
       .rst_ni(a_rst_n),
@@ -404,6 +422,11 @@ module chipleap_accel_cdc #(
       .wr_wdata_o(a_wdata),
       .wr_be_o(a_wbe),
       .wr_rvalid_i(a_wvalid),
+      .ext_req_o,
+      .ext_gnt_i,
+      .ext_addr_o,
+      .ext_rvalid_i,
+      .ext_rdata_i,
       .irq_o(a_irq)
   );
 

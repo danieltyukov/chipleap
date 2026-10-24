@@ -122,8 +122,14 @@ def test_the_model_times_the_accelerator_at_its_own_clock_and_prices_its_crossin
     assert unit(fast, "cpu") == pytest.approx(unit(shared, "cpu"))
     assert unit(same, "accel") > unit(shared, "accel") > unit(fast, "accel")
     tech = get_tech("ihp-sg13g2")
+    from chipleap.model.evaluate import direct_kge
+
     added = fast.area_mm2["accelerator logic"] - shared.area_mm2["accelerator logic"]
-    assert added == pytest.approx(tech.logic_mm2(ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE))
+    # The crossings, and the direct path's on the accelerator's clock (X-HEEP's side
+    # crossing, the ports' queues sized for sixteen reads in flight from eight).
+    direct = direct_kge(fast.design) - direct_kge(shared.design)
+    assert direct > 0
+    assert added == pytest.approx(tech.logic_mm2(ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE + direct))
     from chipleap.report.text import clock_note
 
     assert "the accelerator runs on its own clock at 90" in clock_note(fast)
@@ -211,7 +217,9 @@ def test_a_macro_build_on_its_own_clock_puts_its_macros_inside_the_crossings(tmp
     assert "set_max_transition 0.3 [current_design]" in pnr_sdc
     assert "set_max_transition 0.3" not in signoff_sdc and "base.sdc" not in signoff_sdc
     src = (work / "src" / "chipleap_accel_cdc.v").read_text()
-    assert "chipleap_accel_sram u_accel (" in src and "module chipleap_accel_cdc" in src
+    # The macro build behind the crossings takes only the direct path's parameters.
+    assert "chipleap_accel_sram #(\n      .EXT_DIRECT(EXT_DIRECT)," in src
+    assert "module chipleap_accel_cdc" in src
     assert ".MAX_OUTSTANDING(8)," in (work / "src" / "chipleap_accel_sram.v").read_text()
     assert r.clocks == {"clk_i": 23.641, "accel_clk_i": 11.111}
     # The band between the macro rows holds the crossings too.

@@ -27,8 +27,9 @@ from chipleap import __version__
 from chipleap.explore.engine import Candidate, ExploreResult
 from chipleap.gen.datasheet import datasheet, reggen_hjson
 from chipleap.gen.rtl import write_rtl
-from chipleap.gen.xheep import pad_config, pads_file, xheep_config
+from chipleap.gen.xheep import ext_window, pad_config, pads_file, xheep_config
 from chipleap.hw.design import Design, DesignError
+from chipleap.model.accel import direct_outstanding
 from chipleap.report.data import explore_dict, explore_markdown
 from chipleap.report.html import explore_html
 from chipleap.report.text import ip_note
@@ -190,6 +191,9 @@ def write_bundle(
             out,
             platform=design.platform,
             own_clock=bool(design.accel_mhz),
+            direct=design.direct_memory,
+            window=ext_window(ext_bytes),
+            outstanding=direct_outstanding(design),
         )
         put("rtl/chipleap_accel.hjson", reggen_hjson(design.name))
     if result is not None:

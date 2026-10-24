@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 
-from chipleap.hw.design import Accel
+from chipleap.hw.design import Accel, Design
 
 # Accumulator rows for the gemv and ws cores: the most activation rows one tile holds.
 ACC_ROWS = 8
@@ -213,6 +213,30 @@ class Bandwidth:
 # edges fall, so no cycle-exact count exists across clocks.
 CDC_BUS_CYCLES = 1.25
 CDC_ACCEL_CYCLES = 3.0
+
+# External memory answers a read 60 ns after its grant, plus 4 cycles of the controller,
+# at least 8 cycles in all.
+EXT_LATENCY_NS = 60.0
+# Reads in flight per port on the accelerator's direct path to external memory
+# (chipleap_accel with EXT_DIRECT): at least this many, more where the memory's latency
+# needs them (direct_outstanding).
+DIRECT_OUTSTANDING = 16
+
+
+def ext_latency(f_hz: float) -> int:
+    """External memory's latency in cycles of a clock of ``f_hz``."""
+    return max(8, round(EXT_LATENCY_NS * 1e-9 * f_hz) + 4)
+
+
+def direct_outstanding(design: Design) -> int:
+    """Reads in flight per port that let the direct path stream a word a cycle: as many as
+    external memory's latency at the accelerator's clock and two more, a power of two (the
+    response queue's), and at least ``DIRECT_OUTSTANDING``. The accelerator's clock is its
+    own or the design's, so on a node where the SoC runs slower the queue is never short."""
+    n = DIRECT_OUTSTANDING
+    while n < ext_latency((design.accel_mhz or design.freq_mhz) * 1e6) + 2:
+        n *= 2
+    return n
 
 
 def crossed(bw: Bandwidth, k: float, ports: int) -> Bandwidth:
