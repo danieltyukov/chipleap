@@ -177,6 +177,36 @@ def test_the_accelerators_clock_is_bounded_against_x_heeps_without_clock_groups(
     assert "accel_clk_i" not in one and "mem_delay" not in one
 
 
+def test_on_librelane_3014_place_and_route_bounds_the_crossings_with_the_clocks_latency():
+    """3.0.14's OpenROAD segfaults in the SoC's timing-driven placement on a path delay set
+    with -ignore_clock_latency, so place and route takes the crossings' bounds counting
+    both clocks' latency, and signoff keeps them as they are; dev44 and a SoC without the
+    accelerator's clock keep one SDC."""
+    ports = soc.mcu_ports(MCU)
+    signoff = soc.sdc(ports, 28.571, 11.111, direct=True)
+    pnr_text = soc.sdc(ports, 28.571, 11.111, direct=True, ignore_clock_latency=False)
+    assert "-ignore_clock_latency" not in pnr_text
+    for a, b in (("clk", "accel_clk_i"), ("accel_clk_i", "clk")):
+        assert f"set_max_delay 11.111 -from [get_clocks {a}] -to [get_clocks {b}]" in pnr_text
+        assert f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]" in pnr_text
+
+    def rest(text: str) -> list[str]:
+        return [ln for ln in text.splitlines() if not ln.startswith(("set_max_delay", "# For"))]
+
+    assert rest(pnr_text) == rest(signoff)
+    assert soc_step.pnr_sdc(90.0, "3.0.14") == soc_step.PNR_SDC
+    assert soc_step.pnr_sdc(90.0, "3.0.0.dev44") == soc_step.pnr_sdc(0.0, "3.0.14") == soc_step.SDC
+    sources = soc_step.Sources((), (), (), None)  # type: ignore[arg-type]
+    for accel, version, used in (
+        (90.0, "3.0.14", soc_step.PNR_SDC),
+        (90.0, "3.0.0.dev44", soc_step.SDC),
+        (0.0, "3.0.14", soc_step.SDC),
+    ):
+        cfg = soc_step.config(sources, 36.0, accel, version)
+        assert cfg["PNR_SDC_FILE"] == f"dir::{used}"
+        assert cfg["SIGNOFF_SDC_FILE"] == f"dir::{soc_step.SDC}"
+
+
 def test_without_external_memory_every_external_slave_port_is_tied_off():
     top = soc.top_sv(soc.mcu_ports(MCU), accel_ports=1, ext_memory=False)
     head = top[: top.index(");")]
@@ -427,6 +457,9 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     assert "set_clock_groups -asynchronous" in sdc
     # The I2S's source-synchronous outputs leave within the cycle, as its clock does.
     assert "set_output_delay 0 -clock [get_clocks clk] $i2s_out" in sdc
+    # One clock: place and route and signoff take the same constraints.
+    assert cfg["PNR_SDC_FILE"] == cfg["SIGNOFF_SDC_FILE"] == f"dir::{soc_step.SDC}"
+    assert not (work / soc_step.PNR_SDC).exists()
     cells = [c for _, c in prep.instances]
     assert cells.count("RM_IHPSG13_1P_1024x32_c2_bm_bist") == 8
     assert cells.count("RM_IHPSG13_1P_256x64_c2_bm_bist") == 4

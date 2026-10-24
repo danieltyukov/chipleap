@@ -431,6 +431,18 @@ def pin_order(inputs: int, outputs: int, fp: place.Floorplan, heights: dict[str,
 # The layout of the SoC takes 6 to 10 hours on 22 cores, most of it in detailed routing.
 TIMEOUT_S = 86400
 SDC = "chipleap_soc.sdc"
+# Place and route's constraints on LibreLane 3.0.14 when the accelerator has a clock of its
+# own (``pnr_sdc``): SDC with the crossings' bounds counting both clocks' latency, signoff
+# keeping SDC. 3.0.14's OpenROAD (dcf3613) segfaults in the SoC's timing-driven global
+# placement: the rebuffering after each timing-driven pass (``Resizer::findResizeSlacks``,
+# which always runs ``fullyRebuffer`` before routing) ends in OpenSTA's
+# ``Search::pathClkPathArrival``, which it reaches only for a path delay set with
+# ``-ignore_clock_latency``, the crossings' bounds. It crashed at the same place from the
+# same state twice, and with PL_KEEP_RESIZE_BELOW_OVERFLOW 0 too; with these bounds it
+# went past that place. The SmolLM2 accelerator's own layouts, which bound their crossings
+# the same way, place on 3.0.14 as they are. (OpenROAD #8351, the closest report, was
+# closed on 16 July 2026 without a fix.)
+PNR_SDC = "chipleap_soc.pnr.sdc"
 PINS = "pins.cfg"
 # The step LibreLane's Classic flow runs after synthesis: the layout run resumes there.
 AFTER_SYNTHESIS = "Checker.YosysUnmappedCells"
@@ -568,6 +580,13 @@ class Prepared:
     views: dict[str, sram.SramViews]
 
 
+def pnr_sdc(accel_mhz: float, version: str | None = None) -> str:
+    """The constraints place and route works to: ``PNR_SDC`` on LibreLane 3.0.14 (for
+    ``version``, the one that runs by default) when the accelerator has a clock of its
+    own, else ``SDC``, which signoff always takes."""
+    return PNR_SDC if accel_mhz and librelane_from_3014(version) else SDC
+
+
 def config(
     sources: Sources, clock_mhz: float, accel_mhz: float = 0.0, version: str | None = None
 ) -> dict[str, Any]:
@@ -604,7 +623,7 @@ def config(
         # bit by bit (``netlist_problems``), and stops on any problem there.
         "ERROR_ON_SYNTH_CHECKS": False,
         **clocks,
-        "PNR_SDC_FILE": f"dir::{SDC}",
+        "PNR_SDC_FILE": f"dir::{pnr_sdc(accel_mhz, version)}",
         "SIGNOFF_SDC_FILE": f"dir::{SDC}",
         "PL_TARGET_DENSITY_PCT": 55,
         # No buffer between an output port and its net before the clock tree: X-HEEP's
@@ -859,8 +878,11 @@ def prepare(
     sources = Sources(tuple(files + ours), tuple(includes), plans, accel_banks)
     ports = soc.mcu_ports((tree / "hw/core-v-mini-mcu/core_v_mini_mcu.sv").read_text())
     accel_ns = round(1000.0 / accel, 3) if accel else 0.0
-    sdc = soc.sdc(ports, round(1000.0 / clock, 3), accel_ns, design.direct_memory)
-    builddir.write_text(work, SDC, sdc)
+    period = round(1000.0 / clock, 3)
+    builddir.write_text(work, SDC, soc.sdc(ports, period, accel_ns, design.direct_memory))
+    if pnr_sdc(accel, version) == PNR_SDC:
+        text = soc.sdc(ports, period, accel_ns, design.direct_memory, ignore_clock_latency=False)
+        builddir.write_text(work, PNR_SDC, text)
     # Behind the crossings the accelerator's macros are one level further down.
     under = f"{soc.ACCEL_INST}.{pnr.CDC_INSTANCE}" if accel else soc.ACCEL_INST
     instances = bank_instances(tree, plans) + [

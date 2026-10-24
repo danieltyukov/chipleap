@@ -652,7 +652,11 @@ EXTRA_CLOCKS = (
 
 
 def sdc(
-    ports: Sequence[Port], period_ns: float, accel_period_ns: float = 0.0, direct: bool = False
+    ports: Sequence[Port],
+    period_ns: float,
+    accel_period_ns: float = 0.0,
+    direct: bool = False,
+    ignore_clock_latency: bool = True,
 ) -> str:
     """Timing constraints for the SoC: clk_i at ``period_ns``, X-HEEP's other clocks
     (``EXTRA_CLOCKS``, those whose port the top has), all asynchronous to one another,
@@ -663,7 +667,10 @@ def sdc(
     accelerator's clock are its crossings and X-HEEP's side's into the memory ports, as
     ``chipleap.verify.pnr.two_clock_sdc`` bounds them: ``set_max_delay
     -ignore_clock_latency`` at the faster period both ways and no hold check, and that
-    clock in no ``set_clock_groups``, which in OpenSTA drops those bounds."""
+    clock in no ``set_clock_groups``, which in OpenSTA drops those bounds. Without
+    ``ignore_clock_latency`` the bounds count both clocks' latency, as the soc step's
+    place and route constraints on LibreLane 3.0.14 have them
+    (``chipleap.verify.soc.PNR_SDC``)."""
     from chipleap.rtl.pnr import io_lines
 
     names = {p.name for p in ports}
@@ -729,9 +736,13 @@ def sdc(
         lines += [
             "# Between X-HEEP's clock and the accelerator's every path is a crossing ChipLeap's",
             "# CDC step checked: its data path bounded by the faster period, no hold check.",
+        ]
+        if not ignore_clock_latency:
+            lines.append("# For place and route only: the bound counts both clocks' latency.")
+        flag = "-ignore_clock_latency " if ignore_clock_latency else ""
+        lines += [
             *(
-                f"set_max_delay -ignore_clock_latency {bound:g} -from [get_clocks {a}] "
-                f"-to [get_clocks {b}]"
+                f"set_max_delay {flag}{bound:g} -from [get_clocks {a}] -to [get_clocks {b}]"
                 for a, b in (("clk", ACCEL_CLOCK), (ACCEL_CLOCK, "clk"))
             ),
             *(
