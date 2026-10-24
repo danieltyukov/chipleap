@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import nullcontext
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -1010,14 +1011,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from chipleap.verify import launch
+
     parser = build_parser()
     args = parser.parse_args(argv)
-    try:
-        code: int = args.func(args)
-        return code
-    except (SpecError, DesignError, KeyError, ValueError) as exc:
-        msg = exc.args[0] if exc.args else str(exc)
-        print(f"chipleap: {msg}", file=sys.stderr)
-        return 2
-    except BrokenPipeError:
-        return 0
+    # SIGTERM and SIGHUP raise SystemExit for the whole command, so that every tool it
+    # started in a session of its own (IHP's DRC with KLayout, Yosys and ABC, the solvers,
+    # LibreLane) is stopped on the way out, as at a time limit or Ctrl-C. At their default
+    # they would end ChipLeap at once and leave those tools running. The MCP server stops
+    # its runs on them itself (launch.stop_on_exit).
+    with nullcontext() if args.func is cmd_mcp else launch.signals_raise():
+        try:
+            code: int = args.func(args)
+            return code
+        except (SpecError, DesignError, KeyError, ValueError) as exc:
+            msg = exc.args[0] if exc.args else str(exc)
+            print(f"chipleap: {msg}", file=sys.stderr)
+            return 2
+        except BrokenPipeError:
+            return 0
