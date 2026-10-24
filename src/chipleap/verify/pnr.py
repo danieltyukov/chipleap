@@ -474,21 +474,27 @@ def drc_plan(threads: int) -> tuple[int, int, int]:
 # cells in the SmolLM2 SoC's GDS, none in 3.0.0.dev44's), and IHP's deck in deep mode then
 # spends hours building connectivity across them in the nwell and nbulay tables, where a
 # whole table took about 9 minutes on dev44's GDS of the same geometry. So the deck runs on
-# a copy with those instances flattened into the top cell (``flat_vias``): a via cell is a
-# leaf instanced in the top whose shapes are all on the metal and via layers, with a cut
-# among them (GDS layer numbers below), which no standard cell or SRAM macro is, so the
-# macros keep the cell names their pin markers are set apart by. The delivered GDS is
-# unchanged.
+# a copy with those instances flattened into the top cell (``flat_vias``). A via cell is
+# chosen by what it holds, never by its name: a leaf instanced in the top whose shapes are
+# all on the metal, via and contact layers, with a cut among them (GDS layer numbers below),
+# and which is not one of the PDK's own cells (standard, IO and SRAM, PDK_CELL_PREFIXES) or
+# a cell ``held`` names. So the macros keep the cell names their pin markers are set apart
+# by. Only the via cells the flattening leaves unused are deleted; those inside the SRAM
+# macros stay. The delivered GDS is unchanged.
 VIA_CELL_LAYERS = (8, 10, 30, 50, 67, 126, 134)  # Metal1 to Metal5, TopMetal1 and 2
-VIA_CUT_LAYERS = (19, 29, 49, 66, 125, 133)  # Via1 to Via4, TopVia1 and 2
+VIA_CUT_LAYERS = (6, 19, 29, 49, 66, 125, 133)  # Cont, Via1 to Via4, TopVia1 and 2
+PDK_CELL_PREFIXES = ("sg13g2_", "RM_IHPSG13_")  # IHP's standard and IO cells, its SRAMs
 FLAT_VIAS_LOG = "flatvias.log"
 _FLAT_VIAS_PY = f"""\
+import json
 import sys
 import klayout.db as db
 
 CUTS = set({VIA_CUT_LAYERS!r})
 LAYERS = set({VIA_CELL_LAYERS!r}) | CUTS
-src, dst, name = sys.argv[1:4]
+PREFIXES = {PDK_CELL_PREFIXES!r}
+src, dst, name, kept = sys.argv[1:5]
+KEEP = set(json.load(open(kept)))
 ly = db.Layout()
 ly.read(src)
 top = ly.cell(name)
@@ -499,6 +505,8 @@ number = {{li: ly.get_info(li).layer for li in ly.layer_indexes()}}
 
 def is_via(cell):
     if cell.child_cells() or cell.cell_index() == top.cell_index():
+        return False
+    if cell.name in KEEP or cell.name.startswith(PREFIXES):
         return False
     used = {{number[li] for li in ly.layer_indexes() if not cell.shapes(li).is_empty()}}
     return bool(used & CUTS) and used <= LAYERS
@@ -528,10 +536,13 @@ print(f"flattened {{n}} instances of {{len(vias)}} via cells into {{name}}, whic
 
 
 @contextmanager
-def flat_vias(gds: Path, top: str, out: Path, timeout: float) -> Iterator[Path]:
+def flat_vias(
+    gds: Path, top: str, out: Path, timeout: float, keep: Iterable[str] = ()
+) -> Iterator[Path]:
     """``gds`` with every instance of a via cell in the cell ``top`` flattened into it (see
     VIA_CELL_LAYERS), in a private directory while the context lasts; the run's log in
-    ``out/FLAT_VIAS_LOG``. KLayout's own Python does it, the one IHP's runners use."""
+    ``out/FLAT_VIAS_LOG``. A cell ``keep`` names is never a via cell. KLayout's own Python
+    does it, the one IHP's runners use, all instances in one flattening."""
     from chipleap.chip.run import ToolError, private_dir, python_with_klayout, run
 
     found = python_with_klayout()
@@ -544,7 +555,8 @@ def flat_vias(gds: Path, top: str, out: Path, timeout: float) -> Iterator[Path]:
     with private_dir("chipleap-flatvias-") as tmp:
         shutil.copyfile(gds, tmp / "in.gds")
         (tmp / "flatvias.py").write_text(_FLAT_VIAS_PY)
-        cmd = [python, str(tmp / "flatvias.py"), "in.gds", "layout.gds", top]
+        (tmp / "keep.json").write_text(json.dumps(sorted(set(keep))))
+        cmd = [python, str(tmp / "flatvias.py"), "in.gds", "layout.gds", top, "keep.json"]
         try:
             code, log = run(
                 cmd,
@@ -623,7 +635,8 @@ def ihp_drc(
         return build
 
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", timeout_s))
-    with flat_vias(gds, top, out, limit) as flat:
+    macros = {c for inner, outer in held.items() for c in (inner, *outer)}
+    with flat_vias(gds, top, out, limit, macros) as flat:
         try:
             runs = ihp_runs(
                 pdk,

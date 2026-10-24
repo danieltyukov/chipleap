@@ -215,7 +215,7 @@ FLAT_VIAS = P.flat_vias
 @pytest.fixture(autouse=True)
 def _vias_as_they_are(monkeypatch):
     """The deck's tests stand in for KLayout; the vias' flattening has a test of its own."""
-    monkeypatch.setattr(P, "flat_vias", lambda gds, top, out, timeout: nullcontext(gds))
+    monkeypatch.setattr(P, "flat_vias", lambda gds, top, out, timeout, keep=(): nullcontext(gds))
 
 
 def test_the_deck_reads_a_copy_with_the_vias_flattened(tmp_path, monkeypatch):
@@ -225,15 +225,17 @@ def test_the_deck_reads_a_copy_with_the_vias_flattened(tmp_path, monkeypatch):
     calls: list = []
 
     @contextmanager
-    def flat(gds, top, out, timeout):
-        calls.append((gds, top, out, timeout))
+    def flat(gds, top, out, timeout, keep=()):
+        calls.append((gds, top, out, timeout, sorted(keep)))
         yield tmp_path / "flat.gds"
 
     _runs(monkeypatch, 0, [], seen)
     monkeypatch.setattr(P, "flat_vias", flat)
     P.with_ihp_drc(ROUTED, _pdk(tmp_path), "top", tmp_path, HELD)
     assert seen["inputs"] == {"layout.gds": tmp_path / "flat.gds"}
-    assert calls == [(Path("x.gds"), "top", tmp_path.resolve() / P.DRC_DIR, 10800.0)]
+    # The macros' cells, both the held ones and the macros holding them, are never vias.
+    macros = ["RM_IHPSG13_1P_1024x32_c2_bm_bist", "RM_IHPSG13_1P_BLDRV"]
+    assert calls == [(Path("x.gds"), "top", tmp_path.resolve() / P.DRC_DIR, 10800.0, macros)]
 
 
 _GDS = """\
@@ -259,12 +261,24 @@ for n in ((1, 0), (8, 0), (19, 0), (10, 0)):
     sram.shapes(L[n]).insert(box)
 wrap = ly.create_cell("wrap")  # not a leaf: kept, and its via with it
 wrap.insert(db.CellInstArray(via.cell_index(), db.Trans(db.Point(500, 0))))
+cont = ly.create_cell("Cont_M1")  # a via on Cont and Metal1 alone
+for n in ((6, 0), (8, 0)):
+    cont.shapes(L[n]).insert(box)
+named = []  # named like vias, made like vias, but cells to keep: by keep and by prefix
+for name in ("VIA_Via1_held", "sg13g2_via_tap"):
+    c = ly.create_cell(name)
+    for n in ((8, 0), (19, 0), (10, 0)):
+        c.shapes(L[n]).insert(box)
+    named.append(c)
+active = ly.create_cell("VIA_M1_Activ")  # named like a via, with Activ: a cell
+for n in ((1, 0), (6, 0), (8, 0)):
+    active.shapes(L[n]).insert(box)
 t = db.Trans
 top.insert(db.CellInstArray(via.cell_index(), t(db.Point(1000, 0))))
 top.insert(db.CellInstArray(via.cell_index(), t(db.Point(0, 2000)), db.Vector(200, 0),
                             db.Vector(0, 200), 2, 2))
 top.insert(db.CellInstArray(alone.cell_index(), t(1, False, db.Point(3000, 0))))
-for c in (inv, sram, wrap):
+for c in (inv, sram, wrap, cont, *named, active):
     top.insert(db.CellInstArray(c.cell_index(), t(db.Point(5000, 0))))
 ly.write(sys.argv[1])
 """
@@ -301,17 +315,19 @@ def test_via_cells_in_the_top_are_flattened_and_every_other_cell_kept(tmp_path):
     subprocess.run([python, str(tmp_path / "make.py"), str(tmp_path / "in.gds")], check=True)
     out = tmp_path / "drc"
     out.mkdir()
-    with FLAT_VIAS(tmp_path / "in.gds", "top", out, 60) as flat:
+    with FLAT_VIAS(tmp_path / "in.gds", "top", out, 60, ["VIA_Via1_held"]) as flat:
         read = subprocess.run(
             [python, str(tmp_path / "read.py"), str(flat)], check=True, capture_output=True
         )
     data = json.loads(read.stdout)
-    assert data["top_insts"] == ["RM_IHPSG13_1P_X", "sg13g2_inv_1", "wrap"]
+    kept = ["RM_IHPSG13_1P_X", "VIA_M1_Activ", "VIA_Via1_held", "sg13g2_inv_1"]
+    kept += ["sg13g2_via_tap", "wrap"]
+    assert data["top_insts"] == sorted(kept)
     assert data["top_cuts"] == 6 and data["pins"] == 5  # 1 + 2 x 2 + 1 vias; 5 with pins
-    # Via1_YX is gone with its only instance; via1_2_SoC stays for wrap's instance.
-    assert data["cells"] == ["RM_IHPSG13_1P_X", "sg13g2_inv_1", "top", "via1_2_SoC", "wrap"]
+    # Via1_YX and Cont_M1 are gone with their only instances; via1_2_SoC stays for wrap's.
+    assert data["cells"] == sorted([*kept, "top", "via1_2_SoC"])
     assert (
-        "flattened 6 instances of 2 via cells into top, which keeps 3"
+        "flattened 7 instances of 3 via cells into top, which keeps 6"
         in (out / P.FLAT_VIAS_LOG).read_text()
     )
     assert (tmp_path / "in.gds").is_file()  # the delivered GDS is left as it was
