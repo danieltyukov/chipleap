@@ -2,6 +2,7 @@
 
 ChipLeap's verification and implementation steps run on any Verilog or SystemVerilog design, not only on the accelerators it generates. A project file, `project.yaml`, names the sources, the top module, the clocks and resets, the technology and the cocotb tests. `chipleap verify` then lints, simulates, measures coverage, proves the design's properties, checks its clock and reset domain crossings, synthesizes, shows the netlist equal to the RTL and, when asked, places and routes it on IHP SG13G2 and runs the tests again on the routed netlist with its delays.
 
+<!-- GAP: plan B. lint to formal below are from a laptop, cdc to equiv from DelftBlue (examples/uart without its dft line); gls waits for the gate-level run. -->
 ```text
 $ chipleap project init path/to/rtl
 Wrote path/to/rtl/project.yaml
@@ -13,13 +14,13 @@ Wrote path/to/rtl/project.yaml
 $ chipleap verify path/to/rtl --steps all
 lint     PASS     Verilator -Wall and slang -Wextra report no warnings
 sim      PASS     Icarus 13.0: 5 of 5 cocotb tests pass
-coverage PASS     line 83.3% (10/12), branch 100.0% (28/28), toggle 100.0% (176/176) over 3 files (5 tests); 2 points never reached, 0 newly reached since the last run
+coverage PASS     line 83.3% (10/12), branch 100.0% (28/28), toggle 100.0% (176/176) over 3 files (5 tests); 2 points never reached
 formal   PASS     prove (prove, abc pdr): every assertion holds
 cdc      PASS     domains clk_i (47 flip-flops): 1 crossing, synchronized; 1 warning
 synth    PASS     0.0041 mm2 of standard cells on IHP SG13G2 130 nm (open PDK) (221 cells, 51 flip-flops); critical path 1.01 ns, about 684 MHz at the typical corner, within the 100 MHz clock on clk_i
-pnr      PASS     placed and routed on IHP SG13G2: 0.0084 mm2 core at 74% utilisation, 326 cells; 100 MHz on clk_i met at the slow corner (about 227 MHz, and about 310 MHz at the typical one); DRC, LVS and antenna clean
-equiv    PASS     rtl-synth: proved 74 of 75 points; the other 1 (u_rx.state_q[2]) equal for 40 cycles from reset, not proved for every cycle; synth-pnr: proved, all 745 matched points equal
-gls      PASS     routed netlist with SDF at nom_typ_1p20V_25C (typ delays): Icarus 13.0: 5 of 5 cocotb tests pass
+pnr      PASS     placed and routed on IHP SG13G2: 0.0084 mm2 core at 74% utilisation, 330 cells; 100 MHz on clk_i met at the slow corner (about 243 MHz, and about 288 MHz at the typical one); DRC, LVS and antenna clean, IHP's antenna deck included, no slew or capacitance violations
+equiv    PASS     rtl-synth: proved 74 of 75 points; the other 1 (u_rx.state_q[2]) equal for 40 cycles from reset, not proved for every cycle; synth-pnr: proved, all 747 matched points equal
+gls      [gap: gate-level run]
 ```
 
 [examples/uart](../examples/uart) is a complete project: a UART with cocotb tests and a Python reference model.
@@ -210,7 +211,7 @@ A reset synchronizer is recognized and accepted. Findings name the source and de
 
 **Place and route.** The LibreLane configuration comes from the project, with the same signoff settings as the accelerator's ([verification.md](verification.md#place-and-route)): optimisation at the slow corner, repair after global routing, antenna repair before and after it, a diode beside each sink of each input port (`DIODE_ON_PORTS`, which `pnr.librelane` can set to `none`), IHP's KLayout rule deck, and IHP's antenna deck on the finished GDS ([verification.md](verification.md#place-and-route)); an ECO's result runs the antenna deck too. The setup margins the repairs aim for scale with the clock: 8 % and 16 % of the period, at most 0.8 and 1.6 ns. The constraints follow LibreLane's base SDC (input and output delays of 20 % of the period, the PDK's driving cell and load, clock uncertainty and transition) for every clock in the project, with inputs and outputs timed against the first. Designs with several clocks that are unrelated, or with special timing, should give their own SDC under `constraints.sdc`. The GDS is in `build/pnr/runs/chipleap/final/gds/`.
 
-On this release `examples/uart` without scan chains routes in about six minutes, almost all of it LibreLane: a 104 x 123 um die, 5.7 ns of setup slack at the slow corner and 0.12 ns of hold slack at the fast one, no DRC, LVS, antenna, slew or capacitance violations. With its `dft` section (below) it routes the scan netlist: 362 cells on a 0.0105 mm2 core, 5.95 ns of setup slack at the slow corner and 0.11 ns of hold slack, clean as well.
+On this release `examples/uart` without scan chains routes in about four minutes on 16 cores, almost all of it LibreLane: a 104 x 123 um die, 5.88 ns of setup slack at the slow corner and 0.11 ns of hold slack at the fast one, no DRC, LVS, antenna, slew or capacitance violations. With its `dft` section (below) it routes the scan netlist: 362 cells on a 0.0105 mm2 core, 5.95 ns of setup slack at the slow corner and 0.11 ns of hold slack, clean as well. Both routed on 16 cores of DelftBlue, TU Delft's supercomputer (Delft High Performance Computing Centre (DHPC), DelftBlue Supercomputer (Phase 2), 2024, https://www.tudelft.nl/dhpc/ark:/44463/DelftBluePhase2).
 
 **Equivalence.** Two pairs, each a question a tape-out asks. `rtl-synth`: does ChipLeap's synthesized netlist implement the RTL? The RTL is synthesized to generic gates by the same Yosys commands as synthesis, up to the mapping to the liberty's cells, and compared with the mapped netlist. `synth-pnr`: did place and route change the logic? LibreLane's own synthesized netlist (it synthesizes again, so its netlist is where routing started) against its final one, from the routed run in `build/pnr` (the ECO's final netlist when there is a current ECO), each read as ChipLeap recorded it; without a routed run the pair is left out, and a routed run ChipLeap did not record is skipped with the reason. Both sides read the liberty, which turns each cell into its logic, and `async2sync` models asynchronous resets for the solvers. Yosys's `equiv_make`, `equiv_simple` and `equiv_induct` match signals by name and prove them equal by induction. What induction leaves (usually a register stored inverted, as a flip-flop that resets to 1 is on a library with only resetting flip-flops) is compared from reset for `equivalence.depth` cycles on a miter by Yosys's SAT solver: a difference there is real and comes back as a counterexample from reset, and none means equal for that many cycles, which the result says rather than calling it proved. On the UART, 74 of 75 points of `rtl-synth` are proved and the last is equal for 40 cycles; `synth-pnr` proves every matched point (745 in the run above). The chain has a gap: the RTL is not compared with LibreLane's own synthesized netlist, whose registers have other names, so name matching finds only the outputs and nothing is proved beyond a bound; closing it needs register correspondence by structure, or place and route started from ChipLeap's netlist.
 
