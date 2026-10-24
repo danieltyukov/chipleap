@@ -107,7 +107,7 @@ def run(
         _registered(stop),
         _one_run_in(cwd),
         _labelling_docker(cwd, run_id, env) as run_env,
-        _signals_raise(),
+        signals_raise(),
         log.open("w") as fh,
     ):
         # No stdin. Given a terminal, a wrapper adds `docker run -t`, and the client
@@ -304,10 +304,12 @@ def _restore(previous: dict[signal.Signals, _Handler]) -> None:
 
 
 @contextmanager
-def _signals_raise() -> Iterator[None]:
-    """While the run is going, SIGTERM and SIGHUP raise SystemExit instead of ending
-    ChipLeap on the spot, so that the run is stopped first. Signals set to be ignored,
-    such as SIGHUP under nohup, stay ignored."""
+def signals_raise() -> Iterator[None]:
+    """In this block SIGTERM and SIGHUP raise SystemExit instead of ending ChipLeap on the
+    spot, so that a run, or any tool started in a session of its own, is stopped first, on
+    the way out. The CLI holds it for the whole command. Signals set to be ignored, such as
+    SIGHUP under nohup, stay ignored, and signals already handled keep their handler. Only
+    the main thread can take signals; elsewhere it does nothing."""
 
     def end(signum: int, frame: FrameType | None) -> None:
         raise SystemExit(128 + signum)
