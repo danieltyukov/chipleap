@@ -724,13 +724,14 @@ def test_the_socs_clock_terms_are_measured_from_its_routed_paths(monkeypatch):
 
 
 def test_the_soc_takes_its_settings_from_the_librelane_that_runs(monkeypatch):
-    """The version LibreLane reports, else the tag of the image ChipLeap asks a container
-    wrapper for; a version read neither way takes 3.0.14's settings, as the default."""
+    """The version LibreLane reports, else the tag of the image ChipLeap asks a wrapper for
+    (``tools.librelane``); a version read neither way takes 3.0.14's settings, as the
+    default, and place and route refuses to start it."""
     from chipleap.verify import tools
 
     def ran(version: str, image: str | None) -> tuple[str, bool]:
         tool = tools.Tool("librelane", "/usr/bin/librelane", version, "layout")
-        monkeypatch.setattr(soc_step, "librelane", lambda: tool)
+        monkeypatch.setattr(tools, "find", lambda *args, **kwargs: tool)
         if image is None:
             monkeypatch.delenv(tools.LIBRELANE_IMAGE_ENV, raising=False)
         else:

@@ -46,11 +46,11 @@ from chipleap.rtl import builddir
 from chipleap.verify import pnr
 from chipleap.verify.drc import pdk_cells
 from chipleap.verify.tools import (
+    UNKNOWN_VERSION,
     Tool,
     clean_env,
     fusesoc,
     librelane,
-    librelane_image,
     librelane_version_key,
     riscv_gcc,
 )
@@ -444,20 +444,17 @@ FROM_3014 = (3, 0, 14, 2, 0)
 
 
 def librelane_version() -> str:
-    """The version of the LibreLane that runs, else, when it cannot be read (a container
-    wrapper ChipLeap does not ask), the tag of the image ChipLeap asks it for
-    (``librelane_image``)."""
-    version = librelane().version
-    if librelane_version_key(version) == (0, 0, 0, 0, 0):
-        version = librelane_image().rpartition(":")[2] or version
-    return version
+    """The version of the LibreLane that runs: the one it reports, else the tag of the image
+    ChipLeap asks a wrapper for (``chipleap.verify.tools.librelane``)."""
+    return librelane().version
 
 
 def librelane_from_3014(version: str | None = None) -> bool:
     """Whether LibreLane ``version`` (``librelane_version``, by default) takes 3.0.14's
-    settings; a version ChipLeap cannot read does, as the LibreLane it runs by default."""
+    settings; a version ChipLeap cannot read does, as the LibreLane it runs by default,
+    and place and route then refuses to start it (``pnr.for_librelane``)."""
     key = librelane_version_key(librelane_version() if version is None else version)
-    return key == (0, 0, 0, 0, 0) or key >= FROM_3014
+    return key == UNKNOWN_VERSION or key >= FROM_3014
 
 
 # The estimated setup slack the repairs keep after CTS and after global routing
