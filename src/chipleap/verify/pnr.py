@@ -432,16 +432,22 @@ ANTENNA_DIR = "antenna"  # beside the run: IHP's antenna deck's report and log
 
 
 def with_ihp_antenna(
-    r: PnrResult, pdk: Path | None, top: str, work: Path, name: str = ANTENNA_DIR
+    r: PnrResult,
+    pdk: Path | None,
+    top: str,
+    work: Path,
+    name: str = ANTENNA_DIR,
+    timeout_s: float = 10800,
 ) -> PnrResult:
     """``r`` with IHP's antenna deck run on its GDS (``chipleap.verify.antenna``), its
     report in ``work/name`` (emptied first), or with why it could not run here. A run of
-    the deck that did not finish fails the step."""
+    the deck that did not finish fails the step. ``CHIPLEAP_PNR_TIMEOUT`` (seconds)
+    bounds it, ``timeout_s`` when it is unset, as for LibreLane (``run_librelane``)."""
     why = "the run left no GDS" if r.gds is None else antenna.unavailable(pdk)
     if why or pdk is None or r.gds is None:
         return replace(r, ihp_antenna_skipped=why)
     out = builddir.work_dir(work, name, empty=True)
-    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", timeout_s))
     try:
         return replace(r, ihp_antenna=antenna.check(pdk, r.gds, top, out, limit))
     except antenna.AntennaError as exc:
@@ -463,7 +469,12 @@ def drc_plan(threads: int) -> tuple[int, int, int]:
 
 
 def ihp_drc(
-    pdk: Path, gds: Path, top: str, out: Path, held: Mapping[str, tuple[str, ...]]
+    pdk: Path,
+    gds: Path,
+    top: str,
+    out: Path,
+    held: Mapping[str, tuple[str, ...]],
+    timeout_s: float = 10800,
 ) -> DrcResult:
     """IHP's DRC deck (IHP-Open-PDK's ``run_drc.py``) on ``gds``, with density off, as
     LibreLane checks a block, and recommended rules off, as the chip step and LibreLane
@@ -515,7 +526,7 @@ def ihp_drc(
 
         return build
 
-    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", timeout_s))
     try:
         runs = ihp_runs(
             pdk,
@@ -624,18 +635,20 @@ def with_ihp_drc(
     work: Path,
     held: Mapping[str, tuple[str, ...]],
     name: str = DRC_DIR,
+    timeout_s: float = 10800,
 ) -> PnrResult:
     """``r``, from a run with LibreLane's KLayout DRC off, with IHP's DRC deck run on its
     GDS (``ihp_drc``, its reports in ``work/name``): its violations added to the DRC count
     and the PDK macros' off-grid pin markers set apart. Signoff needs it, so a deck that
-    cannot run here is an error, not a skipped check."""
+    cannot run here is an error, not a skipped check. ``CHIPLEAP_PNR_TIMEOUT`` (seconds)
+    bounds it, ``timeout_s`` when it is unset."""
     if r.gds is None:
         raise PnrError("the run left no GDS for IHP's DRC")
     why = antenna.unavailable(pdk)
     if why or pdk is None:
         raise PnrError(f"IHP's DRC cannot run: {why}")
     out = builddir.work_dir(work, name, empty=True)
-    result = ihp_drc(pdk, r.gds, top, out, held)
+    result = ihp_drc(pdk, r.gds, top, out, held, timeout_s)
     return replace(
         r,
         drc_errors=r.drc_errors + result.total,

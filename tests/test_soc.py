@@ -788,6 +788,38 @@ def test_the_soc_takes_its_settings_from_the_librelane_that_runs(monkeypatch):
     assert ran("container wrapper", "") == ("container wrapper", True)
 
 
+def test_the_socs_drc_and_antenna_decks_get_the_layouts_time_limit(tmp_path, monkeypatch):
+    """IHP's DRC on the SmolLM2 SoC ran 3 h, a block's limit, without finishing: the soc
+    step gives both decks its own layout's limit."""
+    from types import SimpleNamespace
+
+    from chipleap.rtl import pnr as rtl_pnr
+    from chipleap.verify import pnr
+
+    seen: dict[str, float] = {}
+    result = pnr.PnrResult(36.0, 1.0, 1.0, 1.0, 0.5, 10, 0.4, 1.0, 0.05, 0, 0, 0, 1.0, None)
+    monkeypatch.setattr(rtl_pnr, "check_merged", lambda *a: None)
+    monkeypatch.setattr(soc_step.sram, "catalog", lambda pdk: [])
+    monkeypatch.setattr(soc_step, "pdk_cells", lambda *a: {})
+    monkeypatch.setattr(soc_step, "model_areas_um2", lambda design: (0.0, 0.0))
+    monkeypatch.setattr(pnr, "parse_run", lambda *a: result)
+
+    def drc(r, *a, timeout_s=10800, **k):
+        seen["drc"] = timeout_s
+        return r
+
+    def ant(r, *a, timeout_s=10800, **k):
+        seen["antenna"] = timeout_s
+        return r
+
+    monkeypatch.setattr(pnr, "with_ihp_drc", drc)
+    monkeypatch.setattr(pnr, "with_ihp_antenna", ant)
+    design = SimpleNamespace(accel_mhz=0.0)
+    soc_step.routed(design, tmp_path, tmp_path, 36.0, (), 1.0, {}, None)  # type: ignore[arg-type]
+    assert seen == {"drc": soc_step.TIMEOUT_S, "antenna": soc_step.TIMEOUT_S}
+    assert soc_step.TIMEOUT_S > 10800
+
+
 def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
     """The SoC's repairs keep 2.0 and 3.0 ns of estimated setup slack from LibreLane 3.0.14
     on, 6 and 5 ns on 3.0.0.dev44 (#20's evidence), and 0.2 ns of hold after global

@@ -266,6 +266,28 @@ def test_the_deck_counts_its_violations_and_sets_the_macros_pin_markers_apart(
     assert ROUTED.ihp_drc_data() == {} and "IHP's" not in ROUTED.checks()
 
 
+def test_the_decks_time_limit_is_the_callers_unless_set(tmp_path, monkeypatch):
+    """A block's deck runs under 3 h, the SoC's under its own layout's limit (the soc step
+    passes it), and CHIPLEAP_PNR_TIMEOUT sets another for any."""
+    monkeypatch.setattr(antenna, "unavailable", lambda pdk: "")
+    monkeypatch.delenv("CHIPLEAP_PNR_TIMEOUT", raising=False)
+    pdk = _pdk(tmp_path)
+    limits: list[float] = []
+
+    def timed(pdk_, out_dir, inputs, decks, cmds, timeout):
+        limits.append(timeout)
+        return fake(pdk_, out_dir, inputs, decks, cmds, timeout)
+
+    _runs(monkeypatch, 0, [], {})
+    fake = chip_run.ihp_runs
+    monkeypatch.setattr(chip_run, "ihp_runs", timed)
+    P.with_ihp_drc(ROUTED, pdk, "top", tmp_path, HELD)
+    P.with_ihp_drc(ROUTED, pdk, "top", tmp_path, HELD, timeout_s=86400)
+    monkeypatch.setenv("CHIPLEAP_PNR_TIMEOUT", "600")
+    P.with_ihp_drc(ROUTED, pdk, "top", tmp_path, HELD, timeout_s=86400)
+    assert limits == [10800, 86400, 600.0]
+
+
 def test_too_few_threads_or_a_deck_that_cannot_split_run_the_extra_rules_whole(
     tmp_path, monkeypatch
 ):

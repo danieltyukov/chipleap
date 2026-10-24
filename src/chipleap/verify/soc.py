@@ -1059,6 +1059,8 @@ def routed(
             clocks={"clk": round(1000.0 / clock, 3), soc.ACCEL_CLOCK: round(1000.0 / accel, 3)},
             groups=pnr.group_slacks(run, ("clk", soc.ACCEL_CLOCK)),
         )
-    result = pnr.with_ihp_drc(result, pdk, soc.TOP, work, held)
-    result = pnr.with_ihp_antenna(result, pdk, soc.TOP, work)
+    # The SoC's DRC and antenna decks take hours longer than a block's (IHP's DRC ran 3 h
+    # on the SmolLM2 SoC without finishing), so they get the layout's own limit.
+    result = pnr.with_ihp_drc(result, pdk, soc.TOP, work, held, timeout_s=TIMEOUT_S)
+    result = pnr.with_ihp_antenna(result, pdk, soc.TOP, work, timeout_s=TIMEOUT_S)
     return SocResult(result, placed, *model_areas_um2(design))
