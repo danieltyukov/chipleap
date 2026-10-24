@@ -657,7 +657,6 @@ def sdc(
     accel_period_ns: float = 0.0,
     direct: bool = False,
     ignore_clock_latency: bool = True,
-    slew_ns: float | None = None,
 ) -> str:
     """Timing constraints for the SoC: clk_i at ``period_ns``, X-HEEP's other clocks
     (``EXTRA_CLOCKS``, those whose port the top has), all asynchronous to one another,
@@ -671,8 +670,7 @@ def sdc(
     clock in no ``set_clock_groups``, which in OpenSTA drops those bounds. Without
     ``ignore_clock_latency`` the bounds count both clocks' latency, as the soc step's
     place and route constraints on LibreLane 3.0.14 have them
-    (``chipleap.verify.soc.PNR_SDC``). ``slew_ns`` adds a design-wide slew target, those
-    constraints' too."""
+    (``chipleap.verify.soc.PNR_SDC``)."""
     from chipleap.rtl.pnr import io_lines
 
     names = {p.name for p in ports}
@@ -751,10 +749,5 @@ def sdc(
                 f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]"
                 for a, b in (("clk", ACCEL_CLOCK), (ACCEL_CLOCK, "clk"))
             ),
-        ]
-    if slew_ns is not None:
-        lines += [
-            "# A slew target for repair under the SRAM macros' input limit.",
-            f"set_max_transition {slew_ns:g} [current_design]",
         ]
     return "\n".join(lines) + "\n"

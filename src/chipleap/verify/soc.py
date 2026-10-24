@@ -431,12 +431,9 @@ def pin_order(inputs: int, outputs: int, fp: place.Floorplan, heights: dict[str,
 # The layout of the SoC takes 6 to 10 hours on 22 cores, most of it in detailed routing.
 TIMEOUT_S = 86400
 SDC = "chipleap_soc.sdc"
-# Place and route's constraints on LibreLane 3.0.14 (``pnr_sdc``): SDC with the macros' slew
-# target (``chipleap.verify.pnr.MACRO_PNR_SLEW_NS``) and, when the accelerator has a clock of
-# its own, the crossings' bounds counting both clocks' latency; signoff keeps SDC. The slew
-# target, because IHP's SRAM inputs allow 0.595 ns and 3.0.14's repair holds a net to its
-# driver's 2.5 ns: two SoC layouts at 36 MHz ended with the same 8 or 9 bank inputs over
-# (bank_m7's A_WEN at 0.849 ns), where dev44 had none. 3.0.14's OpenROAD (dcf3613) segfaults in the SoC's timing-driven global
+# Place and route's constraints on LibreLane 3.0.14 when the accelerator has a clock of its
+# own (``pnr_sdc``): SDC with the crossings' bounds counting both clocks' latency; signoff
+# keeps SDC. 3.0.14's OpenROAD (dcf3613) segfaults in the SoC's timing-driven global
 # placement: the rebuffering after each timing-driven pass (``Resizer::findResizeSlacks``,
 # which always runs ``fullyRebuffer`` before routing) ends in OpenSTA's
 # ``Search::pathClkPathArrival``, which it reaches only for a path delay set with
@@ -594,10 +591,11 @@ class Prepared:
     views: dict[str, sram.SramViews]
 
 
-def pnr_sdc(version: str | None = None) -> str:
+def pnr_sdc(accel_mhz: float, version: str | None = None) -> str:
     """The constraints place and route works to: ``PNR_SDC`` on LibreLane 3.0.14 (for
-    ``version``, the one that runs by default), else ``SDC``, which signoff always takes."""
-    return PNR_SDC if librelane_from_3014(version) else SDC
+    ``version``, the one that runs by default) when the accelerator has a clock of its
+    own, else ``SDC``, which signoff always takes."""
+    return PNR_SDC if accel_mhz and librelane_from_3014(version) else SDC
 
 
 def config(
@@ -636,7 +634,7 @@ def config(
         # bit by bit (``netlist_problems``), and stops on any problem there.
         "ERROR_ON_SYNTH_CHECKS": False,
         **clocks,
-        "PNR_SDC_FILE": f"dir::{pnr_sdc(version)}",
+        "PNR_SDC_FILE": f"dir::{pnr_sdc(accel_mhz, version)}",
         "SIGNOFF_SDC_FILE": f"dir::{SDC}",
         "PL_TARGET_DENSITY_PCT": 55,
         # No buffer between an output port and its net before the clock tree: X-HEEP's
@@ -799,6 +797,40 @@ def output_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> list[
     return out
 
 
+# The SRAM inputs a buffer goes beside (``input_buffers``): address, data, mask and the
+# read, write and enable controls. The clock pin has its own (``clock_pin_buffers``), and
+# the BIST inputs and A_DLY are tied off.
+INPUT_PINS = ("A_ADDR[", "A_DIN[", "A_BM[", "A_REN", "A_WEN", "A_MEN")
+INPUT_BUFFER = "sg13g2_buf_2"
+
+
+def input_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> list[dict[str, Any]]:
+    """LibreLane's ``INSERT_ECO_BUFFERS``: a buffer (``INPUT_BUFFER``) before each of the
+    SRAM inputs ``INPUT_PINS`` names, on every SRAM macro in the SoC (``views`` by
+    instance), placed just off the macro's edge beside the pin.
+
+    IHP's SRAM inputs allow 0.595 ns of slew at the slow corner, and 3.0.14's repair holds
+    a net to its driver's limit, 2.5 ns, not to its loads'. In two SoC layouts 8 and 9 of
+    X-HEEP's bank inputs ended over the macros' limit (``bank_m7/A_WEN`` at 0.849 ns), and
+    a design-wide target of 0.3 ns for place and route left one over (a timing-driven
+    placement buffer of size 1 driving 298 um of Metal3 into ``abuf_s1_m0/A_DIN[19]``:
+    0.508 ns after global routing, 0.651 ns routed) while it added 20,493 cells and cost
+    0.45 ns of setup. With a buffer beside each pin, the macro's input sees a few um of
+    wire from a buffer, and the long wire ends at a standard cell's input."""
+    out: list[dict[str, Any]] = []
+    for p in fp.macros:
+        view = views[p.instance]
+        for mp in view.pins:
+            if not mp.name.startswith(INPUT_PINS) or mp.direction != "input":
+                continue
+            at = _pin_at(p, view, mp.name)
+            if at is not None:
+                out.append(_beside(p, view, mp.name, at, INPUT_BUFFER))
+    if fp.macros and not out:
+        raise SocError("the SoC's SRAM macros have no address, data or control inputs")
+    return out
+
+
 def with_floorplan(
     cfg: dict[str, Any],
     prep: Prepared,
@@ -808,10 +840,10 @@ def with_floorplan(
 ) -> tuple[dict[str, Any], place.Floorplan]:
     """``cfg`` with a floorplan for ``cell_um2`` of standard cells: the die, the macros
     where ChipLeap puts them, their power grid (``pdn.tcl``) and the buffers beside the
-    accelerator's macros' clock pins (``clock_pin_buffers``), and beside every SRAM
-    output (``output_buffers``) from LibreLane 3.0.14 on (``librelane_from_3014`` for
+    accelerator's macros' clock pins (``clock_pin_buffers``), beside every SRAM output
+    (``output_buffers``) from LibreLane 3.0.14 on (``librelane_from_3014`` for
     ``version``, the one that runs by default) or when a trial run asks for them
-    (``trial_buffers``)."""
+    (``trial_buffers``), and beside every SRAM input from 3.0.14 on (``input_buffers``)."""
     trial = trial_buffers()
     outputs = BANK_OUTPUTS in trial or librelane_from_3014(version)
     fp = floorplan(prep.instances, prep.views, cell_um2)
@@ -836,6 +868,7 @@ def with_floorplan(
         "INSERT_ECO_BUFFERS": [
             *clock_pin_buffers(fp, by_instance),
             *(output_buffers(fp, by_instance) if outputs else []),
+            *(input_buffers(fp, by_instance) if librelane_from_3014(version) else []),
         ],
     }
     netlists = sorted((work / "runs" / "chipleap").glob("*-yosys-synthesis/*.nl.v"))
@@ -893,15 +926,8 @@ def prepare(
     accel_ns = round(1000.0 / accel, 3) if accel else 0.0
     period = round(1000.0 / clock, 3)
     builddir.write_text(work, SDC, soc.sdc(ports, period, accel_ns, design.direct_memory))
-    if pnr_sdc(version) == PNR_SDC:
-        text = soc.sdc(
-            ports,
-            period,
-            accel_ns,
-            design.direct_memory,
-            ignore_clock_latency=False,
-            slew_ns=pnr.MACRO_PNR_SLEW_NS,
-        )
+    if pnr_sdc(accel, version) == PNR_SDC:
+        text = soc.sdc(ports, period, accel_ns, design.direct_memory, ignore_clock_latency=False)
         builddir.write_text(work, PNR_SDC, text)
     # Behind the crossings the accelerator's macros are one level further down.
     under = f"{soc.ACCEL_INST}.{pnr.CDC_INSTANCE}" if accel else soc.ACCEL_INST
