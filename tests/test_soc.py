@@ -804,9 +804,8 @@ def test_the_layout_is_one_run_after_synthesis_without_the_gates_buffers(tmp_pat
         else:
             monkeypatch.setenv(soc_step.BUFFERS_ENV, value)
         assert soc_step.layout(tmp_path, full, "3.0.0.dev44") == ({"done": 1}, None)
-        assert calls == [
-            (full, {"resume_from": soc_step.AFTER_SYNTHESIS, "timeout_s": soc_step.TIMEOUT_S})
-        ]
+        kw = {"resume_from": soc_step.AFTER_SYNTHESIS, "timeout_s": soc_step.TIMEOUT_S}
+        assert calls == [(full, {**kw, "late_antenna_repair": False})]
         calls.clear()
         soc_step.layout(tmp_path, full, "3.0.14")
         assert calls[0][1]["late_antenna_repair"] is True
@@ -857,6 +856,7 @@ def test_the_layout_stops_after_the_clock_tree_to_buffer_the_gates(tmp_path, mon
         "resume_from": soc_step.AFTER_SYNTHESIS,
         "to": soc_step.CTS,
         "timeout_s": soc_step.TIMEOUT_S,
+        "late_antenna_repair": False,
     }
     assert calls[1][1]["resume_from"] == soc_step.ECO_BUFFERS and "to" not in calls[1][1]
     eco = calls[1][0]["INSERT_ECO_BUFFERS"]

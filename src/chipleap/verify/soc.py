@@ -960,12 +960,19 @@ def layout(
     # check in the dev44 layout with buffers after the banks' outputs, a buffer's output
     # on Metal2, was at 1.06 of its limit after global routing and 1.27 after routing.
     # #20's evidence (dev44) was routed without it, and dev44 keeps that.
-    late = {"late_antenna_repair": True} if librelane_from_3014(version) else {}
+    late = librelane_from_3014(version)
     if GATES not in trial_buffers():
         return pnr.run_librelane(
-            work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S, **late
+            work, full, resume_from=AFTER_SYNTHESIS, timeout_s=TIMEOUT_S, late_antenna_repair=late
         )
-    pnr.run_librelane(work, full, resume_from=AFTER_SYNTHESIS, to=CTS, timeout_s=TIMEOUT_S, **late)
+    pnr.run_librelane(
+        work,
+        full,
+        resume_from=AFTER_SYNTHESIS,
+        to=CTS,
+        timeout_s=TIMEOUT_S,
+        late_antenna_repair=late,
+    )
     run = work / "runs" / "chipleap"
     state = pnr.step_state(run, CTS)
     if state is None:
@@ -978,7 +985,9 @@ def layout(
         raise SocError("LibreLane's state after the clock tree names no DEF in its run")
     gates = clock_gates(def_path.read_text(errors="replace"))
     full = {**full, "INSERT_ECO_BUFFERS": [*full["INSERT_ECO_BUFFERS"], *gate_buffers(gates)]}
-    return pnr.run_librelane(work, full, resume_from=ECO_BUFFERS, timeout_s=TIMEOUT_S, **late)
+    return pnr.run_librelane(
+        work, full, resume_from=ECO_BUFFERS, timeout_s=TIMEOUT_S, late_antenna_repair=late
+    )
 
 
 def routed(
