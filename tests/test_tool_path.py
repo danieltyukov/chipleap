@@ -276,6 +276,56 @@ def test_a_librelane_wrapper_starts_the_image_chipleap_names(monkeypatch, tmp_pa
         tools.librelane_ran(run)
 
 
+# LibreLane on a cluster: a wrapper that starts an Apptainer image, which ChipLeap asks for
+# its version (it is no Docker wrapper). Here Apptainer is not installed, so it says nothing.
+APPTAINER_WRAPPER = """#!/usr/bin/env bash
+# LibreLane from an Apptainer image: LIBRELANE_IMAGE picks the image.
+set -euo pipefail
+SIF=images/librelane-${LIBRELANE_IMAGE##*:}.sif
+exec apptainer exec --containall "$SIF" librelane "$@" 2>/dev/null
+"""
+
+
+def _librelane_script(tmp_path, monkeypatch, body):
+    tool = tmp_path / "librelane"
+    tool.write_text(body)
+    tool.chmod(0o755)
+    monkeypatch.setenv("CHIPLEAP_LIBRELANE", str(tool))
+    monkeypatch.delenv(librelane_pdk.ENV, raising=False)
+    monkeypatch.delenv(tools.LIBRELANE_IMAGE_ENV, raising=False)
+    monkeypatch.delenv("LIBRELANE_IMAGE", raising=False)
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["#!/bin/sh\n", "#!/bin/sh\nexec sleep 5\n", APPTAINER_WRAPPER],
+    ids=["no-output", "timed-out", "apptainer"],
+)
+def test_a_librelane_that_gives_no_version_is_the_images(tmp_path, monkeypatch, body):
+    """On 24 Oct 2026 a cluster's Apptainer wrapper did not answer --version within the
+    probe's 20 s on one of two jobs starting together, and that run's configuration went
+    without 3.0.14's settings. A LibreLane that gives no version, or none in time, is the
+    one the image ChipLeap asks the wrapper for."""
+    probe = tools.probe
+    monkeypatch.setattr(tools, "probe", lambda cmd, timeout=20, base=None: probe(cmd, 1, base))
+    _librelane_script(tmp_path, monkeypatch, body)
+    tool = tools.librelane()
+    assert tool.found and tool.version == "3.0.14"
+    assert tools.librelane_loads_pad_views()
+    monkeypatch.setenv(tools.LIBRELANE_IMAGE_ENV, "ghcr.io/librelane/librelane:3.0.0.dev44")
+    assert tools.librelane().version == "3.0.0.dev44"
+    # With no image named, or one without a version as its tag, the version is not known.
+    for image in ("", "ghcr.io/librelane/librelane:latest"):
+        monkeypatch.setenv(tools.LIBRELANE_IMAGE_ENV, image)
+        assert tools.librelane_version_key(tools.librelane().version) == tools.UNKNOWN_VERSION
+
+
+def test_the_version_librelane_gives_comes_before_the_images(tmp_path, monkeypatch):
+    """The image's tag stands in only for a version LibreLane does not give."""
+    _librelane_script(tmp_path, monkeypatch, '#!/bin/sh\necho "LibreLane v3.0.0.dev44"\n')
+    assert tools.librelane().version == "3.0.0.dev44"
+
+
 @pytest.mark.skipif(not confine.enabled(), reason="Landlock is not available")
 def test_a_confined_script_reads_the_interpreter_on_the_path_it_runs_with(tmp_path):
     # SymbiYosys runs with its own directory first on PATH; its "#!/usr/bin/env python3"
