@@ -584,6 +584,52 @@ def test_placement_is_timing_driven_as_on_dev44(tmp_path, monkeypatch, version, 
         assert written.get("PL_TIME_DRIVEN") == cfg.get("PL_TIME_DRIVEN"), name
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "#!/bin/sh\n",
+        "#!/bin/sh\nexec sleep 5\n",
+        "#!/usr/bin/env bash\n# LibreLane from an Apptainer image\n"
+        'exec apptainer exec "images/librelane.sif" librelane "$@" 2>/dev/null\n',
+    ],
+    ids=["no-output", "timed-out", "apptainer"],
+)
+def test_a_run_has_its_versions_settings_when_librelane_gives_no_version(
+    tmp_path, monkeypatch, body
+):
+    """A SoC layout on 24 Oct 2026 went without 3.0.14's PL_TIMING_DRIVEN and
+    KLAYOUT_DRC_DEFINES: its Apptainer wrapper had not answered --version within the
+    probe's time. The run takes the version of the image ChipLeap asks for."""
+    from chipleap.verify import tools
+
+    _fake_librelane(tmp_path, monkeypatch, _finishes({"timing__setup__ws": 0.5}), [])
+    (tmp_path / "librelane").write_text(body)
+    probe = tools.probe
+    monkeypatch.setattr(tools, "probe", lambda cmd, timeout=20, base=None: probe(cmd, 1, base))
+    monkeypatch.setenv(tools.LIBRELANE_IMAGE_ENV, "ghcr.io/librelane/librelane:3.0.14")
+    pnr.run_librelane(tmp_path / "pnr", {"KLAYOUT_DRC_THREADS": 4})
+    for name in ("config.json", pnr.MIN_AREA_CONFIG):
+        cfg = json.loads((tmp_path / "pnr" / name).read_text())
+        assert cfg.get("PL_TIMING_DRIVEN") is True, name
+        assert cfg.get("KLAYOUT_DRC_DEFINES") == {"threads": "4"}, name
+
+
+def test_a_run_of_a_librelane_whose_version_is_not_known_is_refused(tmp_path, monkeypatch):
+    """No version from LibreLane and no image to take one from: the run would go without
+    its version's settings, so it does not start."""
+    from chipleap.verify import tools
+
+    calls: list = []
+    _fake_librelane(tmp_path, monkeypatch, _finishes({"timing__setup__ws": 0.5}), calls)
+    monkeypatch.setenv(tools.LIBRELANE_IMAGE_ENV, "")
+    with pytest.raises(pnr.PnrError, match="cannot tell which LibreLane runs"):
+        pnr.run_librelane(tmp_path / "pnr", {})
+    assert not calls and not (tmp_path / "pnr" / "config.json").exists()
+    for version in ("", "container wrapper", "latest"):
+        with pytest.raises(ValueError, match="cannot tell which LibreLane runs"):
+            pnr.for_librelane({}, version)
+
+
 def test_a_group_without_paths_is_read(tmp_path, monkeypatch):
     """LibreLane writes a group with no path as Infinity, as for the memory chip's
     register-to-register paths."""

@@ -46,6 +46,8 @@ from chipleap.verify.drc import (
 )
 from chipleap.verify.synth import _sv2v
 from chipleap.verify.tools import (
+    LIBRELANE_IMAGE_ENV,
+    UNKNOWN_VERSION,
     librelane,
     librelane_env,
     librelane_ran,
@@ -744,8 +746,17 @@ TIMING_DRIVEN_KEYS = ("PL_TIMING_DRIVEN", "PL_TIME_DRIVEN")
 def for_librelane(cfg: dict[str, Any], version: str) -> dict[str, Any]:
     """``cfg`` with what LibreLane ``version`` needs told: KLayout's DRC thread count also
     passed as ``threads``, the name IHP's rule deck reads, and global placement driven by
-    timing unless ``cfg`` says otherwise, both on a LibreLane that knows the variable."""
+    timing unless ``cfg`` says otherwise, both on a LibreLane that knows the variable.
+    ``ValueError`` for a version it cannot read: the run would go without that version's
+    settings and say nothing (``chipleap.verify.tools.librelane`` names the image's tag
+    when LibreLane gives no version)."""
     key = librelane_version_key(version)
+    if key == UNKNOWN_VERSION:
+        raise ValueError(
+            f"ChipLeap cannot tell which LibreLane runs (it gives {version or 'no version'}), "
+            f"so it cannot write the settings that version needs; set {LIBRELANE_IMAGE_ENV} "
+            "to the image the wrapper starts, with its version as the tag"
+        )
     out = dict(cfg)
     threads = cfg.get("KLAYOUT_DRC_THREADS")
     if threads is not None and key >= DRC_DEFINES_FROM:
@@ -790,9 +801,9 @@ def run_librelane(
     try:
         pdk_root = librelane_pdk.ensure()
         env = librelane_env()
+        cfg = for_librelane(cfg, tool.version)
     except ValueError as exc:
         raise PnrError(str(exc)) from None
-    cfg = for_librelane(cfg, tool.version)
     if late_antenna_repair:
         cfg = with_late_antenna_repair(cfg)
     (workdir / "config.json").write_text(json.dumps(cfg, indent=2))

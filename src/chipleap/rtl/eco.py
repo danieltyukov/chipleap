@@ -602,9 +602,9 @@ def _run_librelane(
     try:
         pdk_root = librelane_pdk.ensure()
         env = librelane_env()
+        cfg = for_librelane(cfg, tool.version)
     except ValueError as exc:
         raise EcoError(str(exc)) from None
-    cfg = for_librelane(cfg, tool.version)
     builddir.write_text(work, "config.eco.json", json.dumps(cfg, indent=2))
     base = [tool.path, *librelane_pdk.args_for(pdk_root), "--run-tag", ECO_TAG]
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
