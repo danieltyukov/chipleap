@@ -135,16 +135,16 @@ def test_a_macro_backed_engine_is_capped_by_its_macros_read():
     # Macro builds route slower than flop builds, and deep macros read slower still.
     assert flop > shallow >= mid > deep
     assert deep == pytest.approx(1000 / (read[2048] + ACCEL_BANK_PATH_NS))
-    # Routed at the slow corner with LibreLane 3.0.14: the GEMV 1 x 4 and 1 x 8 with 256-word
-    # macros took 8.921 and 9.845 ns, the 1 x 8 with 1024 and 2048 words 11.224 and 13.024 ns
-    # (on the macros' read) and the 2 x 8 with 256 x 64 macros 10.63 ns, and the model's
-    # period is never shorter.
+    # Routed at the slow corner with LibreLane 3.0.14, a buffer beside each macro output: the
+    # GEMV 1 x 4 and 1 x 8 with 256-word macros took 9.033 and 9.835 ns, the 1 x 8 with 1024
+    # and 2048 words 11.366 and 13.136 ns (on the macros' read) and the 2 x 8 with 256 x 64
+    # macros 10.782 ns, and the model's period is never shorter.
     for rows, cols, depth, routed in (
-        (1, 4, 256, 8.921),
-        (1, 8, 256, 9.845),
-        (1, 8, 1024, 11.224),
-        (1, 8, 2048, 13.024),
-        (2, 8, 256, 10.63),
+        (1, 4, 256, 9.033),
+        (1, 8, 256, 9.835),
+        (1, 8, 1024, 11.366),
+        (1, 8, 2048, 13.136),
+        (2, 8, 256, 10.782),
     ):
         r = IHP_1P_READ_NS[f"RM_IHPSG13_1P_{depth}x{cols * 8}_c2_bm_bist"]
         period = 1000 / accel_signoff_mhz("gemv", cols, 1, rows, bank_read_ns=r)
