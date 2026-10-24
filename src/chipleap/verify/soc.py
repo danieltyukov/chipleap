@@ -441,7 +441,12 @@ SDC = "chipleap_soc.sdc"
 # same state twice, and with PL_KEEP_RESIZE_BELOW_OVERFLOW 0 too; with these bounds it
 # went past that place. The SmolLM2 accelerator's own layouts, which bound their crossings
 # the same way, place on 3.0.14 as they are. (OpenROAD #8351, the closest report, was
-# closed on 16 July 2026 without a fix.)
+# closed on 16 July 2026 without a fix.) The repairs after the clock tree and after global
+# routing rebuffer too, so every place and route step takes these bounds, not placement
+# alone. Before the clock tree the bounds count clk_i's latency through its one unbuffered
+# net (48 ns in a 3.0.14 placement without timing), so timing-driven placement sees the
+# paths from clk into the accelerator's clock far worse than they are; after it, the trees'
+# latencies are real, and signoff times the crossings' data path alone.
 PNR_SDC = "chipleap_soc.pnr.sdc"
 PINS = "pins.cfg"
 # The step LibreLane's Classic flow runs after synthesis: the layout run resumes there.
