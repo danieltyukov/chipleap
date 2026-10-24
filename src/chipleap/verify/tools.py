@@ -258,10 +258,12 @@ def sta() -> Tool:
 
 
 def librelane() -> Tool:
-    """LibreLane, its version asked for as a run would start it (``librelane_env``). For a
-    wrapper ChipLeap does not ask (``is_wrapper``) given ``CHIPLEAP_LIBRELANE_IMAGE``, the
-    version is the image's tag (``3.0.14`` of ``ghcr.io/librelane/librelane:3.0.14``); each
-    run checks it is the one that ran (``librelane_ran``)."""
+    """LibreLane, its version asked for as a run would start it (``librelane_env``). When
+    it gives none, the version is the tag of the image ChipLeap asks a wrapper for
+    (``librelane_image``: ``3.0.14`` of ``ghcr.io/librelane/librelane:3.0.14``): a wrapper
+    ChipLeap does not ask (``is_wrapper``), or one that did not answer within the probe's
+    time, as a wrapper starting an Apptainer image on a busy cluster node can. Each run
+    checks it is the one that ran (``librelane_ran``)."""
     try:
         base: Mapping[str, str] | None = librelane_env()
     except ValueError:  # a run reports the setting's problem
@@ -275,9 +277,13 @@ def librelane() -> Tool:
         base,
     )
     image = librelane_image()
-    if image and tool.found and tool.version == "container wrapper":
-        tag = image.rpartition("/")[2].partition(":")[2]
-        return replace(tool, version=tag or f"container wrapper, {image}")
+    tag = image.rpartition("/")[2].partition(":")[2]
+    if not tool.found or librelane_version_key(tool.version) != UNKNOWN_VERSION:
+        return tool
+    if librelane_version_key(tag) != UNKNOWN_VERSION:
+        return replace(tool, version=tag)
+    if image and tool.version == "container wrapper":
+        return replace(tool, version=f"container wrapper, {image}")
     return tool
 
 
@@ -324,7 +330,7 @@ def librelane_ran(run: Path, pdk_root: Path | None = None) -> str:
         return ""
     ran = str(meta.get("librelane_version") or "") if isinstance(meta, dict) else ""
     expected = librelane().version
-    if ran and librelane_version_key(expected) != (0, 0, 0, 0, 0) and ran != expected:
+    if ran and librelane_version_key(expected) != UNKNOWN_VERSION and ran != expected:
         raise ValueError(
             f"LibreLane {ran} ran, not {expected}"
             + (
@@ -345,12 +351,16 @@ def librelane_ran(run: Path, pdk_root: Path | None = None) -> str:
     return ran
 
 
+# What ``librelane_version_key`` gives a version it cannot read.
+UNKNOWN_VERSION = (0, 0, 0, 0, 0)
+
+
 def librelane_version_key(version: str) -> tuple[int, int, int, int, int]:
     """Orders LibreLane versions: ``3.0.0.dev44`` before ``3.0.0rc1`` before ``3.0.0``
     before ``3.0.14``. An unreadable version sorts first."""
     m = re.match(r"(\d+)\.(\d+)\.(\d+)(?:\.?(dev|rc)(\d+))?", version)
     if not m:
-        return (0, 0, 0, 0, 0)
+        return UNKNOWN_VERSION
     stage = {"dev": 0, "rc": 1}.get(m[4] or "", 2)
     return (int(m[1]), int(m[2]), int(m[3]), stage, int(m[5] or 0))
 
