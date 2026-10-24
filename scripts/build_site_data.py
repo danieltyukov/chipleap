@@ -1,6 +1,7 @@
 """Build the website's data and generated content from real ChipLeap runs.
 
-    python scripts/build_site_data.py [--verify BUNDLE] [--hero RENDER.png --callouts C.json
+    python scripts/build_site_data.py [--verify BUNDLE [--verify-extra VERIFY.json]]
+                                      [--hero RENDER.png --callouts C.json
                                        --hero-floorplan FP.json] [--og]
                                       [--rtl-project PROJECT [--rtl-verify VERIFY.json]]
 
@@ -11,8 +12,9 @@ every step first (KLayout and the IHP PDK draw the chip):
     python scripts/build_site_data.py --rtl-project examples/uart
 
 A step run again on its own (gate-level simulation with another Icarus, say) is passed
-with --rtl-verify and replaces that step's row. Without --verify, the accelerator's
-published results are kept as they are.
+with --rtl-verify and replaces that step's row; --verify-extra does the same for the
+bundle's steps (lint and simulation run where Verilator is, say). Without --verify, the
+accelerator's published results are kept as they are.
 
 The hero render is made in three steps, and --hero-floorplan refuses a render whose
 floorplan no longer matches what the model gives for the design:
@@ -823,14 +825,21 @@ RTL_GROUPS: list[tuple[str, list[tuple[str, str, Any]]]] = [
 ]
 
 
-def rtl_rows(project: Path, extra: list[str] | None = None) -> dict[str, dict[str, Any]]:
-    """The project's last `chipleap verify` results, by step; a step in a later ``extra``
-    verify.json (a step run again on its own) replaces the same step's row."""
+def step_rows(base: Path, extra: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    """The `chipleap verify` results in ``base`` by step; a step in a later ``extra``
+    verify.json (a step run again on its own) replaces the same step's row, in its place.
+    A bundle's verify.json is a list of rows, a project's has them under ``steps``."""
     rows: dict[str, dict[str, Any]] = {}
-    for f in [project / "build" / "verify" / "verify.json", *(Path(e) for e in extra or [])]:
-        for r in json.loads(Path(f).read_text())["steps"]:
+    for f in [base, *(Path(e) for e in extra or [])]:
+        data = json.loads(Path(f).read_text())
+        for r in data["steps"] if isinstance(data, dict) else data:
             rows[str(r["step"])] = r
     return rows
+
+
+def rtl_rows(project: Path, extra: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    """The project's last `chipleap verify` results, by step, with ``extra``'s rows."""
+    return step_rows(project / "build" / "verify" / "verify.json", extra)
 
 
 def chip_data(project: Path) -> dict[str, Any]:
@@ -1250,6 +1259,12 @@ def main() -> None:
         help="an RTL project with a chip section, after `chipleap verify PROJECT --steps all`",
     )
     ap.add_argument(
+        "--verify-extra",
+        action="append",
+        help="a verify.json of the bundle's steps run on their own, replacing those rows "
+        "(repeatable)",
+    )
+    ap.add_argument(
         "--rtl-verify",
         action="append",
         help="a verify.json of steps run again on their own, replacing those rows (repeatable)",
@@ -1281,7 +1296,8 @@ def main() -> None:
     lines, hero_design = console()
     verify_line = "Consistency, lint, simulation and X-HEEP checks pass."
     if args.verify:
-        rows = json.loads((Path(args.verify) / "verify" / "verify.json").read_text())
+        bundle_rows = step_rows(Path(args.verify) / "verify" / "verify.json", args.verify_extra)
+        rows = list(bundle_rows.values())
         # Only what the page shows: the full rows carry local paths and tool logs.
         data["verification"] = [
             {k: r[k] for k in ("step", "status", "summary") if k in r} for r in rows
