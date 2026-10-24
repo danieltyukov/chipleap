@@ -14,7 +14,6 @@ from chipleap.hw.tech import get_tech
 from chipleap.macro.sram import IHP_1P
 from chipleap.model.evaluate import bank_mm2
 from chipleap.verify import soc as soc_step
-from chipleap.verify.pnr import MACRO_PNR_SLEW_NS
 
 MCU = """
 // a comment, with a port in it: input logic fake_i,
@@ -181,32 +180,26 @@ def test_the_accelerators_clock_is_bounded_against_x_heeps_without_clock_groups(
 def test_on_librelane_3014_place_and_route_bounds_the_crossings_with_the_clocks_latency():
     """3.0.14's OpenROAD segfaults in the SoC's timing-driven placement on a path delay set
     with -ignore_clock_latency, so place and route takes the crossings' bounds counting
-    both clocks' latency, and signoff keeps them as they are. Place and route also takes
-    the macros' slew target: IHP's SRAM inputs allow 0.595 ns, and 3.0.14's repair holds a
-    net to its driver's 2.5 ns. dev44 keeps one SDC."""
+    both clocks' latency, and signoff keeps them as they are; dev44 and a SoC without the
+    accelerator's clock keep one SDC."""
     ports = soc.mcu_ports(MCU)
     signoff = soc.sdc(ports, 28.571, 11.111, direct=True)
-    pnr_text = soc.sdc(
-        ports, 28.571, 11.111, direct=True, ignore_clock_latency=False, slew_ns=MACRO_PNR_SLEW_NS
-    )
+    pnr_text = soc.sdc(ports, 28.571, 11.111, direct=True, ignore_clock_latency=False)
     assert "-ignore_clock_latency" not in pnr_text
     for a, b in (("clk", "accel_clk_i"), ("accel_clk_i", "clk")):
         assert f"set_max_delay 11.111 -from [get_clocks {a}] -to [get_clocks {b}]" in pnr_text
         assert f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]" in pnr_text
-    target = f"set_max_transition {MACRO_PNR_SLEW_NS:g} [current_design]"
-    assert pnr_text.splitlines()[-1] == target and target not in signoff
 
     def rest(text: str) -> list[str]:
-        ours = ("set_max_delay", "# For", target, "# A slew target")
-        return [ln for ln in text.splitlines() if not ln.startswith(ours)]
+        return [ln for ln in text.splitlines() if not ln.startswith(("set_max_delay", "# For"))]
 
     assert rest(pnr_text) == rest(signoff)
-    assert soc_step.pnr_sdc("3.0.14") == soc_step.PNR_SDC
-    assert soc_step.pnr_sdc("3.0.0.dev44") == soc_step.SDC
+    assert soc_step.pnr_sdc(90.0, "3.0.14") == soc_step.PNR_SDC
+    assert soc_step.pnr_sdc(90.0, "3.0.0.dev44") == soc_step.pnr_sdc(0.0, "3.0.14") == soc_step.SDC
     sources = soc_step.Sources((), (), (), None)  # type: ignore[arg-type]
     for accel, version, used in (
         (90.0, "3.0.14", soc_step.PNR_SDC),
-        (0.0, "3.0.14", soc_step.PNR_SDC),
+        (0.0, "3.0.14", soc_step.SDC),
         (90.0, "3.0.0.dev44", soc_step.SDC),
         (0.0, "3.0.0.dev44", soc_step.SDC),
     ):
@@ -465,12 +458,9 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     assert "set_clock_groups -asynchronous" in sdc
     # The I2S's source-synchronous outputs leave within the cycle, as its clock does.
     assert "set_output_delay 0 -clock [get_clocks clk] $i2s_out" in sdc
-    # On LibreLane 3.0.14 place and route adds the macros' slew target; one clock, no bounds.
-    assert cfg["PNR_SDC_FILE"] == f"dir::{soc_step.PNR_SDC}"
-    assert cfg["SIGNOFF_SDC_FILE"] == f"dir::{soc_step.SDC}"
-    pnr_sdc = (work / soc_step.PNR_SDC).read_text()
-    target = f"set_max_transition {MACRO_PNR_SLEW_NS:g} [current_design]"
-    assert target in pnr_sdc and target not in sdc and "set_max_delay" not in pnr_sdc
+    # One clock: place and route and signoff take the same constraints.
+    assert cfg["PNR_SDC_FILE"] == cfg["SIGNOFF_SDC_FILE"] == f"dir::{soc_step.SDC}"
+    assert not (work / soc_step.PNR_SDC).exists()
     cells = [c for _, c in prep.instances]
     assert cells.count("RM_IHPSG13_1P_1024x32_c2_bm_bist") == 8
     assert cells.count("RM_IHPSG13_1P_256x64_c2_bm_bist") == 4
@@ -482,6 +472,15 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     accel = {i for i, _ in prep.instances if i.startswith(f"{soc.ACCEL_INST}.")}
     assert len(accel) == 4
     assert {e["target"] for e in full["INSERT_ECO_BUFFERS"]} == {f"{i}/A_CLK" for i in accel}
+    # From 3.0.14 every SRAM output and input has a buffer beside it too: the eight banks'
+    # 32 outputs and 77 inputs (10 address, 32 data, 32 mask, 3 controls), the four
+    # buffers' 64 and 139 (8, 64, 64, 3).
+    eco = soc_step.with_floorplan(cfg, prep, 3.0e6, work, "3.0.14")[0]["INSERT_ECO_BUFFERS"]
+    pins = [e["target"].split("/")[1].split("[")[0] for e in eco]
+    assert len(eco) == 4 + (8 * 32 + 4 * 64) + (8 * 77 + 4 * 139)
+    assert pins.count("A_DOUT") == 512 and pins.count("A_ADDR") == 8 * 10 + 4 * 8
+    assert pins.count("A_DIN") == pins.count("A_BM") == 512
+    assert not any(p.startswith(("A_BIST", "A_DLY")) for p in pins)
     # From LibreLane 3.0.14 on, and on dev44 for a trial run, one goes after each output
     # bit of every SRAM: the eight bank macros' 32 and the accelerator's four macros' 64.
     new, _ = soc_step.with_floorplan(cfg, prep, 3.0e6, work, "3.0.14")
@@ -1011,3 +1010,47 @@ def test_each_sram_output_gets_a_buffer_beside_its_pin():
     bare = MacroView("RM_C", "pdk", 10.0, 10.0, pins[2:], p, p, p, p, ("RM_C",), ("RM_C",))
     with pytest.raises(soc_step.SocError, match="have no A_DOUT"):
         soc_step.output_buffers(fp, {m.instance: bare for m in fp.macros})
+
+
+def test_each_sram_input_gets_a_buffer_beside_its_pin():
+    """Every SRAM macro's address, data, mask, read, write and enable inputs each get a
+    buffer just past the halo beside the pin; the clock pin (its own buffer), the BIST
+    inputs and A_DLY (tied off) and the outputs do not, and SRAM macros without such
+    inputs stop the step."""
+    from chipleap.macro import place
+    from chipleap.macro.layer import MacroPin, MacroView
+
+    p = Path("x")
+
+    def pin(name: str, direction: str, x: float) -> MacroPin:
+        return MacroPin(name, direction, "signal", (("Metal2", (x, 0.0, x + 0.26, 0.26)),))
+
+    pins = (
+        pin("A_ADDR[0]", "input", 20.0),
+        pin("A_DIN[5]", "input", 30.0),
+        pin("A_BM[5]", "input", 40.0),
+        pin("A_REN", "input", 50.0),
+        pin("A_WEN", "input", 60.0),
+        pin("A_MEN", "input", 70.0),
+        pin("A_CLK", "input", 80.0),
+        pin("A_DLY", "input", 90.0),
+        pin("A_BIST_DIN[5]", "input", 100.0),
+        pin("A_BIST_EN", "input", 110.0),
+        pin("A_DOUT[5]", "output", 120.0),
+    )
+    bank = MacroView("RM_B", "pdk", 416.64, 336.46, pins, p, p, p, p, ("RM_B",), ("RM_B",))
+    top = f"{soc.MCU_INST}.bank_m6"
+    fp = place.Floorplan(
+        (3426.72, 2192.4),
+        (20.16, 22.68, 3406.56, 2169.72),
+        (place.Placed(top, 2543.04, 1823.26, "N"),),
+    )
+    eco = soc_step.input_buffers(fp, {top: bank})
+    names = ["A_ADDR[0]", "A_DIN[5]", "A_BM[5]", "A_REN", "A_WEN", "A_MEN"]
+    assert [e["target"] for e in eco] == [f"{top}/{n}" for n in names]
+    off = place.HALO_UM + soc_step.CLOCK_PIN_GAP_UM
+    assert eco[0]["placement"] == [round(2543.04 + 20.13, 3), round(1823.26 - off, 3)]
+    assert {e["buffer"] for e in eco} == {"sg13g2_buf_2"}
+    bare = MacroView("RM_C", "pdk", 10.0, 10.0, pins[6:], p, p, p, p, ("RM_C",), ("RM_C",))
+    with pytest.raises(soc_step.SocError, match="no address, data or control inputs"):
+        soc_step.input_buffers(fp, {top: bare})
