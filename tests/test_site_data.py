@@ -94,3 +94,30 @@ def test_the_consoles_sentence_names_the_cpu_and_what_each_trim_made_smaller(mon
         "the SRAM, buffers and memory channels, and stopped at the smallest design that still "
         "meets the target."
     )
+
+
+def test_the_recommendation_gives_the_clock_its_rate_is_for(monkeypatch):
+    site = _site(monkeypatch)
+    design = {
+        "cpu": "cv32e40x",
+        "freq_mhz": 50.0,
+        "banks": 2,
+        "bank_kib": 16,
+        "accel": {"rows": 4, "cols": 8, "dataflow": "gemv"},
+        "ext_channels": 2,
+        "ext_mem": "octal-psram",
+    }
+    rec = {
+        "design": design,
+        "metrics": {"throughput": 2.062, "power_mw": 38.6, "area_mm2": 5.49},
+        "clock_mhz": {"design": 50.0, "soc": 36.83},
+        "bottleneck": "external memory",
+    }
+    assert site.recommendation(rec) == (
+        "Recommended: CV32E40X, 32 KiB of SRAM, a 4 x 8 GEMV engine and 2 octal PSRAM "
+        "channels, with the SoC at 36.8 MHz, the clock it closes timing at on this PDK. "
+        "2.06 tokens per second, 39 mW, 5.5 mm², limited by external memory. Shall I generate "
+        "and verify it?"
+    )
+    rec["clock_mhz"] = {"design": 50.0, "soc": 50.0}
+    assert site.recommendation(rec).startswith("Recommended: CV32E40X at 50 MHz, 32 KiB of SRAM")

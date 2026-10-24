@@ -341,9 +341,7 @@ def console() -> tuple[list[tuple[str, str]], dict[str, Any]]:
     req = mcp_server.required_resources(spec_text)
     ex = mcp_server.explore_designs(spec_text, samples=1500, seed=0)
     rec = ex["recommended"]
-    m = rec["metrics"]
     d = rec["design"]
-    acc = d["accel"] or {}
     ihp = TECHNOLOGIES["ihp-sg13g2"]
     serial = [
         MEM[k]
@@ -366,19 +364,35 @@ def console() -> tuple[list[tuple[str, str]], dict[str, Any]]:
         ),
         ("c-tool", 'explore_designs(spec, objective="area")'),
         ("c-out", summarize(ex)),
-        (
-            "c-ai",
-            f"Recommended: {str(d['cpu']).upper()} at {d['freq_mhz']:g} MHz, "
-            f"{sram_kib(d)} KiB of SRAM, a {acc.get('rows')} x {acc.get('cols')} "
-            f"{DF.get(str(acc.get('dataflow')), '')} engine and {d['ext_channels']} "
-            f"{MEM[str(d['ext_mem'])]} channels. {m['throughput']:.2f} tokens per second, "
-            f"{m['power_mw']:.0f} mW, {m['area_mm2']:.1f} mm², limited by "
-            f"{rec['bottleneck']}. Shall I generate and verify it?",
-        ),
+        ("c-ai", recommendation(rec)),
         ("c-user", "Yes."),
         ("c-tool", "generate_soc(...)  verify_soc(...)"),
     ]
     return lines, d
+
+
+def recommendation(rec: dict[str, Any]) -> str:
+    """The assistant's recommendation, at the clock the model's rate is for: the SoC's, which
+    is below the one the design asks for when X-HEEP closes timing lower on the PDK."""
+    d, m = rec["design"], rec["metrics"]
+    acc = d["accel"] or {}
+    asked = float(d["freq_mhz"])
+    soc = float((rec.get("clock_mhz") or {}).get("soc") or asked)
+    parts = (
+        f"{sram_kib(d)} KiB of SRAM, a {acc.get('rows')} x {acc.get('cols')} "
+        f"{DF.get(str(acc.get('dataflow')), '')} engine and {d['ext_channels']} "
+        f"{MEM[str(d['ext_mem'])]} channels"
+    )
+    cpu = str(d["cpu"]).upper()
+    if soc < asked:
+        head = f"{cpu}, {parts}, with the SoC at {soc:.1f} MHz, the clock it closes timing at on this PDK"
+    else:
+        head = f"{cpu} at {asked:g} MHz, {parts}"
+    return (
+        f"Recommended: {head}. {m['throughput']:.2f} tokens per second, "
+        f"{m['power_mw']:.0f} mW, {m['area_mm2']:.1f} mm², limited by "
+        f"{rec['bottleneck']}. Shall I generate and verify it?"
+    )
 
 
 def sram_kib(d: dict[str, Any]) -> int:
