@@ -2,10 +2,7 @@
 
 This walks [examples/uart](../examples/uart) from its RTL to a chip GDS on IHP SG13G2: a UART written by hand, with cocotb tests and a Python reference model, at the core of a 1.52 x 1.52 mm chip with 33 pads of IHP's `sg13g2_io` library. In the core next to the UART sits a StrongARM comparator from [aispice](https://github.com/danieltyukov/aispice), handed over as a [macro package](macro-package.md). Its inputs come from two analog pads and its output drives the UART's receive line. The chip is signed off with IHP's own DRC deck on the whole die and its LVS deck down to the transistors of the standard cells and the comparator.
 
-<!-- GAP: plan B. If the whole run is redone on one machine, rewrite this paragraph: one run, its machine and its total time; drop the DHPC citation if no DelftBlue number is left. -->
-Every number below is from ChipLeap `main` at `d10df7a` (24 Oct 2026), with the comparator's package exported by aispice `master` at `5db63e1`, from an empty build folder. The RTL checks (`chipleap verify examples/uart`) ran on a laptop in 10 seconds. `chipleap verify examples/uart --steps all` ran on 16 cores of DelftBlue, TU Delft's supercomputer, in 28 minutes, 21 of them for the chip. DelftBlue has no Icarus 13, cocotb or Fault, so gate-level simulation, ATPG, and power and IR drop from the tests' activity are [gap: gate-level run]. Every step that ran passed. Only open tools ran: Verilator, slang, Icarus, cocotb, SymbiYosys, Yosys, OpenROAD, LibreLane, KLayout, Magic, Netgen and Fault.
-
-The DelftBlue numbers were computed on Delft High Performance Computing Centre (DHPC), DelftBlue Supercomputer (Phase 2), 2024, https://www.tudelft.nl/dhpc/ark:/44463/DelftBluePhase2.
+Every number below is from `chipleap verify examples/uart --steps all` on ChipLeap `main` at `75c7eb2` (24 Oct 2026), with the comparator's package exported by aispice `master` at `5db63e1`. Every step passed. From an empty build folder the whole run takes about 15 minutes on a laptop, with LibreLane limited to 8 CPUs. Only open tools ran: Verilator, slang, Icarus, cocotb, SymbiYosys, Yosys, OpenROAD, LibreLane, KLayout, Magic, Netgen and Fault.
 
 aispice's [analog-on-top demo](https://github.com/danieltyukov/aispice/tree/master/examples/analog_on_top) is the other way round: analog blocks and a hardened digital block in a pad ring that aispice assembles.
 
@@ -73,10 +70,10 @@ chipleap verify examples/uart --steps all
 | Step | Tools | Result |
 |---|---|---|
 | Place and route | LibreLane (OpenROAD, KLayout, Magic, Netgen), signed off at the slow corner | 362 cells on a 0.0105 mm² core at 64 % utilisation; 100 MHz met at 125 C (about 247 MHz at the slow corner, 295 MHz at the typical); DRC, LVS and antenna clean, IHP's antenna deck included |
-| Gate level | the cocotb tests on the routed netlist with SDF delays, Icarus 13 | [gap: gate-level run] |
-| Design for test | OpenROAD scan insertion, Fault with Quaigh | 3 chains of 17 flip-flops; [gap: gate-level run: stuck-at coverage, faults, patterns, and the patterns through the chains of the scan netlist and the routed one] |
-| Power | OpenROAD, with the activity of the tests on the routed netlist | [gap: gate-level run: power from the tests' activity, pins annotated] (1.01 mW vectorless at the typical corner) |
-| IR drop | OpenROAD PDNSim | [gap: gate-level run, currents from the tests' activity] (from a vectorless activity of 0.1: 0.954 mV on VPWR, 1.01 mV on VGND at worst) |
+| Gate level | the cocotb tests on the routed netlist with SDF delays, Icarus 13 | 5 of 5 tests pass |
+| Design for test | OpenROAD scan insertion, Fault with Quaigh | 3 chains of 17 flip-flops; 99.2 % stuck-at coverage (1371 of 1382 faults) with 39 patterns, which pass through the chains of both the scan netlist and the routed one |
+| Power | OpenROAD, with the activity of the tests on the routed netlist | 0.416 mW at the typical corner (1.01 mW vectorless); 1170 of 1170 pins annotated |
+| IR drop | OpenROAD PDNSim | 0.51 mV on VPWR, 0.615 mV on VGND at worst |
 | Power intent | UPF read and placed by OpenROAD | the receiver in a domain of its own (106 cells), 13 signals between the two |
 
 The routed block is `examples/uart/build/pnr/runs/chipleap/final/gds/uart.gds`. The report is `examples/uart/build/verify/report.html`, with `VERIFY.md` and `verify.json` beside it.

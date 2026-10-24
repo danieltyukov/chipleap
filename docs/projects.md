@@ -231,10 +231,10 @@ These steps run with `--steps all`, or named. They use OpenROAD (the `openroad` 
 pnr      PASS     placed and routed on IHP SG13G2: 0.0105 mm2 core at 64% utilisation, 362 cells; 100 MHz on clk_i met at the slow corner (about 247 MHz, and about 295 MHz at the typical one); DRC, LVS and antenna clean, IHP's antenna deck included, no slew or capacitance violations
 eco      SKIPPED  no eco changes in the project
 equiv    PASS     rtl-synth: proved 74 of 75 points; the other 1 (u_rx.state_q[2]) equal for 40 cycles from reset, not proved for every cycle; synth-pnr: proved, all 959 matched points equal
-gls      [gap: gate-level run]
-dft      [gap: gate-level run] (scan insertion alone: 3 scan chains of 17 flip-flops (51 of 51 scanned))
-power    [gap: gate-level run] (vectorless alone: 1.01 mW at typ, 0.814 mW at slow, 1.27 mW at fast)
-ir_drop  [gap: gate-level run, currents from the tests' VCD]
+gls      PASS     routed netlist with SDF at nom_typ_1p20V_25C (typ delays): Icarus 13.0: 5 of 5 cocotb tests pass
+dft      PASS     3 scan chains of 17 flip-flops (51 of 51 scanned); Fault with Quaigh: 99.2% stuck-at coverage (1371 of 1382 faults) with 39 patterns; flush and 8 patterns pass on the scan netlist (Icarus 13.0); flush and 8 patterns pass on the routed netlist (Icarus 13.0)
+power    PASS     power of the routed netlist: 0.416 mW at typ (vectorless 1.01), 0.33 mW at slow (vectorless 0.814), 0.518 mW at fast (vectorless 1.27); activity from 5 of 5 cocotb tests passing on the gate-level netlist; 1170 of 1170 pins annotated
+ir_drop  PASS     worst IR drop at the typ corner (1.2 V), currents from the tests' VCD: VGND 0.615 mV (0.05%), VPWR 0.51 mV (0.04%)
 upf      PASS     OpenROAD read 2 power domains and placed them: PD_TOP 113 cells, PD_RX 106 cells inside its sized area; 13 signals cross between domains
 ```
 
