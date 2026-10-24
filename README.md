@@ -84,7 +84,7 @@ These are the steps ChipLeap runs on a project today, with what each reported fo
 | Power | OpenROAD with the activity of the project's own tests | 0.416 mW at the typical corner (1.01 mW vectorless) |
 | IR drop | OpenROAD PDNSim on the routed power grid | 0.615 mV at worst |
 | Power intent | UPF read and placed by OpenROAD | the receiver in a domain of its own, 13 signals between the two |
-| ECO | OpenROAD edits on the routed design, then LibreLane's signoff again | a gate resized and the UART signed off again in about four minutes on 16 cores |
+| ECO | OpenROAD edits on the routed design, then LibreLane's signoff again | a gate resized and the UART signed off again in about a minute |
 | Macros | `macro/v1` packages, checked and rewritten before use | aispice's StrongARM comparator, 29.1 x 40.8 um, both decisions measured after layout, its transistors in LVS |
 | Chip assembly | LibreLane with IHP's pad ring, then bond pads, seal ring and fill in KLayout | 33 pads on a 1.52 x 1.52 mm die |
 | Timing at the ports | OpenSTA through IHP's IO cells at every corner | +0.759 ns of setup slack at the slow corner (+0.899 ns at the core's side of the pads, against the budget the pads leave it) |
