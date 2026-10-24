@@ -1,6 +1,7 @@
 """Build the website's data and generated content from real ChipLeap runs.
 
-    python scripts/build_site_data.py [--verify BUNDLE] [--hero RENDER.png --callouts C.json
+    python scripts/build_site_data.py [--verify BUNDLE [--verify-extra VERIFY.json]]
+                                      [--hero RENDER.png --callouts C.json
                                        --hero-floorplan FP.json] [--og]
                                       [--rtl-project PROJECT [--rtl-verify VERIFY.json]]
 
@@ -11,8 +12,9 @@ every step first (KLayout and the IHP PDK draw the chip):
     python scripts/build_site_data.py --rtl-project examples/uart
 
 A step run again on its own (gate-level simulation with another Icarus, say) is passed
-with --rtl-verify and replaces that step's row. Without --verify, the accelerator's
-published results are kept as they are.
+with --rtl-verify and replaces that step's row; --verify-extra does the same for the
+bundle's steps (lint and simulation run where Verilator is, say). Without --verify, the
+accelerator's published results are kept as they are.
 
 The hero render is made in three steps, and --hero-floorplan refuses a render whose
 floorplan no longer matches what the model gives for the design:
@@ -52,6 +54,8 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 # Before chipleap is imported: its technology table loads the user's own technologies.
 os.environ["CHIPLEAP_TECH_DIR"] = ""
@@ -337,9 +341,7 @@ def console() -> tuple[list[tuple[str, str]], dict[str, Any]]:
     req = mcp_server.required_resources(spec_text)
     ex = mcp_server.explore_designs(spec_text, samples=1500, seed=0)
     rec = ex["recommended"]
-    m = rec["metrics"]
     d = rec["design"]
-    acc = d["accel"] or {}
     ihp = TECHNOLOGIES["ihp-sg13g2"]
     serial = [
         MEM[k]
@@ -362,19 +364,35 @@ def console() -> tuple[list[tuple[str, str]], dict[str, Any]]:
         ),
         ("c-tool", 'explore_designs(spec, objective="area")'),
         ("c-out", summarize(ex)),
-        (
-            "c-ai",
-            f"Recommended: {str(d['cpu']).upper()} at {d['freq_mhz']:g} MHz, "
-            f"{sram_kib(d)} KiB of SRAM, a {acc.get('rows')} x {acc.get('cols')} "
-            f"{DF.get(str(acc.get('dataflow')), '')} engine and {d['ext_channels']} "
-            f"{MEM[str(d['ext_mem'])]} channels. {m['throughput']:.2f} tokens per second, "
-            f"{m['power_mw']:.0f} mW, {m['area_mm2']:.1f} mm², limited by "
-            f"{rec['bottleneck']}. Shall I generate and verify it?",
-        ),
+        ("c-ai", recommendation(rec)),
         ("c-user", "Yes."),
         ("c-tool", "generate_soc(...)  verify_soc(...)"),
     ]
     return lines, d
+
+
+def recommendation(rec: dict[str, Any]) -> str:
+    """The assistant's recommendation, at the clock the model's rate is for: the SoC's, which
+    is below the one the design asks for when X-HEEP closes timing lower on the PDK."""
+    d, m = rec["design"], rec["metrics"]
+    acc = d["accel"] or {}
+    asked = float(d["freq_mhz"])
+    soc = float((rec.get("clock_mhz") or {}).get("soc") or asked)
+    parts = (
+        f"{sram_kib(d)} KiB of SRAM, a {acc.get('rows')} x {acc.get('cols')} "
+        f"{DF.get(str(acc.get('dataflow')), '')} engine and {d['ext_channels']} "
+        f"{MEM[str(d['ext_mem'])]} channels"
+    )
+    cpu = str(d["cpu"]).upper()
+    if soc < asked:
+        head = f"{cpu}, {parts}, with the SoC at {soc:.1f} MHz, the clock it closes timing at on this PDK"
+    else:
+        head = f"{cpu} at {asked:g} MHz, {parts}"
+    return (
+        f"Recommended: {head}. {m['throughput']:.2f} tokens per second, "
+        f"{m['power_mw']:.0f} mW, {m['area_mm2']:.1f} mm², limited by "
+        f"{rec['bottleneck']}. Shall I generate and verify it?"
+    )
 
 
 def sram_kib(d: dict[str, Any]) -> int:
@@ -383,20 +401,47 @@ def sram_kib(d: dict[str, Any]) -> int:
     )
 
 
+# What each trimming move of the explorer makes smaller.
+TRIMS = {
+    "less_sram": "SRAM",
+    "smaller_banks": "SRAM",
+    "shrink_buffer": "buffers",
+    "shrink_array": "array",
+    "fewer_ports": "array",
+    "fewer_channels": "memory channels",
+    "smaller_cpu": "CPU",
+}
+
+
 def summarize(ex: dict[str, Any]) -> str:
     """The explorer's decisions in one plain sentence, built from the decision log."""
-    kinds = [s["kind"] for s in ex["steps"] if s["action"]]
+    steps = [s for s in ex["steps"] if s["action"]]
+    kinds = [s["kind"] for s in steps]
+
+    def last_value(*moves: str) -> str | None:
+        # A move's action reads "external memory a -> b", "CPU a -> b" or "add b".
+        found = [s["action"] for s in steps if s["kind"] in moves]
+        if not found:
+            return None
+        return found[-1].rsplit(" -> ", 1)[-1] if " -> " in found[-1] else found[-1].split()[-1]
+
     first = []
     if "add_accel" in kinds:
         first.append("added a GEMV engine")
     if "more_channels" in kinds:
         first.append("doubled the memory channels")
-    if any(k in kinds for k in ("faster_mem", "slower_mem", "add_ext_mem")):
-        first.append("moved the weights to octal PSRAM")
-    trims = sum(k.startswith(("shrink", "less", "smaller", "fewer")) for k in kinds)
+    mem = last_value("faster_mem", "slower_mem", "add_ext_mem")
+    if mem:
+        first.append(f"moved the weights to {MEM.get(mem, mem)}")
+    cpu = last_value("faster_cpu")
+    if cpu:
+        first.append(f"switched to a {cpu.upper()} core")
+    trims = [TRIMS[k] for k in kinds if k in TRIMS]
     text = f"{ex['evaluated']:,} designs evaluated. The agent " + ", ".join(first)
     if trims:
-        text += f", then made {trims} trims to the SRAM, buffers and array"
+        parts = list(dict.fromkeys(trims))
+        what = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+        text += f", then made {len(trims)} trims to the {what}"
     return text + ", and stopped at the smallest design that still meets the target."
 
 
@@ -429,14 +474,17 @@ def stats_html(rows: list[dict[str, Any]]) -> str:
         ),
     ]
     pr = next((r for r in rows if r["step"] == "pnr" and r["status"] == "pass"), {})
-    if pr.get("fmax_worst_mhz"):
+    if pr.get("clock_mhz") and pr.get("setup_slack_ns") is not None:
+        # The slack, not the clock it implies: repair stops once the clock asked for is met,
+        # so that clock is no limit of the design.
         items.append(
             (
-                float(pr["fmax_worst_mhz"]),
-                0,
+                float(pr["setup_slack_ns"]),
+                1,
                 "",
-                "MHz",
-                "clock the routed accelerator reaches on IHP SG13G2 at the slow corner",
+                "ns",
+                f"setup slack of the routed accelerator at its {pr['clock_mhz']:g} MHz clock, "
+                "slow corner, IHP SG13G2",
             )
         )
     elif synth.get("fmax_mhz_estimate"):
@@ -536,7 +584,7 @@ def callouts_html(pos: dict[str, list[float]], design: dict[str, Any]) -> tuple[
     }
     # Tag offsets from the anchor, in pixels; negative x puts the tag on the left, anchored
     # by its right edge, so the leader line always ends at the tag.
-    offsets = {"sram0": (46, -70), "pe": (40, 40), "cpu": (44, -54), "phy": (-48, 34)}
+    offsets = {"sram0": (-56, -84), "pe": (40, 40), "cpu": (44, -54), "phy": (-48, 34)}
     out, key_items = [], []
     for key, (head, sub) in labels.items():
         if key not in pos:
@@ -556,17 +604,48 @@ def callouts_html(pos: dict[str, list[float]], design: dict[str, Any]) -> tuple[
     return "\n".join(out), key_html
 
 
-def layout_html(rows: list[dict[str, Any]]) -> str:
+DATAFLOWS = {
+    "gemv": "GEMV engine",
+    "ws": "weight-stationary array",
+    "os": "output-stationary array",
+}
+
+
+def accel_label(bundle: Path) -> str:
+    """The bundle's accelerator in words, as the layout band names it: "1 x 8 GEMV engine"."""
+    d = yaml.safe_load((bundle / "design.yaml").read_text())
+    a = (d.get("design") or d)["accel"]
+    return f"{a['rows']} x {a['cols']} {DATAFLOWS.get(a['dataflow'], a['dataflow'] + ' array')}"
+
+
+def layout_html(rows: list[dict[str, Any]], label: str) -> str:
     """The routed layout beside the numbers LibreLane reported for it."""
     pr = next((r for r in rows if r["step"] == "pnr"), None)
     if pr is None or pr["status"] != "pass":
         return ""
-    checks = "DRC and LVS clean" if not pr["drc_errors"] and not pr["lvs_errors"] else "see report"
+    clean = not (
+        pr["drc_errors"]
+        or pr["lvs_errors"]
+        or pr.get("antenna_nets")
+        or _ihp_antenna(pr)
+        or pr.get("max_slew_violations")
+        or pr.get("max_cap_violations")
+    )
+    checks = "DRC, LVS and antenna clean" if clean else "see report"
+    if pr.get("macros"):
+        n = len(pr["macros"])
+        buffers = f"Its buffers are {n} of IHP's SRAM macros, in rows above and below the logic."
+    else:
+        buffers = (
+            "Its buffers are SRAM macros in silicon, cut to "
+            f"{pr.get('buffer_words', 16)} words here."
+        )
+    clock = f"{pr['clock_mhz']:g}"
     facts = [
         ("Standard cells", f"{pr['cells']:,}", ""),
         ("Core area", f"{pr['core_um2'] / 1e6:.2f}", "mm²"),
-        ("Typical corner", f"{pr['fmax_mhz']:.0f}", "MHz"),
-        ("Slow corner, 125 °C", f"{pr['fmax_worst_mhz']:.0f}", "MHz"),
+        (f"Setup slack at {clock} MHz, slow corner", f"{pr['setup_slack_ns']:+.1f}", "ns"),
+        ("Hold slack, worst corner", f"{pr['hold_slack_ns']:+.3f}", "ns"),
     ]
     dl = "".join(
         f"<div><dt>{k}</dt><dd>{v}{f'<small>{u}</small>' if u else ''}</dd></div>"
@@ -575,12 +654,14 @@ def layout_html(rows: list[dict[str, Any]]) -> str:
     return (
         '<div class="layout"><picture><source type="image/webp" srcset="img/layout-1200.webp">'
         '<img src="img/layout-1200.jpg" width="1000" height="1000" loading="lazy" '
-        'alt="The routed layout of the 1 x 8 GEMV engine on IHP SG13G2: signal wires on four '
-        'metal layers under the power grid"></picture>'
+        f'alt="The routed layout of the {html.escape(label)} on IHP SG13G2: signal wires on '
+        'four metal layers under the power grid"></picture>'
         "<div><h3>And then it is placed and routed</h3>"
         "<p>The same accelerator, through LibreLane on IHP SG13G2: placement, clock tree, "
-        f"routing, timing at every corner, {checks}. This is the GDS it wrote, drawn in the "
-        "PDK's layer colours. Its buffers are SRAM macros in silicon, cut to 16 words here."
+        f"routing, timing at every corner, {checks}. Routed for its {clock} MHz clock, it meets "
+        f"timing with {pr['setup_slack_ns']:.1f} ns to spare at the slow corner (hold "
+        f"{pr['hold_slack_ns']:+.3f} ns). This is the GDS it wrote, drawn in the PDK's layer "
+        f"colours. {buffers}"
         f"</p><dl>{dl}</dl></div></div>"
     )
 
@@ -674,13 +755,27 @@ def _equiv(r: dict[str, Any]) -> tuple[str, str]:
     return "Yosys equivalence", "; ".join(parts)
 
 
+def _ihp_antenna(r: dict[str, Any]) -> int | None:
+    """The violations of IHP's antenna deck in a result, None when it did not run."""
+    ant = r.get("ihp_antenna") or {}
+    return None if "violations" not in ant else int(ant["violations"])
+
+
 def _pnr(r: dict[str, Any]) -> tuple[str, str]:
-    clean = not (r["drc_errors"] or r["lvs_errors"] or r["antenna_nets"])
+    ihp = _ihp_antenna(r)
+    slew = int(r.get("max_slew_violations") or 0) + int(r.get("max_cap_violations") or 0)
+    clean = not (r["drc_errors"] or r["lvs_errors"] or r["antenna_nets"] or ihp or slew)
+    if clean:
+        checks = "DRC, LVS and antenna clean"
+        if ihp is not None:
+            checks += " (IHP's antenna deck too)"
+        checks += ", no slew or capacitance violations"
+    else:
+        checks = "DRC, LVS, antenna, slew or capacitance violations"
     return (
         "LibreLane (OpenROAD, KLayout), signed off at the slow corner",
         f"{r['cells']} cells on a {r['core_um2'] / 1e6:.4f} mm\u00b2 core; {_n(r['clock_mhz'])} "
-        f"MHz met at 125 \u00b0C (about {r['fmax_worst_mhz']:.0f} MHz there); "
-        + ("DRC, LVS and antenna clean" if clean else "DRC, LVS or antenna violations"),
+        f"MHz met at 125 \u00b0C (about {r['fmax_worst_mhz']:.0f} MHz there); {checks}",
     )
 
 
@@ -777,14 +872,21 @@ RTL_GROUPS: list[tuple[str, list[tuple[str, str, Any]]]] = [
 ]
 
 
-def rtl_rows(project: Path, extra: list[str] | None = None) -> dict[str, dict[str, Any]]:
-    """The project's last `chipleap verify` results, by step; a step in a later ``extra``
-    verify.json (a step run again on its own) replaces the same step's row."""
+def step_rows(base: Path, extra: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    """The `chipleap verify` results in ``base`` by step; a step in a later ``extra``
+    verify.json (a step run again on its own) replaces the same step's row, in its place.
+    A bundle's verify.json is a list of rows, a project's has them under ``steps``."""
     rows: dict[str, dict[str, Any]] = {}
-    for f in [project / "build" / "verify" / "verify.json", *(Path(e) for e in extra or [])]:
-        for r in json.loads(Path(f).read_text())["steps"]:
+    for f in [base, *(Path(e) for e in extra or [])]:
+        data = json.loads(Path(f).read_text())
+        for r in data["steps"] if isinstance(data, dict) else data:
             rows[str(r["step"])] = r
     return rows
+
+
+def rtl_rows(project: Path, extra: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    """The project's last `chipleap verify` results, by step, with ``extra``'s rows."""
+    return step_rows(project / "build" / "verify" / "verify.json", extra)
 
 
 def chip_data(project: Path) -> dict[str, Any]:
@@ -821,12 +923,15 @@ def chip_rows(
             )
         )
     lvs = "LVS match" if chip["lvs"]["result"] == "pass" else f"LVS {chip['lvs']['result']}"
+    ihp = _ihp_antenna(chip)
     rows.append(
         (
             "Signoff",
-            "IHP's DRC and LVS decks, antenna",
+            "IHP's DRC, LVS and antenna decks, OpenROAD's antenna check"
+            if ihp is not None
+            else "IHP's DRC and LVS decks, antenna",
             f"{chip['drc']['violations']} DRC violations, {lvs}, "
-            f"{chip['antenna_nets']} antenna violations",
+            f"{chip['antenna_nets'] + (ihp or 0)} antenna violations",
         )
     )
     return rows
@@ -1035,7 +1140,9 @@ def chip_html(chip: dict[str, Any], marks: list[tuple[str, str, float, float, in
         "before fill.</figcaption>"
         f'</figure><div class="chip-facts"><dl>{dl}</dl>{timing}'
         "<p>Every check is IHP's own: the DRC deck on the whole die with its density rules, the "
-        "LVS deck down to the macros' transistors. "
+        "LVS deck down to the macros' transistors"
+        + (", the antenna deck" if _ihp_antenna(chip) is not None else "")
+        + ". "
         '<a href="https://github.com/danieltyukov/chipleap/blob/main/docs/chips.md">How a chip '
         "is built and checked</a>.</p></div></div>"
     )
@@ -1199,6 +1306,12 @@ def main() -> None:
         help="an RTL project with a chip section, after `chipleap verify PROJECT --steps all`",
     )
     ap.add_argument(
+        "--verify-extra",
+        action="append",
+        help="a verify.json of the bundle's steps run on their own, replacing those rows "
+        "(repeatable)",
+    )
+    ap.add_argument(
         "--rtl-verify",
         action="append",
         help="a verify.json of steps run again on their own, replacing those rows (repeatable)",
@@ -1230,7 +1343,8 @@ def main() -> None:
     lines, hero_design = console()
     verify_line = "Consistency, lint, simulation and X-HEEP checks pass."
     if args.verify:
-        rows = json.loads((Path(args.verify) / "verify" / "verify.json").read_text())
+        bundle_rows = step_rows(Path(args.verify) / "verify" / "verify.json", args.verify_extra)
+        rows = list(bundle_rows.values())
         # Only what the page shows: the full rows carry local paths and tool logs.
         data["verification"] = [
             {k: r[k] for k in ("step", "status", "summary") if k in r} for r in rows
@@ -1240,7 +1354,7 @@ def main() -> None:
         if args.layout:
             layout_images(Path(args.layout))
         if (SITE / "img" / "layout-1200.jpg").exists():
-            inject(page, "layout", layout_html(rows))
+            inject(page, "layout", layout_html(rows, accel_label(Path(args.verify))))
         sim = next((r for r in rows if r["step"] == "sim"), None)
         if all(r["status"] == "pass" for r in rows) and sim:
             verify_line = (

@@ -154,14 +154,11 @@ Decoding a token streams nearly every weight once, so how the weights reach the 
 
 | Weights reach the accelerator | Stream at 35 MHz | token/s at 35 MHz | token/s at 36.8 MHz |
 |---|---|---|---|
-| X-HEEP's DMA copies them into a bank, a PSRAM access per word (0.5 B per cycle) | 18 MB/s | 0.21 | 0.22 |
-| the same with a controller that prefetches sequential words and an extra 8 KiB bank (2 B per cycle) | 70 MB/s | 0.69 | 0.73 |
 | the direct path, the accelerator on the SoC's clock (4 B per cycle) | 140 MB/s | 1.10 | 1.16 |
 | the direct path, the accelerator at 90 MHz on its own clock | 248 MB/s | 1.67 | 1.70 |
 | the direct path, the accelerator at 100 MHz | 248 MB/s | 1.68 | 1.71 |
-| the DMA path (2 B per cycle) with the accelerator at 90 MHz | 70 MB/s | 0.72 | 0.76 |
 
-The DMA rows are what X-HEEP alone allows, since its bus lets no external master reach the external slave window and serves one transaction per cycle with none outstanding ([xheep.md](xheep.md#external-memory-the-accelerators-direct-path)); they are this model with the accelerator's external stream set to the DMA's rate. The direct rows are the model as it is. The SoC as laid out today has neither the prefetching controller nor the extra bank, so without the direct path it would reach 0.21 token/s.
+Without the direct path the weights would have to come through X-HEEP's DMA, a word at a time: its bus lets no external master reach the external slave window and serves one transaction per cycle with none outstanding ([xheep.md](xheep.md#external-memory-the-accelerators-direct-path)). With external memory on X-HEEP the model always takes the direct path, so it no longer prices that one.
 
 With the direct path and the accelerator on its own clock, the accelerator's share of a token is the memory's: 324 ms to stream 80.35 MB, 367 ms in all at 35 MHz. What remains is the CPU's work, 233 ms per token at 35 MHz (221 ms at 36.8): RMSNorm, RoPE, softmax, SiLU and the requantization of every accelerator result run on the CV32E20 ([the CPU](#the-cpu)). That is why even the best path reaches 1.67 token/s, not 2: at 2 token/s a token has 500 ms, and the memory's 324 ms and the CPU's 233 ms do not fit, since the model runs the CPU and the accelerator one after the other. A faster memory would help only until the CPU's time is all that is left (4.3 token/s at 35 MHz); moving that work off the CPU, onto the accelerator or a vector unit beside it, is a possible next step that ChipLeap does not model or build today.
 
