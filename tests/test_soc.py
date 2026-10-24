@@ -14,6 +14,7 @@ from chipleap.hw.tech import get_tech
 from chipleap.macro.sram import IHP_1P
 from chipleap.model.evaluate import bank_mm2
 from chipleap.verify import soc as soc_step
+from chipleap.verify.pnr import MACRO_PNR_SLEW_NS
 
 MCU = """
 // a comment, with a port in it: input logic fake_i,
@@ -72,13 +73,12 @@ def test_a_port_the_reader_cannot_read_stops_it():
 def test_the_top_wires_the_accelerator_and_brings_the_rest_out():
     top = soc.top_sv(soc.mcu_ports(MCU), accel_ports=1)
     head = top[: top.index(");")]
-    # Pads, exit value and the external memory's OBI ports, with X-HEEP's types.
+    # Pads, exit value and the memory controller's port, with X-HEEP's types.
     assert "input logic uart_rx_i" in head and "output logic [31:0] exit_value_o" in head
     assert "output xheep_reg_pkg::xheep_reg_req_t pad_req_o" in head
-    assert (
-        "output xheep_obi_pkg::xheep_obi_req_t [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0]"
-        " ext_dma_read_req_o" in head
-    )
+    assert "output xheep_obi_pkg::xheep_obi_req_t [0:0] mem_req_o" in head
+    assert "input xheep_obi_pkg::xheep_obi_rsp_t [0:0] mem_resp_i" in head
+    assert "ext_dma_read" not in head
     # Tied, open, the interface and the accelerator's connections are not ports, nor are
     # the external slave ports nothing uses: the instruction port and the DMA's address port.
     for name in (
@@ -108,7 +108,111 @@ def test_the_top_wires_the_accelerator_and_brings_the_rest_out():
     assert ".cpu_subsystem_powergate_switch_ack_ni(cpu_subsystem_powergate_switch_n)" in top
     # The write port is the master after the read ports.
     assert "assign acc_obi_req[1].we = 1'b1;" in top
-    assert f"{banks.TOP} {soc.ACCEL_INST} (" in top
+    assert f"{banks.TOP} #(\n      .EXT_DIRECT(1)," in top and f") {soc.ACCEL_INST} (" in top
+
+
+def test_x_heeps_external_slave_ports_share_the_memory_port_with_the_accelerator():
+    mcu = MCU.replace(
+        "    output obi_req_t ext_core_instr_req_o,",
+        "    output obi_req_t ext_core_data_req_o,\n"
+        "    input  obi_rsp_t ext_core_data_resp_i,\n"
+        "    output obi_req_t  [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0] ext_dma_write_req_o,\n"
+        "    input  obi_rsp_t  [core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS-1:0] ext_dma_write_resp_i,\n"
+        "    output obi_req_t ext_core_instr_req_o,",
+    )
+    top = soc.top_sv(soc.mcu_ports(mcu), accel_ports=2)
+    head = top[: top.index(");")]
+    assert "ext_core_data" not in head and "ext_dma_write" not in head
+    # In chipleap_mem's order: the CPU's data port, then the DMA's read and write ports.
+    d = "core_v_mini_mcu_pkg::DMA_NUM_MASTER_PORTS"
+    assert ".ext_core_data_req_o(xs_req[0])" in top
+    assert f".ext_dma_read_req_o(xs_req[1 + {d} - 1:1])" in top
+    assert f".ext_dma_write_resp_i(xs_rsp[1 + {d} + {d} - 1:1 + {d}])" in top
+    assert f"localparam int unsigned NX = 1 + {d} + {d};" in top
+    assert "output xheep_obi_pkg::xheep_obi_req_t [1:0] mem_req_o" in head
+    # The accelerator reads X-HEEP's own external window over its direct ports.
+    assert ".EXT_SIZE(core_v_mini_mcu_pkg::EXT_SLAVE_SIZE)" in top
+    assert ".ext_req_o(ext_req)" in top and ".a_req_i(ext_req)" in top
+    assert "chipleap_mem #(\n      .PORTS(2),\n      .NX(NX),\n      .CDC(0)" in top
+    # Everything the top uses is declared before the MCU's instance uses it.
+    assert top.index("xs_req;") < top.index(f"{soc.MCU_INST} (")
+
+
+def test_on_its_own_clock_the_accelerator_and_the_memory_ports_run_on_accel_clk_i():
+    top = soc.top_sv(soc.mcu_ports(MCU), accel_ports=1, accel_clock=True)
+    head = top[: top.index(");")]
+    assert "input logic accel_clk_i" in head and "mem_req_o" in head
+    # The macro build behind its crossings, with the direct path for X-HEEP's window.
+    i = top.index(f"{soc.CDC_MODULE} #(")
+    inst = top[i : top.index(f") {soc.ACCEL_INST} (", i)]
+    assert ".PORTS(1)" in inst and ".EXT_DIRECT(1)" in inst
+    assert ".EXT_SIZE(core_v_mini_mcu_pkg::EXT_SLAVE_SIZE)" in inst
+    # It is chipleap_accel_cdc's to instantiate, not the top's.
+    assert f"\n  {banks.TOP} #(" not in top and f"\n  {banks.TOP} u_accel" not in top
+    assert top.count(".accel_clk_i(accel_clk_i)") == 2  # the crossings and chipleap_mem
+    assert "      .CDC(1)" in top
+    # Without external memory there is no memory block, but the clock still goes in.
+    bare = soc.top_sv(soc.mcu_ports(MCU), accel_ports=1, ext_memory=False, accel_clock=True)
+    assert "chipleap_mem" not in bare and ".EXT_DIRECT" not in bare
+    assert ".accel_clk_i(accel_clk_i)" in bare
+
+
+def test_the_accelerators_clock_is_bounded_against_x_heeps_without_clock_groups():
+    ports = soc.mcu_ports(MCU)
+    text = soc.sdc(ports, 28.571, 11.111, direct=True)
+    assert "create_clock [get_ports accel_clk_i] -name accel_clk_i -period 11.111" in text
+    assert "foreach name {clk_i accel_clk_i}" in text  # a clock input, not data
+    for a, b in (("clk", "accel_clk_i"), ("accel_clk_i", "clk")):
+        assert (
+            f"set_max_delay -ignore_clock_latency 11.111 -from [get_clocks {a}] "
+            f"-to [get_clocks {b}]" in text
+        )
+        assert f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]" in text
+    # In OpenSTA set_clock_groups drops those bounds: the accelerator's clock is in none.
+    groups = text[text.index("set groups {}") : text.index("set_clock_groups")]
+    assert "accel_clk_i" not in groups
+    # The memory ports run on it, their delays replace the ones against clk.
+    assert "set_input_delay $mem_delay -clock [get_clocks accel_clk_i] $mem_in" in text
+    assert text.index("set_input_delay $io_delay") < text.index("set_input_delay $mem_delay")
+    one = soc.sdc(ports, 28.571)
+    assert "accel_clk_i" not in one and "mem_delay" not in one
+
+
+def test_on_librelane_3014_place_and_route_bounds_the_crossings_with_the_clocks_latency():
+    """3.0.14's OpenROAD segfaults in the SoC's timing-driven placement on a path delay set
+    with -ignore_clock_latency, so place and route takes the crossings' bounds counting
+    both clocks' latency, and signoff keeps them as they are. Place and route also takes
+    the macros' slew target: IHP's SRAM inputs allow 0.595 ns, and 3.0.14's repair holds a
+    net to its driver's 2.5 ns. dev44 keeps one SDC."""
+    ports = soc.mcu_ports(MCU)
+    signoff = soc.sdc(ports, 28.571, 11.111, direct=True)
+    pnr_text = soc.sdc(
+        ports, 28.571, 11.111, direct=True, ignore_clock_latency=False, slew_ns=MACRO_PNR_SLEW_NS
+    )
+    assert "-ignore_clock_latency" not in pnr_text
+    for a, b in (("clk", "accel_clk_i"), ("accel_clk_i", "clk")):
+        assert f"set_max_delay 11.111 -from [get_clocks {a}] -to [get_clocks {b}]" in pnr_text
+        assert f"set_false_path -hold -from [get_clocks {a}] -to [get_clocks {b}]" in pnr_text
+    target = f"set_max_transition {MACRO_PNR_SLEW_NS:g} [current_design]"
+    assert pnr_text.splitlines()[-1] == target and target not in signoff
+
+    def rest(text: str) -> list[str]:
+        ours = ("set_max_delay", "# For", target, "# A slew target")
+        return [ln for ln in text.splitlines() if not ln.startswith(ours)]
+
+    assert rest(pnr_text) == rest(signoff)
+    assert soc_step.pnr_sdc("3.0.14") == soc_step.PNR_SDC
+    assert soc_step.pnr_sdc("3.0.0.dev44") == soc_step.SDC
+    sources = soc_step.Sources((), (), (), None)  # type: ignore[arg-type]
+    for accel, version, used in (
+        (90.0, "3.0.14", soc_step.PNR_SDC),
+        (0.0, "3.0.14", soc_step.PNR_SDC),
+        (90.0, "3.0.0.dev44", soc_step.SDC),
+        (0.0, "3.0.0.dev44", soc_step.SDC),
+    ):
+        cfg = soc_step.config(sources, 36.0, accel, version)
+        assert cfg["PNR_SDC_FILE"] == f"dir::{used}"
+        assert cfg["SIGNOFF_SDC_FILE"] == f"dir::{soc_step.SDC}"
 
 
 def test_without_external_memory_every_external_slave_port_is_tied_off():
@@ -117,6 +221,8 @@ def test_without_external_memory_every_external_slave_port_is_tied_off():
     assert "ext_dma_read" not in head and "ext_core_instr" not in head
     assert ".ext_dma_read_resp_i('0)" in top and ".ext_dma_read_req_o()" in top
     assert "pad_req_o" in head
+    # No direct path: the accelerator's ports for it are tied off, and no memory port.
+    assert ".ext_gnt_i('0)" in top and "mem_req_o" not in top and "chipleap_mem" not in top
 
 
 def test_a_port_the_top_does_not_know_stops_it():
@@ -341,7 +447,7 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     pdk = io.pdk_dir()
     co = xheep.find_checkout()
     assert pdk is not None and co is not None
-    cfg, prep = soc_step.prepare(design, xheep_config(design), co, work, pdk)
+    cfg, prep = soc_step.prepare(design, xheep_config(design), co, work, pdk, version="3.0.14")
     assert cfg["DESIGN_NAME"] == soc.TOP and cfg["USE_SLANG"] is True
     assert cfg["CLOCK_PERIOD"] == pytest.approx(11.111)
     assert "--extern-modules" in cfg["SLANG_ARGUMENTS"]
@@ -359,10 +465,16 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     assert "set_clock_groups -asynchronous" in sdc
     # The I2S's source-synchronous outputs leave within the cycle, as its clock does.
     assert "set_output_delay 0 -clock [get_clocks clk] $i2s_out" in sdc
+    # On LibreLane 3.0.14 place and route adds the macros' slew target; one clock, no bounds.
+    assert cfg["PNR_SDC_FILE"] == f"dir::{soc_step.PNR_SDC}"
+    assert cfg["SIGNOFF_SDC_FILE"] == f"dir::{soc_step.SDC}"
+    pnr_sdc = (work / soc_step.PNR_SDC).read_text()
+    target = f"set_max_transition {MACRO_PNR_SLEW_NS:g} [current_design]"
+    assert target in pnr_sdc and target not in sdc and "set_max_delay" not in pnr_sdc
     cells = [c for _, c in prep.instances]
     assert cells.count("RM_IHPSG13_1P_1024x32_c2_bm_bist") == 8
     assert cells.count("RM_IHPSG13_1P_256x64_c2_bm_bist") == 4
-    full, fp = soc_step.with_floorplan(cfg, prep, 3.0e6, work)
+    full, fp = soc_step.with_floorplan(cfg, prep, 3.0e6, work, "3.0.0.dev44")
     assert set(full["MACROS"]) == set(cells)
     assert {p.instance for p in fp.macros} == {i for i, _ in prep.instances}
     assert (work / "pdn.tcl").is_file()
@@ -370,13 +482,17 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     accel = {i for i, _ in prep.instances if i.startswith(f"{soc.ACCEL_INST}.")}
     assert len(accel) == 4
     assert {e["target"] for e in full["INSERT_ECO_BUFFERS"]} == {f"{i}/A_CLK" for i in accel}
-    # A trial run adds one after each of the 32 output bits of the eight bank macros.
+    # From LibreLane 3.0.14 on, and on dev44 for a trial run, one goes after each output
+    # bit of every SRAM: the eight bank macros' 32 and the accelerator's four macros' 64.
+    new, _ = soc_step.with_floorplan(cfg, prep, 3.0e6, work, "3.0.14")
     monkeypatch.setenv(soc_step.BUFFERS_ENV, soc_step.BANK_OUTPUTS)
-    trial, _ = soc_step.with_floorplan(cfg, prep, 3.0e6, work)
-    outs = [e for e in trial["INSERT_ECO_BUFFERS"] if "/A_DOUT[" in e["target"]]
-    assert len(outs) == 256 and {e["buffer"] for e in outs} == {"sg13g2_buf_2"}
-    assert trial["INSERT_ECO_BUFFERS"][: len(accel)] == full["INSERT_ECO_BUFFERS"]
+    trial, _ = soc_step.with_floorplan(cfg, prep, 3.0e6, work, "3.0.0.dev44")
     monkeypatch.delenv(soc_step.BUFFERS_ENV)
+    for buffered in (new, trial):
+        outs = [e for e in buffered["INSERT_ECO_BUFFERS"] if "/A_DOUT[" in e["target"]]
+        assert len(outs) == 8 * 32 + 4 * 64 and {e["buffer"] for e in outs} == {"sg13g2_buf_2"}
+        assert len([o for o in outs if o["target"].startswith(f"{soc.ACCEL_INST}.")]) == 256
+        assert buffered["INSERT_ECO_BUFFERS"][: len(accel)] == full["INSERT_ECO_BUFFERS"]
     # More standard cells, a larger core.
     _, small = soc_step.with_floorplan(cfg, prep, 1.0e6, work)
     assert small.core_um2 < fp.core_um2
@@ -388,12 +504,30 @@ def test_the_smollm2_soc_is_prepared_for_librelane(tmp_path, monkeypatch):
     # and the repairs keep setup slack for what routing takes from the long paths.
     assert cfg["GRT_DESIGN_REPAIR_MAX_CAP_PCT"] == 25
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == pytest.approx(0.2)
-    assert (cfg["PL_RESIZER_SETUP_SLACK_MARGIN"], cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"]) == (6, 5)
+    assert (
+        cfg["PL_RESIZER_SETUP_SLACK_MARGIN"],
+        cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"],
+    ) == soc_step.setup_margins_ns()
     assert cfg["CTS_CLK_BUFFERS"][0] == cfg["CTS_ROOT_BUFFER"] == "sg13g2_buf_16"
     # A clock other than the design's, for a signoff the SoC can meet.
     slow, _ = soc_step.prepare(design, xheep_config(design), co, work, pdk, clock_mhz=55.0)
     assert slow["CLOCK_PERIOD"] == pytest.approx(18.182)
     assert "-name clk -period 18.182" in (work / soc_step.SDC).read_text()
+    # The accelerator on its own clock: behind its crossings, its macros one level down,
+    # and two clock ports.
+    own = design.with_(accel_mhz=90.0)
+    cfg2, prep2 = soc_step.prepare(own, xheep_config(own), co, work, pdk, clock_mhz=35.0)
+    assert cfg2["CLOCK_PORT"] == ["clk_i", "accel_clk_i"]
+    # Synthesis aims at X-HEEP's period, most of the SoC's logic; the SDC times both.
+    assert cfg2["CLOCK_PERIOD"] == pytest.approx(28.571)
+    assert "src/chipleap_accel_cdc.sv" in prep2.sources.files
+    accel2 = {i for i, _ in prep2.instances if i.startswith(f"{soc.ACCEL_INST}.")}
+    assert len(accel2) == 4 and all(i.startswith("u_accel.u_accel.") for i in accel2)
+    sdc2 = (work / soc_step.SDC).read_text()
+    assert "-name clk -period 28.571" in sdc2 and "-name accel_clk_i -period 11.111" in sdc2
+    full2, _ = soc_step.with_floorplan(cfg2, prep2, 3.0e6, work)
+    clock2 = {e["target"] for e in full2["INSERT_ECO_BUFFERS"] if e["target"].endswith("/A_CLK")}
+    assert clock2 == {f"{i}/A_CLK" for i in accel2}
 
 
 @pytest.mark.skipif(bool(_real_tools()), reason=_real_tools() or "tools present")
@@ -633,14 +767,83 @@ def test_the_socs_clock_terms_are_measured_from_its_routed_paths(monkeypatch):
     assert bus.start == "_cpu_" and bus.needed_ns == pytest.approx(27.997)
 
 
+def test_the_soc_takes_its_settings_from_the_librelane_that_runs(monkeypatch):
+    """The version LibreLane reports, else the tag of the image ChipLeap asks a wrapper for
+    (``tools.librelane``); a version read neither way takes 3.0.14's settings, as the
+    default, and place and route refuses to start it."""
+    from chipleap.verify import tools
+
+    def ran(version: str, image: str | None) -> tuple[str, bool]:
+        tool = tools.Tool("librelane", "/usr/bin/librelane", version, "layout")
+        monkeypatch.setattr(tools, "find", lambda *args, **kwargs: tool)
+        if image is None:
+            monkeypatch.delenv(tools.LIBRELANE_IMAGE_ENV, raising=False)
+        else:
+            monkeypatch.setenv(tools.LIBRELANE_IMAGE_ENV, image)
+        return soc_step.librelane_version(), soc_step.librelane_from_3014()
+
+    assert ran("3.0.0.dev44", "ghcr.io/librelane/librelane:3.0.14") == ("3.0.0.dev44", False)
+    assert ran("", "ghcr.io/librelane/librelane:3.0.0.dev44") == ("3.0.0.dev44", False)
+    assert ran("", "ghcr.io/librelane/librelane:3.0.14") == ("3.0.14", True)
+    assert ran("container wrapper", "") == ("container wrapper", True)
+
+
+def test_the_socs_drc_and_antenna_decks_get_the_layouts_time_limit(tmp_path, monkeypatch):
+    """IHP's DRC on the SmolLM2 SoC ran 3 h, a block's limit, without finishing: the soc
+    step gives both decks its own layout's limit."""
+    from types import SimpleNamespace
+
+    from chipleap.rtl import pnr as rtl_pnr
+    from chipleap.verify import pnr
+
+    seen: dict[str, float] = {}
+    result = pnr.PnrResult(36.0, 1.0, 1.0, 1.0, 0.5, 10, 0.4, 1.0, 0.05, 0, 0, 0, 1.0, None)
+    monkeypatch.setattr(rtl_pnr, "check_merged", lambda *a: None)
+    monkeypatch.setattr(soc_step.sram, "catalog", lambda pdk: [])
+    monkeypatch.setattr(soc_step, "pdk_cells", lambda *a: {})
+    monkeypatch.setattr(soc_step, "model_areas_um2", lambda design: (0.0, 0.0))
+    monkeypatch.setattr(pnr, "parse_run", lambda *a: result)
+
+    def drc(r, *a, timeout_s=10800, **k):
+        seen["drc"] = timeout_s
+        return r
+
+    def ant(r, *a, timeout_s=10800, **k):
+        seen["antenna"] = timeout_s
+        return r
+
+    monkeypatch.setattr(pnr, "with_ihp_drc", drc)
+    monkeypatch.setattr(pnr, "with_ihp_antenna", ant)
+    design = SimpleNamespace(accel_mhz=0.0)
+    soc_step.routed(design, tmp_path, tmp_path, 36.0, (), 1.0, {}, None)  # type: ignore[arg-type]
+    assert seen == {"drc": soc_step.TIMEOUT_S, "antenna": soc_step.TIMEOUT_S}
+    assert soc_step.TIMEOUT_S > 10800
+
+
 def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
-    """The SoC's repairs keep 6 and 5 ns of estimated setup slack and 0.2 ns of hold after
-    global routing; CHIPLEAP_SOC_HOLD_MARGIN sets another hold margin, a number of ns."""
+    """The SoC's repairs keep 2.0 and 3.0 ns of estimated setup slack from LibreLane 3.0.14
+    on, 6 and 5 ns on 3.0.0.dev44 (#20's evidence), and 0.2 ns of hold after global
+    routing; CHIPLEAP_SOC_SETUP_MARGINS and CHIPLEAP_SOC_HOLD_MARGIN set others for a
+    trial run."""
     sources = soc_step.Sources((), (), (), None)  # type: ignore[arg-type]
     monkeypatch.delenv(soc_step.HOLD_MARGIN_ENV, raising=False)
-    cfg = soc_step.config(sources, 36.0)
-    assert cfg["PL_RESIZER_SETUP_SLACK_MARGIN"] == 6.0
-    assert cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"] == 5.0
+    monkeypatch.delenv(soc_step.SETUP_MARGINS_ENV, raising=False)
+
+    def margins(version: str | None) -> tuple[float, float]:
+        cfg = soc_step.config(sources, 36.0, version=version)
+        return cfg["PL_RESIZER_SETUP_SLACK_MARGIN"], cfg["GRT_RESIZER_SETUP_SLACK_MARGIN"]
+
+    assert margins("3.0.14") == margins("3.1.0") == (2.0, 3.0)
+    assert margins("3.0.0.dev44") == margins("3.0.0rc1") == (6.0, 5.0)
+    assert margins("unknown") == (2.0, 3.0)  # as the LibreLane run by default
+    monkeypatch.setenv(soc_step.SETUP_MARGINS_ENV, " 0.8, 1.6 ")
+    assert margins("3.0.14") == margins("3.0.0.dev44") == (0.8, 1.6)
+    for bad in ("2", "x,1", "1,2,3", "-1,2", "1,11"):
+        monkeypatch.setenv(soc_step.SETUP_MARGINS_ENV, bad)
+        with pytest.raises(soc_step.SocError, match="CHIPLEAP_SOC_SETUP_MARGINS must be"):
+            margins("3.0.14")
+    monkeypatch.delenv(soc_step.SETUP_MARGINS_ENV)
+    cfg = soc_step.config(sources, 36.0, version="3.0.14")
     assert cfg["GRT_RESIZER_HOLD_SLACK_MARGIN"] == 0.2
     # IHP's DRC deck runs after LibreLane, in parallel parts, not as LibreLane's step.
     assert cfg["RUN_KLAYOUT_DRC"] is False
@@ -679,7 +882,8 @@ def test_clock_gates_are_read_where_placement_put_them():
 
 def test_the_layout_is_one_run_after_synthesis_without_the_gates_buffers(tmp_path, monkeypatch):
     """By default the layout goes on from synthesis in one run, with the configuration as
-    given, as the evidence layout did."""
+    given, as the evidence layout did; from LibreLane 3.0.14 on with the second antenna
+    repair after the timing repair."""
     from chipleap.verify import pnr
 
     calls: list[tuple[dict, dict]] = []
@@ -696,10 +900,12 @@ def test_the_layout_is_one_run_after_synthesis_without_the_gates_buffers(tmp_pat
             monkeypatch.delenv(soc_step.BUFFERS_ENV, raising=False)
         else:
             monkeypatch.setenv(soc_step.BUFFERS_ENV, value)
-        assert soc_step.layout(tmp_path, full) == ({"done": 1}, None)
-        assert calls == [
-            (full, {"resume_from": soc_step.AFTER_SYNTHESIS, "timeout_s": soc_step.TIMEOUT_S})
-        ]
+        assert soc_step.layout(tmp_path, full, "3.0.0.dev44") == ({"done": 1}, None)
+        kw = {"resume_from": soc_step.AFTER_SYNTHESIS, "timeout_s": soc_step.TIMEOUT_S}
+        assert calls == [(full, {**kw, "late_antenna_repair": False})]
+        calls.clear()
+        soc_step.layout(tmp_path, full, "3.0.14")
+        assert calls[0][1]["late_antenna_repair"] is True
 
 
 def test_a_trial_run_names_its_buffers(monkeypatch):
@@ -741,12 +947,13 @@ def test_the_layout_stops_after_the_clock_tree_to_buffer_the_gates(tmp_path, mon
 
     monkeypatch.setattr(pnr, "run_librelane", fake)
     macro = {"target": "u_accel.abuf_s0_m0/A_CLK", "buffer": "sg13g2_buf_4", "placement": [1, 2]}
-    metrics, _ = soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [macro]})
+    metrics, _ = soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [macro]}, "3.0.0.dev44")
     assert metrics == {"done": 1}
     assert calls[0][1] == {
         "resume_from": soc_step.AFTER_SYNTHESIS,
         "to": soc_step.CTS,
         "timeout_s": soc_step.TIMEOUT_S,
+        "late_antenna_repair": False,
     }
     assert calls[1][1]["resume_from"] == soc_step.ECO_BUFFERS and "to" not in calls[1][1]
     eco = calls[1][0]["INSERT_ECO_BUFFERS"]
@@ -763,10 +970,10 @@ def test_the_layout_stops_after_the_clock_tree_to_buffer_the_gates(tmp_path, mon
         soc_step.layout(tmp_path, {"INSERT_ECO_BUFFERS": [], "_outside": True})
 
 
-def test_each_bank_output_gets_a_buffer_beside_its_pin():
-    """X-HEEP's bank macros' A_DOUT bits each get a buffer just past the halo beside the
-    pin (below a macro of the top row, above one of the bottom row); the accelerator's
-    macros get none; a bank macro without A_DOUT pins stops the step."""
+def test_each_sram_output_gets_a_buffer_beside_its_pin():
+    """Every SRAM macro's A_DOUT bits, X-HEEP's banks' and the accelerator's, each get a
+    buffer just past the halo beside the pin (below a macro of the top row, above one of
+    the bottom row); SRAM macros without A_DOUT pins stop the step."""
     from chipleap.macro import place
     from chipleap.macro.layer import MacroPin, MacroView
 
@@ -787,17 +994,20 @@ def test_each_bank_output_gets_a_buffer_beside_its_pin():
             place.Placed(f"{soc.ACCEL_INST}.abuf_s0_m0", 60.48, 2040.94, "N"),
         ),
     )
-    eco = soc_step.bank_output_buffers(fp, {m.instance: bank for m in fp.macros})
+    eco = soc_step.output_buffers(fp, {m.instance: bank for m in fp.macros})
     off = place.HALO_UM + soc_step.CLOCK_PIN_GAP_UM
+    accel = f"{soc.ACCEL_INST}.abuf_s0_m0"
     assert [e["target"] for e in eco] == [
         f"{top}/A_DOUT[0]",
         f"{top}/A_DOUT[31]",
         f"{bottom}/A_DOUT[0]",
         f"{bottom}/A_DOUT[31]",
+        f"{accel}/A_DOUT[0]",
+        f"{accel}/A_DOUT[31]",
     ]
     assert eco[0]["placement"] == [2553.79, round(1823.26 - off, 3)]
     assert eco[3]["placement"] == [3385.73, round(32.68 + 336.46 + off, 3)]
     assert {e["buffer"] for e in eco} == {"sg13g2_buf_2"}
     bare = MacroView("RM_C", "pdk", 10.0, 10.0, pins[2:], p, p, p, p, ("RM_C",), ("RM_C",))
     with pytest.raises(soc_step.SocError, match="have no A_DOUT"):
-        soc_step.bank_output_buffers(fp, {m.instance: bare for m in fp.macros})
+        soc_step.output_buffers(fp, {m.instance: bare for m in fp.macros})

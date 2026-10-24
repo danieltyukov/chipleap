@@ -21,8 +21,10 @@ import json
 import math
 import os
 import re
+import shutil
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -263,8 +265,9 @@ def port_diodes() -> dict[str, Any]:
     return {"DIODE_ON_PORTS": "in", "DIODE_CELL": DIODE_CELL}
 
 
-def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
-    """The LibreLane configuration for the accelerator at ``clock_mhz``."""
+def config(accel: Accel, clock_mhz: float, direct: bool = False) -> dict[str, Any]:
+    """The LibreLane configuration for the accelerator at ``clock_mhz`` (with ``direct``, with
+    its direct read path to external memory)."""
     p = rtl_params(accel)
     params = {
         "DATAFLOW": p.dataflow,
@@ -276,6 +279,7 @@ def config(accel: Accel, clock_mhz: float) -> dict[str, Any]:
         "WBUF_WORDS": PNR_WORDS,
         "DOUBLE_BUF": p.double_buf,
         "ACC_ROWS": p.acc_rows,
+        **({"EXT_DIRECT": 1} if direct else {}),
     }
     return {
         "DESIGN_NAME": "chipleap_accel",
@@ -430,16 +434,22 @@ ANTENNA_DIR = "antenna"  # beside the run: IHP's antenna deck's report and log
 
 
 def with_ihp_antenna(
-    r: PnrResult, pdk: Path | None, top: str, work: Path, name: str = ANTENNA_DIR
+    r: PnrResult,
+    pdk: Path | None,
+    top: str,
+    work: Path,
+    name: str = ANTENNA_DIR,
+    timeout_s: float = 10800,
 ) -> PnrResult:
     """``r`` with IHP's antenna deck run on its GDS (``chipleap.verify.antenna``), its
     report in ``work/name`` (emptied first), or with why it could not run here. A run of
-    the deck that did not finish fails the step."""
+    the deck that did not finish fails the step. ``CHIPLEAP_PNR_TIMEOUT`` (seconds)
+    bounds it, ``timeout_s`` when it is unset, as for LibreLane (``run_librelane``)."""
     why = "the run left no GDS" if r.gds is None else antenna.unavailable(pdk)
     if why or pdk is None or r.gds is None:
         return replace(r, ihp_antenna_skipped=why)
     out = builddir.work_dir(work, name, empty=True)
-    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", timeout_s))
     try:
         return replace(r, ihp_antenna=antenna.check(pdk, r.gds, top, out, limit))
     except antenna.AntennaError as exc:
@@ -460,8 +470,119 @@ def drc_plan(threads: int) -> tuple[int, int, int]:
     return parts, max(1, min(8, threads - parts)), max(1, min(4, threads // 4))
 
 
+# LibreLane 3.0.14 streams the routed vias out as instances of via cells (1,383,247 of 70
+# cells in the SmolLM2 SoC's GDS, none in 3.0.0.dev44's), and IHP's deck in deep mode then
+# spends hours building connectivity across them in the nwell and nbulay tables, where a
+# whole table took about 9 minutes on dev44's GDS of the same geometry. So the deck runs on
+# a copy with those instances flattened into the top cell (``flat_vias``). A via cell is
+# chosen by what it holds, never by its name: a leaf instanced in the top whose shapes are
+# all on the metal, via and contact layers, with a cut among them (GDS layer numbers below),
+# and which is not one of the PDK's own cells (standard, IO and SRAM, PDK_CELL_PREFIXES) or
+# a cell ``held`` names. So the macros keep the cell names their pin markers are set apart
+# by. Only the via cells the flattening leaves unused are deleted; those inside the SRAM
+# macros stay. The delivered GDS is unchanged.
+VIA_CELL_LAYERS = (8, 10, 30, 50, 67, 126, 134)  # Metal1 to Metal5, TopMetal1 and 2
+VIA_CUT_LAYERS = (6, 19, 29, 49, 66, 125, 133)  # Cont, Via1 to Via4, TopVia1 and 2
+PDK_CELL_PREFIXES = ("sg13g2_", "RM_IHPSG13_")  # IHP's standard and IO cells, its SRAMs
+FLAT_VIAS_LOG = "flatvias.log"
+_FLAT_VIAS_PY = f"""\
+import json
+import sys
+import klayout.db as db
+
+CUTS = set({VIA_CUT_LAYERS!r})
+LAYERS = set({VIA_CELL_LAYERS!r}) | CUTS
+PREFIXES = {PDK_CELL_PREFIXES!r}
+src, dst, name, kept = sys.argv[1:5]
+KEEP = set(json.load(open(kept)))
+ly = db.Layout()
+ly.read(src)
+top = ly.cell(name)
+if top is None:
+    sys.exit(f"no cell {{name}} in {{src}}")
+number = {{li: ly.get_info(li).layer for li in ly.layer_indexes()}}
+
+
+def is_via(cell):
+    if cell.child_cells() or cell.cell_index() == top.cell_index():
+        return False
+    if cell.name in KEEP or cell.name.startswith(PREFIXES):
+        return False
+    used = {{number[li] for li in ly.layer_indexes() if not cell.shapes(li).is_empty()}}
+    return bool(used & CUTS) and used <= LAYERS
+
+
+vias = {{c.cell_index() for c in ly.each_cell() if is_via(c)}}
+keep, flat = [], []
+for inst in top.each_inst():
+    (flat if inst.cell_index in vias else keep).append(inst.cell_inst)
+tmp = ly.create_cell("CHIPLEAP_FLAT_VIAS")
+for a in flat:
+    tmp.insert(a)
+top.clear_insts()
+for a in keep:
+    top.insert(a)
+ly.flatten(tmp.cell_index(), -1, True)
+top.copy_shapes(tmp)
+ly.delete_cell(tmp.cell_index())
+for ci in vias:
+    if ly.is_valid_cell_index(ci) and ly.cell(ci).parent_cells() == 0:
+        ly.delete_cell(ci)
+ly.write(dst)
+n = sum(a.size() for a in flat)
+k = sum(a.size() for a in keep)
+print(f"flattened {{n}} instances of {{len(vias)}} via cells into {{name}}, which keeps {{k}}")
+"""
+
+
+@contextmanager
+def flat_vias(
+    gds: Path, top: str, out: Path, timeout: float, keep: Iterable[str] = ()
+) -> Iterator[Path]:
+    """``gds`` with every instance of a via cell in the cell ``top`` flattened into it (see
+    VIA_CELL_LAYERS), in a private directory while the context lasts; the run's log in
+    ``out/FLAT_VIAS_LOG``. A cell ``keep`` names is never a via cell. KLayout's own Python
+    does it, the one IHP's runners use, all instances in one flattening."""
+    from chipleap.chip.run import ToolError, private_dir, python_with_klayout, run
+
+    found = python_with_klayout()
+    if found is None:
+        raise PnrError(
+            "IHP's DRC needs a Python with KLayout's module (pip install klayout); set "
+            "CHIPLEAP_KLAYOUT_PYTHON to one"
+        )
+    python, module_dir = found
+    with private_dir("chipleap-flatvias-") as tmp:
+        shutil.copyfile(gds, tmp / "in.gds")
+        (tmp / "flatvias.py").write_text(_FLAT_VIAS_PY)
+        (tmp / "keep.json").write_text(json.dumps(sorted(set(keep))))
+        cmd = [python, str(tmp / "flatvias.py"), "in.gds", "layout.gds", top, "keep.json"]
+        try:
+            code, log = run(
+                cmd,
+                tmp,
+                [Path(module_dir)],
+                out,
+                FLAT_VIAS_LOG,
+                timeout,
+                {"PYTHONPATH": module_dir},
+            )
+        except ToolError as exc:
+            raise PnrError(f"IHP's DRC: flattening the vias: {exc}") from None
+        if code != 0 or not (tmp / "layout.gds").is_file():
+            last = next((ln for ln in reversed(log.splitlines()) if ln.strip()), "")
+            raise PnrError(f"IHP's DRC: flattening the vias failed (exit {code}): {last}")
+        (tmp / "in.gds").unlink()
+        yield tmp / "layout.gds"
+
+
 def ihp_drc(
-    pdk: Path, gds: Path, top: str, out: Path, held: Mapping[str, tuple[str, ...]]
+    pdk: Path,
+    gds: Path,
+    top: str,
+    out: Path,
+    held: Mapping[str, tuple[str, ...]],
+    timeout_s: float = 10800,
 ) -> DrcResult:
     """IHP's DRC deck (IHP-Open-PDK's ``run_drc.py``) on ``gds``, with density off, as
     LibreLane checks a block, and recommended rules off, as the chip step and LibreLane
@@ -513,18 +634,20 @@ def ihp_drc(
 
         return build
 
-    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", "10800"))
-    try:
-        runs = ihp_runs(
-            pdk,
-            out,
-            {"layout.gds": gds},
-            {f"{n}.drc": text for n, text in zip(names, split or (), strict=True)},
-            {DRC_MAIN: main, **{n: part(n) for n in names}},
-            limit,
-        )
-    except ToolError as exc:
-        raise PnrError(f"IHP's DRC: {exc}") from None
+    limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", timeout_s))
+    macros = {c for inner, outer in held.items() for c in (inner, *outer)}
+    with flat_vias(gds, top, out, limit, macros) as flat:
+        try:
+            runs = ihp_runs(
+                pdk,
+                out,
+                {"layout.gds": flat},
+                {f"{n}.drc": text for n, text in zip(names, split or (), strict=True)},
+                {DRC_MAIN: main, **{n: part(n) for n in names}},
+                limit,
+            )
+        except ToolError as exc:
+            raise PnrError(f"IHP's DRC: {exc}") from None
     code, log = runs[DRC_MAIN]
     report = out / f"layout_{top}_full.lyrdb"
     if code not in (0, 1) or not report.is_file():
@@ -622,18 +745,20 @@ def with_ihp_drc(
     work: Path,
     held: Mapping[str, tuple[str, ...]],
     name: str = DRC_DIR,
+    timeout_s: float = 10800,
 ) -> PnrResult:
     """``r``, from a run with LibreLane's KLayout DRC off, with IHP's DRC deck run on its
     GDS (``ihp_drc``, its reports in ``work/name``): its violations added to the DRC count
     and the PDK macros' off-grid pin markers set apart. Signoff needs it, so a deck that
-    cannot run here is an error, not a skipped check."""
+    cannot run here is an error, not a skipped check. ``CHIPLEAP_PNR_TIMEOUT`` (seconds)
+    bounds it, ``timeout_s`` when it is unset."""
     if r.gds is None:
         raise PnrError("the run left no GDS for IHP's DRC")
     why = antenna.unavailable(pdk)
     if why or pdk is None:
         raise PnrError(f"IHP's DRC cannot run: {why}")
     out = builddir.work_dir(work, name, empty=True)
-    result = ihp_drc(pdk, r.gds, top, out, held)
+    result = ihp_drc(pdk, r.gds, top, out, held, timeout_s)
     return replace(
         r,
         drc_errors=r.drc_errors + result.total,
@@ -791,9 +916,8 @@ def run_librelane(
 
     With ``late_antenna_repair``, antennas are repaired again after the timing repair
     (``with_late_antenna_repair``). The accelerator, an RTL project and a chip ask for it
-    (an ECO adds it to its own step list). The SoC step does not yet: the runs its
-    results stand on were routed without it, and it turns it on once a SoC run with it
-    has been checked."""
+    (an ECO adds it to its own step list), and the SoC step from LibreLane 3.0.14 on; on
+    3.0.0.dev44 the SoC keeps the flow #20's evidence was routed with."""
     tool = librelane()
     if not tool.found or tool.path is None:
         raise PnrError("LibreLane is not installed")
@@ -1185,7 +1309,9 @@ CDC_INSTANCE = "u_accel"  # the accelerator in it
 CDC_DEPTH = 8  # words of each crossing FIFO (CDC_AW = 3), and reads in flight per port
 
 
-def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None) -> str:
+def two_clock_sdc(
+    bus_mhz: float, accel_mhz: float, slew_ns: float | None = None, direct: bool = False
+) -> str:
     """Constraints for the accelerator behind its crossings: X-HEEP's clock (``clk_i``)
     and the accelerator's (``accel_clk_i``), the ports timed against the first, as
     LibreLane's base SDC would (``chipleap.rtl.pnr.io_lines``), and the two clocks
@@ -1200,7 +1326,8 @@ def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None
     keeps the bits of a gray-coded pointer within a cycle of each other where they are
     sampled, and ``set_false_path -hold``, since a hold check between unrelated clocks
     times nothing. ``slew_ns`` adds a design-wide slew target (``MACRO_PNR_SLEW_NS`` for a
-    macro build's placement and routing)."""
+    macro build's placement and routing). With ``direct`` the direct read ports
+    (``ext_*``), which stay on the accelerator's clock, are timed against it instead."""
     from chipleap.rtl.pnr import io_lines
 
     bus = round(1000.0 / bus_mhz, 3)
@@ -1230,6 +1357,19 @@ def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None
             for a, b in (("clk_i", "accel_clk_i"), ("accel_clk_i", "clk_i"))
         ),
     ]
+    if direct:
+        lines += [
+            "# The direct read ports to external memory stay on the accelerator's clock.",
+            f"set ext_delay [expr {acc:g} * $::env(IO_DELAY_CONSTRAINT) / 100]",
+            "set ext_in [get_ports -quiet {ext_gnt_i* ext_rvalid_i* ext_rdata_i*}]",
+            "set ext_out [get_ports -quiet {ext_req_o* ext_addr_o*}]",
+            "if { [llength $ext_in] } {",
+            "    set_input_delay $ext_delay -clock [get_clocks accel_clk_i] $ext_in",
+            "}",
+            "if { [llength $ext_out] } {",
+            "    set_output_delay $ext_delay -clock [get_clocks accel_clk_i] $ext_out",
+            "}",
+        ]
     if slew_ns is not None:
         lines += [
             "# A slew target for repair under the SRAM macros' input limit.",
@@ -1238,35 +1378,48 @@ def two_clock_sdc(bus_mhz: float, accel_mhz: float, slew_ns: float | None = None
     return "\n".join(lines) + "\n"
 
 
-def model_cell_um2(accel: Accel, banked: bool = False, crossings: bool = False) -> float:
+def model_cell_um2(
+    accel: Accel, banked: bool = False, crossings: bool = False, direct: bool = False
+) -> float:
     """The model's standard-cell area for the accelerator's logic on SG13G2; ``banked``
     for a macro-backed build, whose logic also has its banks' interface, ``crossings``
-    for one on its own clock behind its crossings."""
-    um2 = banks.cell_um2(accel, banked)
-    if crossings:
-        from chipleap.hw.tech import ACCEL_CDC_KGE, ACCEL_CDC_PORT_KGE, get_tech
+    for one on its own clock behind its crossings, ``direct`` for one with its direct
+    read path (sixteen reads in flight per port, as on IHP SG13G2)."""
+    from chipleap.hw.tech import (
+        ACCEL_CDC_KGE,
+        ACCEL_CDC_PORT_KGE,
+        DIRECT_PORT_CDC_KGE,
+        DIRECT_PORT_KGE,
+        get_tech,
+    )
 
-        kge = ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * accel.ports
-        um2 += kge * 1000 * get_tech("ihp-sg13g2").ge_um2
-    return um2
+    um2 = banks.cell_um2(accel, banked)
+    kge = ACCEL_CDC_KGE + ACCEL_CDC_PORT_KGE * accel.ports if crossings else 0.0
+    if direct:
+        kge += (DIRECT_PORT_CDC_KGE if crossings else DIRECT_PORT_KGE) * accel.ports
+    return um2 + kge * 1000 * get_tech("ihp-sg13g2").ge_um2
 
 
 def with_crossings(
-    cfg: dict[str, Any], workdir: Path, bus_mhz: float, accel_mhz: float
+    cfg: dict[str, Any], workdir: Path, bus_mhz: float, accel_mhz: float, direct: bool = False
 ) -> dict[str, Any]:
     """``cfg`` for the accelerator behind its crossings (``CDC_TOP``): that top, from
     ``src/chipleap_accel_cdc.v`` in place of ``src/chipleap_accel.v``, both clocks, and
     ``two_clock_sdc`` for placement, routing and signoff, written into ``workdir`` (with
-    the macros' slew target for placement and routing when ``cfg`` has macros)."""
+    the macros' slew target for placement and routing when ``cfg`` has macros). With
+    ``direct`` the accelerator has its direct read path, whose ports are on its clock."""
     files = [
         "dir::src/chipleap_accel_cdc.v" if f == "dir::src/chipleap_accel.v" else f
         for f in cfg["VERILOG_FILES"]
     ]
     slew = MACRO_PNR_SLEW_NS if cfg.get("MACROS") else None
-    (workdir / PNR_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz, slew))
-    (workdir / SIGNOFF_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz))
+    (workdir / PNR_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz, slew, direct))
+    (workdir / SIGNOFF_SDC).write_text(two_clock_sdc(bus_mhz, accel_mhz, direct=direct))
+    params = [p for p in cfg.get("SYNTH_PARAMETERS", []) if not p.startswith("EXT_DIRECT=")]
     return {
         **cfg,
+        # The macro build's top takes the path from the crossings' parameter.
+        **({"SYNTH_PARAMETERS": [*params, "EXT_DIRECT=1"]} if direct else {}),
         "DESIGN_NAME": CDC_TOP,
         "VERILOG_FILES": files,
         "CLOCK_PORT": ["clk_i", "accel_clk_i"],
@@ -1338,10 +1491,12 @@ def place_and_route(
     workdir: Path,
     pdk: Path | None = None,
     accel_mhz: float = 0.0,
+    direct: bool = False,
 ) -> PnrResult:
     """The accelerator through LibreLane at ``clock_mhz``. With ``accel_mhz``, the
     accelerator runs on its own clock behind its crossings (``CDC_TOP``), and
-    ``clock_mhz`` is X-HEEP's side's."""
+    ``clock_mhz`` is X-HEEP's side's. With ``direct`` it has its direct read path to
+    external memory (``EXT_DIRECT``), its ports beside the others."""
     if not librelane().found:
         raise PnrError("LibreLane is not installed")
     workdir.mkdir(parents=True, exist_ok=True)
@@ -1373,15 +1528,15 @@ def place_and_route(
         )
 
     if flops:
-        cfg = config(accel, clock_mhz)
+        cfg = config(accel, clock_mhz, direct)
         if accel_mhz:
-            cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz)
+            cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz, direct)
         metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
         result = timed(parse_run(metrics, clock, gds, run, {}))
         result = with_ihp_antenna(result, pdk, cfg["DESIGN_NAME"], workdir)
         return replace(result, buffers=f"{PNR_WORDS}-word flop buffers: {reason}")
     assert pdk is not None
-    cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk, accel_mhz)
+    cfg, plan = sram_flow(accel, clock_mhz, workdir, pdk, accel_mhz, direct)
     top = cfg["DESIGN_NAME"]
     metrics, gds = run_librelane(workdir, cfg, late_antenna_repair=True)
     from chipleap.rtl.pnr import check_merged
@@ -1405,7 +1560,12 @@ def place_and_route(
 
 
 def sram_flow(
-    accel: Accel, clock_mhz: float, workdir: Path, pdk: Path, accel_mhz: float = 0.0
+    accel: Accel,
+    clock_mhz: float,
+    workdir: Path,
+    pdk: Path,
+    accel_mhz: float = 0.0,
+    direct: bool = False,
 ) -> tuple[dict[str, Any], banks.Banks]:
     """The files of a macro-backed run in ``workdir`` (the generated top, the macros'
     views, the power grid) and its LibreLane configuration; the RTL is in ``src``. With
@@ -1419,10 +1579,12 @@ def sram_flow(
         place.Macro(prefix + inst, views[cell].view.width, views[cell].view.height)
         for inst, cell in plan.instances()
     ]
-    fp = place.rows(sizes, model_cell_um2(accel, banked=True, crossings=bool(accel_mhz)))
+    fp = place.rows(
+        sizes, model_cell_um2(accel, banked=True, crossings=bool(accel_mhz), direct=direct)
+    )
     # Behind the crossings the core keeps as many reads in flight per port as they hold.
     (workdir / "src" / f"{banks.TOP}.v").write_text(
-        banks.top_sv(plan, CDC_DEPTH if accel_mhz else None)
+        banks.top_sv(plan, CDC_DEPTH if accel_mhz else None, direct)
     )
     placements = [
         grid.Placement(p.instance, views[cells[p.instance]].view, p.x, p.y, p.orient)
@@ -1439,7 +1601,7 @@ def sram_flow(
         cfg, sram_output_buffers((p, views[cells[p.instance]].view) for p in fp.macros)
     )
     if accel_mhz:
-        cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz)
+        cfg = with_crossings(cfg, workdir, clock_mhz, accel_mhz, direct)
     return cfg, plan
 
 

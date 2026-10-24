@@ -14,8 +14,11 @@ import re
 from pathlib import Path
 
 from chipleap.gen.datasheet import REGISTERS
-from chipleap.gen.rtl import rtl_params
+from chipleap.gen.rtl import EXT_WINDOW, rtl_params
 from chipleap.hw.design import Design
+from chipleap.model.accel import direct_outstanding
+
+_WINDOW_RE = re.compile(r'"ext_slaves", start_address=(0x[0-9a-fA-F]+), length=(0x[0-9a-fA-F]+)')
 
 
 def check(bundle: Path, design: Design) -> list[str]:
@@ -78,6 +81,15 @@ def check(bundle: Path, design: Design) -> list[str]:
     own = bool(design.accel_mhz)
     if own:
         read("rtl/chipleap_accel_cdc.sv")
+    # The direct path's window is X-HEEP's external slave window, as the configuration sets
+    # it (its default when the configuration is missing or says nothing).
+    direct = design.direct_memory
+    window = EXT_WINDOW
+    if direct:
+        read("rtl/chipleap_mem.sv")
+        m = _WINDOW_RE.search(cfg or "")
+        if m:
+            window = (int(m.group(1), 16), int(m.group(2), 16))
     for rel in wrappers:
         text = read(rel)
         if text is None:
@@ -95,6 +107,26 @@ def check(bundle: Path, design: Design) -> list[str]:
             if not m or m.group(1).strip() != str(value):
                 got = m.group(1).strip() if m else "missing"
                 problems.append(f"{rel}: {name} is {got}, design.yaml implies {value}")
+        # With external memory on X-HEEP the accelerator reads it over its direct path, for
+        # the configuration's window; without, it has none.
+        ext = {
+            "EXT_DIRECT": "1" if direct else None,
+            "EXT_BASE": f"32'h{window[0]:08X}" if direct else None,
+            "EXT_SIZE": f"32'h{window[1]:08X}" if direct else None,
+            "EXT_OUTSTANDING": str(direct_outstanding(design)) if direct else None,
+        }
+        for name, ext_value in ext.items():
+            m = re.search(rf"\.{name}\(([^)]*)\)", text)
+            got = m.group(1).strip() if m else None
+            if got != ext_value:
+                problems.append(
+                    f"{rel}: {name} is {got or 'missing'}, "
+                    + (
+                        f"design.yaml and the X-HEEP configuration imply {ext_value}"
+                        if ext_value
+                        else "but design.yaml has no external memory on X-HEEP"
+                    )
+                )
         m = re.search(r"\.DOUBLE_BUF\(1'b(\d)\)", text)
         if not m or int(m.group(1)) != p.double_buf:
             problems.append(f"{rel}: DOUBLE_BUF differs from design.yaml")

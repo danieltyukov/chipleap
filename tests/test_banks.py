@@ -65,7 +65,7 @@ def test_the_top_ties_the_macros_to_the_core():
     plan = banks.plan(SMOLLM2, PDK)
     text = banks.top_sv(plan)
     assert text.startswith("// Written by ChipLeap")
-    assert f"module {banks.TOP} (" in text
+    assert f"module {banks.TOP} #(\n    parameter EXT_DIRECT = 0," in text
     assert "    .SRAM_BUF(1)" in text and "    .DOUBLE_BUF(1)," in text
     assert "  RM_IHPSG13_1P_256x64_c2_bm_bist wbuf_s1_l0_m0 (" in text
     # The 7-bit bank address on the macro's 8 bits; A_DLY high; the BIST ports tied off.

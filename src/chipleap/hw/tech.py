@@ -47,6 +47,28 @@ ACCEL_PORT_KGE = 2.79  # one OBI read port of the DMA, with its own address gene
 # through them is within 2.3 % of each.
 ACCEL_CDC_KGE = 8.43
 ACCEL_CDC_PORT_KGE = 6.76
+# With external memory on X-HEEP the accelerator reads it over a direct path of its own
+# (Design.direct_memory): per read port, the choice of path and a response queue for
+# sixteen reads in flight instead of four (DIRECT_PORT_KGE), and in the SoC chipleap_mem,
+# the arbiter of X-HEEP's three external slave ports and the one that puts them and the
+# accelerator's first port on the memory controller's first port (MEM_ARB_KGE, whatever
+# the number of ports). On its own clock the accelerator's queues hold eight reads
+# already (DIRECT_PORT_CDC_KGE in place of DIRECT_PORT_KGE), and X-HEEP's side crosses
+# into its clock through two FIFOs of two entries (MEM_CDC_KGE). Measured like the
+# crossings above, with and without the path: 1.77, 2.29 and 4.91 kGE more for one, two
+# and four ports (GEMV 1 x 8, GEMV 4 x 8, output stationary 8 x 2), 0.67, 1.04 and 0.79
+# behind the crossings; chipleap_mem 1.47 kGE, 3.91 with its crossing. The per-port
+# terms are within 0.53 and 0.48 kGE of each.
+DIRECT_PORT_KGE = 1.24
+DIRECT_PORT_CDC_KGE = 0.28
+# Each read in flight beyond sixteen, per port and per bit of the buffer address its
+# queue entry holds (a faster clock needs more reads in flight to cover the memory's
+# 60 ns). Measured from 16 to 64 entries on the GEMV 1 x 8: 0.160 kGE per entry with
+# 1024-word buffers (10 bits), 0.068 with 64-word ones (6 bits), and 0.068 per port on the
+# GEMV 4 x 8 with two. The term fits the first and overstates the second.
+DIRECT_ENTRY_KGE = 0.016
+MEM_ARB_KGE = 1.47
+MEM_CDC_KGE = 2.44
 # Per dataflow: kGE per MAC (8 x 8 multiplier, adder or pipeline registers) and per edge
 # unit: a GEMV lane's accumulators, a weight-stationary column's accumulators, or the
 # operand skew registers on each row and column of an output-stationary array.
