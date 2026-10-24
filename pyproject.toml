@@ -32,16 +32,16 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
 ]
-dependencies = ["pyyaml>=6.0.3", "mcp>=1.10", "tomli>=1.1; python_version < '3.11'"]
+dependencies = ["pyyaml>=6.0.3", "mcp>=1.10", "tomli>=2.5.0; python_version < '3.11'"]
 
 [project.optional-dependencies]
 xheep = ["hjson>=3.1.0", "mako>=1.2"]
 rtl = ["cocotb>=2.0"]
 dev = [
   "pytest>=9.1.1",
-  "pytest-cov>=5",
-  "ruff>=0.17.0",
-  "mypy>=1.10",
+  "pytest-cov>=7.1.0",
+  "ruff>=0.17.1",
+  "mypy>=2.4.0",
   "types-PyYAML",
   "hjson>=3.1.0",
   "mako>=1.2",
@@ -49,7 +49,7 @@ dev = [
   "tomli>=1.1",
   "jsonschema>=4",
 ]
-site = ["pillow>=10"]
+site = ["pillow>=12.3.0"]
 
 [project.scripts]
 chipleap = "chipleap.cli:main"
