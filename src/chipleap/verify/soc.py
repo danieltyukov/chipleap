@@ -481,7 +481,7 @@ SRAM_CLOCK_PIN = "A_CLK"
 CLOCK_PIN_BUFFER = "sg13g2_buf_4"
 # How far beyond its halo, from the macro's edge where the pin is, the buffer is put; the
 # legaliser moves it to the nearest free site.
-CLOCK_PIN_GAP_UM = 5.0
+CLOCK_PIN_GAP_UM = pnr.BESIDE_GAP_UM
 
 
 @dataclass(frozen=True)
@@ -571,18 +571,7 @@ def config(sources: Sources, clock_mhz: float) -> dict[str, Any]:
     }
 
 
-def _pin_at(p: place.Placed, view: MacroView, pin: str) -> tuple[float, float] | None:
-    """The centre of ``pin``'s first shape on the placed macro ``p``, in the core's um."""
-    shapes = [rect for mp in view.pins if mp.name == pin for _, rect in mp.shapes]
-    if not shapes:
-        return None
-    x0, y0, x1, y1 = shapes[0]
-    x, y = (x0 + x1) / 2, (y0 + y1) / 2
-    if p.orient in ("S", "FN"):
-        x = view.width - x
-    if p.orient in ("S", "FS"):
-        y = view.height - y
-    return p.x + x, p.y + y
+_pin_at = pnr.macro_pin_at
 
 
 # IHP's integrated clock gate, which X-HEEP's clock gates are (``chipleap.gen.soc``), and
@@ -654,19 +643,7 @@ def clock_pin_buffers(fp: place.Floorplan, views: Mapping[str, MacroView]) -> li
     return out
 
 
-def _beside(
-    p: place.Placed, view: MacroView, pin: str, at: tuple[float, float], buffer: str
-) -> dict[str, Any]:
-    """An ``INSERT_ECO_BUFFERS`` entry for ``buffer`` at ``pin`` of the placed macro ``p``
-    (the pin at ``at``), just past the halo off the macro's edge where the pin is."""
-    x, y = at
-    off = place.HALO_UM + CLOCK_PIN_GAP_UM
-    y = p.y - off if y - p.y < view.height / 2 else p.y + view.height + off
-    return {
-        "target": f"{p.instance}/{pin}",
-        "buffer": buffer,
-        "placement": [round(x, 3), round(y, 3)],
-    }
+_beside = pnr.beside_pin
 
 
 # What drives a bank's output wire from beside the macro (0.6 pF limit, about ten times

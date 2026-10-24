@@ -165,6 +165,21 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     banked = pnr.model_cell_um2(SMOLLM2, banked=True)
     assert banked > pnr.model_cell_um2(SMOLLM2)
     assert banked / 0.45 <= band < banked / 0.45 + 30 * (x1 - x0)
+    # A buffer beside each of the macros' 64 outputs, inserted before detailed routing: below a
+    # macro of the top row (N), above one of the bottom row (FS), past the halo.
+    eco = cfg["INSERT_ECO_BUFFERS"]
+    assert {e["target"] for e in eco} == {
+        f"{i}/A_DOUT[{b}]" for i in entry["instances"] for b in range(64)
+    }
+    assert {e["buffer"] for e in eco} == {pnr.SRAM_OUTPUT_BUFFER}
+    off = pnr.place.HALO_UM + pnr.BESIDE_GAP_UM
+    for e in eco:
+        at = entry["instances"][e["target"].split("/")[0]]
+        y = at["location"][1]
+        assert e["placement"][1] == pytest.approx(
+            y - off if at["orientation"] == "N" else y + 118.78 + off
+        )
+    assert cfg["meta"]["substituting_steps"]["-OpenROAD.DetailedRouting"] == "Odb.InsertECOBuffers"
     pdn = (work / "pdn.tcl").read_text()
     assert "source $::env(SCRIPTS_DIR)/openroad/common/pdn_cfg.tcl" in pdn
     assert f"define_pdn_grid -macro -cells {{{cell}}}" in pdn
@@ -175,6 +190,55 @@ def test_a_macro_backed_layout_is_the_banks_top_macros_and_grid(tmp_path, monkey
     r = pnr.place_and_route(Accel("gemv", 4, 8, 8, ports=2), 90.0, tmp_path / "flop", pdk=pdk)
     assert seen["cfg"]["DESIGN_NAME"] == "chipleap_accel"
     assert r.buffers.startswith("16-word flop buffers: 2 DMA read ports") and not r.macros
+    assert "INSERT_ECO_BUFFERS" not in seen["cfg"] and "meta" not in seen["cfg"]
+
+
+def test_eco_buffers_go_in_before_detailed_routing_beside_the_other_substitutions():
+    meta = {"version": 2, "flow": "Classic", "substituting_steps": {"+A.B": "C.D"}}
+    entry = {"target": "m/A_DOUT[0]", "buffer": "sg13g2_buf_2", "placement": [1.0, 2.0]}
+    cfg = pnr.with_eco_buffers({"meta": meta, "INSERT_ECO_BUFFERS": [{"target": "x"}]}, [entry])
+    assert cfg["meta"]["substituting_steps"] == {
+        "+A.B": "C.D",
+        "-OpenROAD.DetailedRouting": "Odb.InsertECOBuffers",
+    }
+    assert cfg["INSERT_ECO_BUFFERS"] == [{"target": "x"}, entry]
+    assert meta["substituting_steps"] == {"+A.B": "C.D"}  # the caller's is left as it was
+    assert pnr.with_eco_buffers({"A": 1}, []) == {"A": 1}
+    # The late antenna repair and the routed design's conversion keep the buffers' step.
+    late = pnr.with_late_antenna_repair({**cfg, "RUN_POST_GRT_RESIZER_TIMING": True})
+    late = pnr.with_def_to_odb(late)
+    assert late["meta"]["substituting_steps"] == {
+        "+A.B": "C.D",
+        "-OpenROAD.DetailedRouting": "Odb.InsertECOBuffers",
+        "+OpenROAD.ResizerTimingPostGRT": "OpenROAD.RepairAntennas",
+        "+OpenROAD.DetailedRouting": "OpenROAD.DEFtoODB",
+    }
+
+
+def test_only_the_pdks_macros_outputs_get_a_buffer():
+    from pathlib import Path
+
+    from chipleap.macro.layer import MacroPin, MacroView
+
+    p = Path("x")
+    pins = (
+        MacroPin("A_DOUT[0]", "output", "signal", (("Metal2", (10.62, 0.0, 10.88, 0.26)),)),
+        MacroPin("A_DIN[0]", "input", "signal", (("Metal2", (20.0, 0.0, 20.26, 0.26)),)),
+        MacroPin("VDD!", "inout", "power", (("Metal4", (30.0, 0.0, 32.0, 10.0)),)),
+    )
+    ram = MacroView(
+        "RM_X", "sram", 400.0, 100.0, pins, p, p, p, p, ("RM_X",), ("RM_X",), source="pdk"
+    )
+    own = MacroView("blk", "block", 400.0, 100.0, pins, p, p, p, p, ("blk",), ("blk",))
+    placed = [
+        (pnr.place.Placed("u_ram", 100.0, 200.0, "N"), ram),
+        (pnr.place.Placed("u_blk", 100.0, 500.0, "N"), own),
+    ]
+    eco = pnr.sram_output_buffers(placed)
+    off = pnr.place.HALO_UM + pnr.BESIDE_GAP_UM
+    assert eco == [
+        {"target": "u_ram/A_DOUT[0]", "buffer": "sg13g2_buf_2", "placement": [110.75, 200.0 - off]}
+    ]
 
 
 def test_the_floorplan_puts_macros_in_two_rows_under_supply_pairs():
