@@ -570,7 +570,7 @@ def callouts_html(pos: dict[str, list[float]], design: dict[str, Any]) -> tuple[
     }
     # Tag offsets from the anchor, in pixels; negative x puts the tag on the left, anchored
     # by its right edge, so the leader line always ends at the tag.
-    offsets = {"sram0": (46, -70), "pe": (40, 40), "cpu": (44, -54), "phy": (-48, 34)}
+    offsets = {"sram0": (-56, -84), "pe": (40, 40), "cpu": (44, -54), "phy": (-48, 34)}
     out, key_items = [], []
     for key, (head, sub) in labels.items():
         if key not in pos:
