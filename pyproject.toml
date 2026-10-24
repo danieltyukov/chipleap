@@ -49,7 +49,7 @@ dev = [
   "tomli>=1.1",
   "jsonschema>=4",
 ]
-site = ["pillow>=10"]
+site = ["pillow>=12.3.0"]
 
 [project.scripts]
 chipleap = "chipleap.cli:main"
