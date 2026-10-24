@@ -1019,17 +1019,23 @@ MACRO_REPAIR = {
 # repair after global routing works against, does not see what their output words carry
 # after routing: in the SmolLM2 accelerator's layout (four 256 x 64), the 256 outputs ran
 # side by side on Metal5 along the macros' edges, and their routed wire capacitance was a
-# median 0.83 and at most 2.57 times the estimate. abuf_s1_m0's A_DOUT[63] was estimated
+# median 0.84 and at most 2.57 times the estimate. abuf_s1_m0's A_DOUT[63] was estimated
 # at 0.0297 pF and came out 0.0650 pF, the same net 0.0517 pF in a layout whose
 # neighbours ran elsewhere. No repair margin makes up for that without buffering most of
 # the macros' outputs and a few hundred other nets: so each SRAM output gets a buffer
-# beside its pin (SRAM_OUTPUT_BUFFER), inserted after global routing, and the macro
-# drives a few um of wire into it.
+# beside its pin (SRAM_OUTPUT_BUFFER), and the macro drives a few um of wire into it.
+# The buffers go in after the last timing repair, right before detailed routing
+# (ECO_BUFFERS_AT); LibreLane's step legalises them and routes their nets globally again.
+# Put in after global routing, ahead of the repair, they set it off: in the GEMV 1 x 8
+# with 2048 x 64 macros it put in 529 buffers where it had put 329 and took setup at the
+# slow corner from -3.024 to -4.162 ns, on a path into a macro's address, and in the
+# 2 x 8 with six 256 x 64 macros it left a macro's A_REN at -0.011 ns of hold. Before
+# detailed routing they cost the read path their own delay, 0.112 and 0.152 ns there,
+# and hold moved by 0.006 ns at most.
 SRAM_OUTPUT_BUFFER = "sg13g2_buf_2"
-GLOBAL_ROUTING = "OpenROAD.GlobalRouting"
 ECO_BUFFERS = "Odb.InsertECOBuffers"
 # The substitution that puts ECO_BUFFERS in the flow.
-ECO_BUFFERS_AT = f"+{GLOBAL_ROUTING}"
+ECO_BUFFERS_AT = f"-{DETAILED_ROUTING}"
 # How far beyond its halo, from the macro's edge where the pin is, a buffer beside a macro
 # pin is put; the legaliser moves it to the nearest free site.
 BESIDE_GAP_UM = 5.0
@@ -1080,8 +1086,8 @@ def sram_output_buffers(
 
 
 def with_eco_buffers(cfg: dict[str, Any], buffers: list[dict[str, Any]]) -> dict[str, Any]:
-    """``cfg`` with ``buffers`` inserted right after global routing (``ECO_BUFFERS``); the
-    repair after it routes their nets again. Unchanged without any."""
+    """``cfg`` with ``buffers`` inserted right before detailed routing (``ECO_BUFFERS``),
+    after the timing repair. Unchanged without any."""
     if not buffers:
         return cfg
     meta = dict(cfg.get("meta") or {"version": 2, "flow": "Classic"})
