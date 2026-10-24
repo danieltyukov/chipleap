@@ -2,7 +2,10 @@
 
 This walks [examples/uart](../examples/uart) from its RTL to a chip GDS on IHP SG13G2: a UART written by hand, with cocotb tests and a Python reference model, at the core of a 1.52 x 1.52 mm chip with 33 pads of IHP's `sg13g2_io` library. In the core next to the UART sits a StrongARM comparator from [aispice](https://github.com/danieltyukov/aispice), handed over as a [macro package](macro-package.md). Its inputs come from two analog pads and its output drives the UART's receive line. The chip is signed off with IHP's own DRC deck on the whole die and its LVS deck down to the transistors of the standard cells and the comparator.
 
-Every number below is from `chipleap verify examples/uart --steps all` on ChipLeap `main` at `d26974f` (14 Oct 2026), with the comparator's package exported by aispice `master` at `5db63e1`. Every step passed. From an empty build folder the whole run takes about 43 minutes on a laptop. Only open tools ran: Verilator, slang, Icarus, cocotb, SymbiYosys, Yosys, OpenROAD, LibreLane, KLayout, Magic, Netgen and Fault.
+<!-- GAP: plan B. If the whole run is redone on one machine, rewrite this paragraph: one run, its machine and its total time; drop the DHPC citation if no DelftBlue number is left. -->
+Every number below is from ChipLeap `main` at `d10df7a` (24 Oct 2026), with the comparator's package exported by aispice `master` at `5db63e1`, from an empty build folder. The RTL checks (`chipleap verify examples/uart`) ran on a laptop in 10 seconds. `chipleap verify examples/uart --steps all` ran on 16 cores of DelftBlue, TU Delft's supercomputer, in 28 minutes, 21 of them for the chip. DelftBlue has no Icarus 13, cocotb or Fault, so gate-level simulation, ATPG, and power and IR drop from the tests' activity are [gap: gate-level run]. Every step that ran passed. Only open tools ran: Verilator, slang, Icarus, cocotb, SymbiYosys, Yosys, OpenROAD, LibreLane, KLayout, Magic, Netgen and Fault.
+
+The DelftBlue numbers were computed on Delft High Performance Computing Centre (DHPC), DelftBlue Supercomputer (Phase 2), 2024, https://www.tudelft.nl/dhpc/ark:/44463/DelftBluePhase2.
 
 aispice's [analog-on-top demo](https://github.com/danieltyukov/aispice/tree/master/examples/analog_on_top) is the other way round: analog blocks and a hardened digital block in a pad ring that aispice assembles.
 
@@ -19,7 +22,7 @@ chipleap doctor
 - Verilator and slang for lint.
 - Icarus 13 for simulation at gate level (`CHIPLEAP_IVERILOG`, `CHIPLEAP_GL_IVERILOG`), since Icarus 12 leaves IHP's flip-flops at X.
 - SymbiYosys and EQY built for the Yosys on the path (`CHIPLEAP_SBY`, `CHIPLEAP_EQY`), with z3.
-- OpenROAD and LibreLane 3.0.0.dev44.
+- OpenROAD and LibreLane 3.0.14.
 - Fault with Quaigh.
 - KLayout.
 - A checkout of IHP-Open-PDK.
@@ -46,7 +49,7 @@ chipleap project check examples/uart    # the project with every default filled 
 ## 2. The RTL checks
 
 ```sh
-chipleap verify examples/uart           # lint to equivalence, in about half a minute
+chipleap verify examples/uart           # lint to equivalence, in about ten seconds
 ```
 
 | Step | Tools | Result |
@@ -57,7 +60,7 @@ chipleap verify examples/uart           # lint to equivalence, in about half a m
 | Formal | SymbiYosys, `abc pdr` | the transmitter's line in every state, proved for every cycle |
 | Clock and reset crossings | ChipLeap's checker on Yosys's netlist | 47 flip-flops on `clk_i`; the receive line crosses through a two-flop synchronizer; 1 warning (the reset is released asynchronously) |
 | Synthesis | Yosys and ABC on IHP's standard cells | 221 cells, 51 flip-flops, 0.0041 mm²; critical path 1.01 ns, about 684 MHz at the typical corner |
-| Equivalence | Yosys | RTL against synthesis: 74 of 75 points proved, the last (`u_rx.state_q[2]`) equal for 40 cycles from reset; synthesis against the routed netlist: all 969 points proved |
+| Equivalence | Yosys | RTL against synthesis: 74 of 75 points proved, the last (`u_rx.state_q[2]`) equal for 40 cycles from reset; synthesis against the routed netlist: all 959 points proved |
 
 ## 3. Down to the layout
 
@@ -69,11 +72,11 @@ chipleap verify examples/uart --steps all
 
 | Step | Tools | Result |
 |---|---|---|
-| Place and route | LibreLane (OpenROAD, KLayout, Magic, Netgen), signed off at the slow corner | 352 cells on a 0.0105 mm² core at 65 % utilisation; 100 MHz met at 125 C (about 264 MHz at the slow corner, 310 MHz at the typical); DRC, LVS and antenna clean |
-| Gate level | the cocotb tests on the routed netlist with SDF delays, Icarus 13 | 5 of 5 tests pass |
-| Design for test | OpenROAD scan insertion, Fault with Quaigh | 3 chains of 17 flip-flops; 99.2 % stuck-at coverage (1371 of 1382 faults) with 39 patterns, which pass through the chains of both the scan netlist and the routed one |
-| Power | OpenROAD, with the activity of the tests on the routed netlist | 0.345 mW at the typical corner (0.947 mW vectorless); 1166 of 1166 pins annotated |
-| IR drop | OpenROAD PDNSim | 0.52 mV on VPWR, 0.33 mV on VGND at worst |
+| Place and route | LibreLane (OpenROAD, KLayout, Magic, Netgen), signed off at the slow corner | 362 cells on a 0.0105 mm² core at 64 % utilisation; 100 MHz met at 125 C (about 247 MHz at the slow corner, 295 MHz at the typical); DRC, LVS and antenna clean, IHP's antenna deck included |
+| Gate level | the cocotb tests on the routed netlist with SDF delays, Icarus 13 | [gap: gate-level run] |
+| Design for test | OpenROAD scan insertion, Fault with Quaigh | 3 chains of 17 flip-flops; [gap: gate-level run: stuck-at coverage, faults, patterns, and the patterns through the chains of the scan netlist and the routed one] |
+| Power | OpenROAD, with the activity of the tests on the routed netlist | [gap: gate-level run: power from the tests' activity, pins annotated] (1.01 mW vectorless at the typical corner) |
+| IR drop | OpenROAD PDNSim | [gap: gate-level run, currents from the tests' activity] (from a vectorless activity of 0.1: 0.954 mV on VPWR, 1.01 mV on VGND at worst) |
 | Power intent | UPF read and placed by OpenROAD | the receiver in a domain of its own (106 cells), 13 signals between the two |
 
 The routed block is `examples/uart/build/pnr/runs/chipleap/final/gds/uart.gds`. The report is `examples/uart/build/verify/report.html`, with `VERIFY.md` and `verify.json` beside it.
@@ -142,9 +145,9 @@ LibreLane routes the core, the comparator and the pad ring together. KLayout the
 | LVS, IHP's deck down to the comparator's transistors | clean |
 | Precheck | top cell, layers, cell names, zero-area shapes, PR boundary and outline pass |
 | Supplies | VDD reaches the ring at 30 joins, VSS at 20 |
-| Setup slack at the ports, slow corner | +0.968 ns (+6.257 ns at the core side of the pads) |
-| Hold slack at the ports, worst corner | +0.118 ns (fast corner) |
-| Worst path | core to the `rx_data_o[7]` pad: 5.408 ns of it inside the output pad |
+| Setup slack at the ports, slow corner | +0.759 ns (+0.899 ns at the core side of the pads, against the budget the pads leave it) |
+| Hold slack at the ports, worst corner | +0.134 ns (fast corner) |
+| Worst path | core to the `rx_data_o[4]` pad: 5.735 ns of it inside the output pad |
 
 The budget at the ports is 2 ns input and output delay, a 5 pF load and a 1 ns input edge. The chip is `examples/uart/build/chip/uart_chip.gds`, with its bond map in `uart_chip.bondmap.csv`.
 

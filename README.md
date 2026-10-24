@@ -77,30 +77,33 @@ These are the steps ChipLeap runs on a project today, with what each reported fo
 | Formal | SymbiYosys on the design's own assertions | the transmitter's line in every state, proved for every cycle with `abc pdr` |
 | Clock and reset crossings | ChipLeap's structural checker on the netlist Yosys elaborates | the receive line through a two-flop synchronizer, accepted; one warning, the reset released asynchronously |
 | Synthesis | Yosys and ABC on IHP's standard cells | 221 cells, 51 flip-flops, 0.0041 mm², critical path 1.01 ns |
-| Equivalence | Yosys (or EQY): RTL against synthesis, synthesis against the routed netlist | 74 of 75 points proved and the last equal for 40 cycles; all 969 routed points proved |
-| Place and route | LibreLane 3.0.14 (OpenROAD, KLayout), signed off at the slow corner, IHP's antenna deck on the result | 352 cells on a 0.0105 mm² core, 100 MHz met at 125 C (about 264 MHz), DRC, LVS and antenna clean |
-| Gate-level simulation | the cocotb tests on the routed netlist with SDF delays, Icarus 13 | 5 of 5 tests pass |
-| Design for test | OpenROAD scan insertion, Fault with Quaigh for ATPG | 3 chains of 17 flip-flops, 99.2 % stuck-at coverage with 39 patterns, which pass through the scan and the routed netlists |
-| Power | OpenROAD with the activity of the project's own tests | 0.345 mW at the typical corner (0.947 mW vectorless) |
-| IR drop | OpenROAD PDNSim on the routed power grid | 0.52 mV at worst |
+| Equivalence | Yosys (or EQY): RTL against synthesis, synthesis against the routed netlist | 74 of 75 points proved and the last equal for 40 cycles; all 959 routed points proved |
+| Place and route | LibreLane 3.0.14 (OpenROAD, KLayout), signed off at the slow corner, IHP's antenna deck on the result | 362 cells on a 0.0105 mm² core, 100 MHz met at 125 C (about 247 MHz), DRC, LVS and antenna clean |
+| Gate-level simulation | the cocotb tests on the routed netlist with SDF delays, Icarus 13 | [gap: gate-level run] |
+| Design for test | OpenROAD scan insertion, Fault with Quaigh for ATPG | 3 chains of 17 flip-flops, [gap: gate-level run: stuck-at coverage, patterns, chain simulation on the scan and the routed netlists] |
+| Power | OpenROAD with the activity of the project's own tests | [gap: gate-level run] at the typical corner (1.01 mW vectorless) |
+| IR drop | OpenROAD PDNSim on the routed power grid | [gap: gate-level run, currents from the tests' activity] (0.954 mV on VPWR and 1.01 mV on VGND from a vectorless activity of 0.1) |
 | Power intent | UPF read and placed by OpenROAD | the receiver in a domain of its own, 13 signals between the two |
-| ECO | OpenROAD edits on the routed design, then LibreLane's signoff again | a gate resized and the UART signed off again in about a minute and a half |
+| ECO | OpenROAD edits on the routed design, then LibreLane's signoff again | [gap: ECO run pending] |
 | Macros | `macro/v1` packages, checked and rewritten before use | aispice's StrongARM comparator, 29.1 x 40.8 um, both decisions measured after layout, its transistors in LVS |
 | Chip assembly | LibreLane with IHP's pad ring, then bond pads, seal ring and fill in KLayout | 33 pads on a 1.52 x 1.52 mm die |
-| Timing at the ports | OpenSTA through IHP's IO cells at every corner | +0.968 ns of setup slack at the slow corner (+6.257 ns at the core's side of the pads) |
+| Timing at the ports | OpenSTA through IHP's IO cells at every corner | +0.759 ns of setup slack at the slow corner (+0.899 ns at the core's side of the pads, against the budget the pads leave it) |
 | Signoff | IHP's DRC deck on the whole die (density included), its LVS deck down to the macros' transistors, its antenna deck and OpenROAD's antenna check | 0 DRC violations, LVS match, 0 antenna violations |
 
 ```sh
-chipleap verify examples/uart               # lint to equivalence, in about half a minute
+chipleap verify examples/uart               # lint to equivalence, in about ten seconds
 chipleap verify examples/uart --steps all   # and place and route, gate level, DFT, power, IR drop, UPF and the chip
 ```
+
+<!-- GAP: plan B. If the whole UART run is redone on one machine, rewrite or drop the next paragraph. -->
+Lint, simulation, coverage and formal ran on a laptop; synthesis, place and route and the steps after them ran on 16 cores of DelftBlue, TU Delft's supercomputer (Delft High Performance Computing Centre (DHPC), DelftBlue Supercomputer (Phase 2), 2024, https://www.tudelft.nl/dhpc/ark:/44463/DelftBluePhase2).
 
 <p align="center">
   <img src="docs/img/uart-chip.jpg" alt="The UART chip's layout drawn from its GDS: 33 bond pads and IHP's IO cells around a 400 um core, with aispice's comparator in the core's upper left, inside the seal ring" width="560">
   <br><sub>The UART as a chip, drawn from its GDS before fill: 33 pads, IHP's IO ring, the core with aispice's comparator in its upper left, and the seal ring.</sub>
 </p>
 
-With a `chip` section the project becomes a whole chip ([docs/chips.md](docs/chips.md)): the core, hardened blocks from [macro packages](docs/macro-package.md) and a pad ring of IHP's IO cells, routed by LibreLane, with bond pads, seal ring and fill, timed at its own ports through the pads, checked with IHP's DRC and LVS decks, and a bond map for the package. The UART chip's comparator takes its inputs from two analog pads and drives the receive line. It builds and checks in about a quarter of an hour.
+With a `chip` section the project becomes a whole chip ([docs/chips.md](docs/chips.md)): the core, hardened blocks from [macro packages](docs/macro-package.md) and a pad ring of IHP's IO cells, routed by LibreLane, with bond pads, seal ring and fill, timed at its own ports through the pads, checked with IHP's DRC and LVS decks, and a bond map for the package. The UART chip's comparator takes its inputs from two analog pads and drives the receive line. It builds and checks in about 21 minutes on 16 cores.
 
 ## Ask your AI assistant
 
