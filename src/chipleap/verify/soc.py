@@ -50,6 +50,7 @@ from chipleap.verify.tools import (
     clean_env,
     fusesoc,
     librelane,
+    librelane_image,
     librelane_version_key,
     riscv_gcc,
 )
@@ -442,10 +443,20 @@ AFTER_SYNTHESIS = "Checker.YosysUnmappedCells"
 FROM_3014 = (3, 0, 14, 2, 0)
 
 
+def librelane_version() -> str:
+    """The version of the LibreLane that runs, else, when it cannot be read (a container
+    wrapper ChipLeap does not ask), the tag of the image ChipLeap asks it for
+    (``librelane_image``)."""
+    version = librelane().version
+    if librelane_version_key(version) == (0, 0, 0, 0, 0):
+        version = librelane_image().rpartition(":")[2] or version
+    return version
+
+
 def librelane_from_3014(version: str | None = None) -> bool:
-    """Whether LibreLane ``version`` (the one that runs, by default) takes 3.0.14's
-    settings; a version ChipLeap cannot read does, as the one it runs by default."""
-    key = librelane_version_key(librelane().version if version is None else version)
+    """Whether LibreLane ``version`` (``librelane_version``, by default) takes 3.0.14's
+    settings; a version ChipLeap cannot read does, as the LibreLane it runs by default."""
+    key = librelane_version_key(librelane_version() if version is None else version)
     return key == (0, 0, 0, 0, 0) or key >= FROM_3014
 
 
@@ -931,7 +942,7 @@ def place_and_route(
     peripherals are most of them, which the model's estimate does not follow), then the
     layout, in the same LibreLane run."""
     clock = clock_mhz or design.freq_mhz
-    version = librelane().version
+    version = librelane_version()
     cfg, prep = prepare(design, config_text, checkout, work, pdk, clock, version)
     first, _ = with_floorplan(cfg, prep, model_areas_um2(design)[0], work, version)
     pnr.run_librelane(work, first, to="Yosys.Synthesis", timeout_s=TIMEOUT_S)

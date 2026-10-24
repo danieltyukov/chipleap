@@ -723,6 +723,26 @@ def test_the_socs_clock_terms_are_measured_from_its_routed_paths(monkeypatch):
     assert bus.start == "_cpu_" and bus.needed_ns == pytest.approx(27.997)
 
 
+def test_the_soc_takes_its_settings_from_the_librelane_that_runs(monkeypatch):
+    """The version LibreLane reports, else the tag of the image ChipLeap asks a container
+    wrapper for; a version read neither way takes 3.0.14's settings, as the default."""
+    from chipleap.verify import tools
+
+    def ran(version: str, image: str | None) -> tuple[str, bool]:
+        tool = tools.Tool("librelane", "/usr/bin/librelane", version, "layout")
+        monkeypatch.setattr(soc_step, "librelane", lambda: tool)
+        if image is None:
+            monkeypatch.delenv(tools.LIBRELANE_IMAGE_ENV, raising=False)
+        else:
+            monkeypatch.setenv(tools.LIBRELANE_IMAGE_ENV, image)
+        return soc_step.librelane_version(), soc_step.librelane_from_3014()
+
+    assert ran("3.0.0.dev44", "ghcr.io/librelane/librelane:3.0.14") == ("3.0.0.dev44", False)
+    assert ran("", "ghcr.io/librelane/librelane:3.0.0.dev44") == ("3.0.0.dev44", False)
+    assert ran("", "ghcr.io/librelane/librelane:3.0.14") == ("3.0.14", True)
+    assert ran("container wrapper", "") == ("container wrapper", True)
+
+
 def test_the_socs_margins_and_a_trial_hold_margin(monkeypatch):
     """The SoC's repairs keep 0.8 and 1.6 ns of estimated setup slack from LibreLane 3.0.14
     on, 6 and 5 ns on 3.0.0.dev44 (#20's evidence), and 0.2 ns of hold after global
