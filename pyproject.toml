@@ -39,7 +39,7 @@ xheep = ["hjson>=3.1.0", "mako>=1.2"]
 rtl = ["cocotb>=2.0"]
 dev = [
   "pytest>=9.1.1",
-  "pytest-cov>=5",
+  "pytest-cov>=7.1.0",
   "ruff>=0.17.0",
   "mypy>=1.10",
   "types-PyYAML",
