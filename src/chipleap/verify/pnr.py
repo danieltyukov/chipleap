@@ -21,8 +21,10 @@ import json
 import math
 import os
 import re
+import shutil
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -468,6 +470,100 @@ def drc_plan(threads: int) -> tuple[int, int, int]:
     return parts, max(1, min(8, threads - parts)), max(1, min(4, threads // 4))
 
 
+# LibreLane 3.0.14 streams the routed vias out as instances of via cells (1,383,247 of 70
+# cells in the SmolLM2 SoC's GDS, none in 3.0.0.dev44's), and IHP's deck in deep mode then
+# spends hours building connectivity across them in the nwell and nbulay tables, where a
+# whole table took about 9 minutes on dev44's GDS of the same geometry. So the deck runs on
+# a copy with those instances flattened into the top cell (``flat_vias``): a via cell is a
+# leaf instanced in the top whose shapes are all on the metal and via layers, with a cut
+# among them (GDS layer numbers below), which no standard cell or SRAM macro is, so the
+# macros keep the cell names their pin markers are set apart by. The delivered GDS is
+# unchanged.
+VIA_CELL_LAYERS = (8, 10, 30, 50, 67, 126, 134)  # Metal1 to Metal5, TopMetal1 and 2
+VIA_CUT_LAYERS = (19, 29, 49, 66, 125, 133)  # Via1 to Via4, TopVia1 and 2
+FLAT_VIAS_LOG = "flatvias.log"
+_FLAT_VIAS_PY = f"""\
+import sys
+import klayout.db as db
+
+CUTS = set({VIA_CUT_LAYERS!r})
+LAYERS = set({VIA_CELL_LAYERS!r}) | CUTS
+src, dst, name = sys.argv[1:4]
+ly = db.Layout()
+ly.read(src)
+top = ly.cell(name)
+if top is None:
+    sys.exit(f"no cell {{name}} in {{src}}")
+number = {{li: ly.get_info(li).layer for li in ly.layer_indexes()}}
+
+
+def is_via(cell):
+    if cell.child_cells() or cell.cell_index() == top.cell_index():
+        return False
+    used = {{number[li] for li in ly.layer_indexes() if not cell.shapes(li).is_empty()}}
+    return bool(used & CUTS) and used <= LAYERS
+
+
+vias = {{c.cell_index() for c in ly.each_cell() if is_via(c)}}
+keep, flat = [], []
+for inst in top.each_inst():
+    (flat if inst.cell_index in vias else keep).append(inst.cell_inst)
+tmp = ly.create_cell("CHIPLEAP_FLAT_VIAS")
+for a in flat:
+    tmp.insert(a)
+top.clear_insts()
+for a in keep:
+    top.insert(a)
+ly.flatten(tmp.cell_index(), -1, True)
+top.copy_shapes(tmp)
+ly.delete_cell(tmp.cell_index())
+for ci in vias:
+    if ly.is_valid_cell_index(ci) and ly.cell(ci).parent_cells() == 0:
+        ly.delete_cell(ci)
+ly.write(dst)
+n = sum(a.size() for a in flat)
+k = sum(a.size() for a in keep)
+print(f"flattened {{n}} instances of {{len(vias)}} via cells into {{name}}, which keeps {{k}}")
+"""
+
+
+@contextmanager
+def flat_vias(gds: Path, top: str, out: Path, timeout: float) -> Iterator[Path]:
+    """``gds`` with every instance of a via cell in the cell ``top`` flattened into it (see
+    VIA_CELL_LAYERS), in a private directory while the context lasts; the run's log in
+    ``out/FLAT_VIAS_LOG``. KLayout's own Python does it, the one IHP's runners use."""
+    from chipleap.chip.run import ToolError, private_dir, python_with_klayout, run
+
+    found = python_with_klayout()
+    if found is None:
+        raise PnrError(
+            "IHP's DRC needs a Python with KLayout's module (pip install klayout); set "
+            "CHIPLEAP_KLAYOUT_PYTHON to one"
+        )
+    python, module_dir = found
+    with private_dir("chipleap-flatvias-") as tmp:
+        shutil.copyfile(gds, tmp / "in.gds")
+        (tmp / "flatvias.py").write_text(_FLAT_VIAS_PY)
+        cmd = [python, str(tmp / "flatvias.py"), "in.gds", "layout.gds", top]
+        try:
+            code, log = run(
+                cmd,
+                tmp,
+                [Path(module_dir)],
+                out,
+                FLAT_VIAS_LOG,
+                timeout,
+                {"PYTHONPATH": module_dir},
+            )
+        except ToolError as exc:
+            raise PnrError(f"IHP's DRC: flattening the vias: {exc}") from None
+        if code != 0 or not (tmp / "layout.gds").is_file():
+            last = next((ln for ln in reversed(log.splitlines()) if ln.strip()), "")
+            raise PnrError(f"IHP's DRC: flattening the vias failed (exit {code}): {last}")
+        (tmp / "in.gds").unlink()
+        yield tmp / "layout.gds"
+
+
 def ihp_drc(
     pdk: Path,
     gds: Path,
@@ -527,17 +623,18 @@ def ihp_drc(
         return build
 
     limit = float(os.environ.get("CHIPLEAP_PNR_TIMEOUT", timeout_s))
-    try:
-        runs = ihp_runs(
-            pdk,
-            out,
-            {"layout.gds": gds},
-            {f"{n}.drc": text for n, text in zip(names, split or (), strict=True)},
-            {DRC_MAIN: main, **{n: part(n) for n in names}},
-            limit,
-        )
-    except ToolError as exc:
-        raise PnrError(f"IHP's DRC: {exc}") from None
+    with flat_vias(gds, top, out, limit) as flat:
+        try:
+            runs = ihp_runs(
+                pdk,
+                out,
+                {"layout.gds": flat},
+                {f"{n}.drc": text for n, text in zip(names, split or (), strict=True)},
+                {DRC_MAIN: main, **{n: part(n) for n in names}},
+                limit,
+            )
+        except ToolError as exc:
+            raise PnrError(f"IHP's DRC: {exc}") from None
     code, log = runs[DRC_MAIN]
     report = out / f"layout_{top}_full.lyrdb"
     if code not in (0, 1) or not report.is_file():
