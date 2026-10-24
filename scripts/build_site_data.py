@@ -387,20 +387,47 @@ def sram_kib(d: dict[str, Any]) -> int:
     )
 
 
+# What each trimming move of the explorer makes smaller.
+TRIMS = {
+    "less_sram": "SRAM",
+    "smaller_banks": "SRAM",
+    "shrink_buffer": "buffers",
+    "shrink_array": "array",
+    "fewer_ports": "array",
+    "fewer_channels": "memory channels",
+    "smaller_cpu": "CPU",
+}
+
+
 def summarize(ex: dict[str, Any]) -> str:
     """The explorer's decisions in one plain sentence, built from the decision log."""
-    kinds = [s["kind"] for s in ex["steps"] if s["action"]]
+    steps = [s for s in ex["steps"] if s["action"]]
+    kinds = [s["kind"] for s in steps]
+
+    def last_value(*moves: str) -> str | None:
+        # A move's action reads "external memory a -> b", "CPU a -> b" or "add b".
+        found = [s["action"] for s in steps if s["kind"] in moves]
+        if not found:
+            return None
+        return found[-1].rsplit(" -> ", 1)[-1] if " -> " in found[-1] else found[-1].split()[-1]
+
     first = []
     if "add_accel" in kinds:
         first.append("added a GEMV engine")
     if "more_channels" in kinds:
         first.append("doubled the memory channels")
-    if any(k in kinds for k in ("faster_mem", "slower_mem", "add_ext_mem")):
-        first.append("moved the weights to octal PSRAM")
-    trims = sum(k.startswith(("shrink", "less", "smaller", "fewer")) for k in kinds)
+    mem = last_value("faster_mem", "slower_mem", "add_ext_mem")
+    if mem:
+        first.append(f"moved the weights to {MEM.get(mem, mem)}")
+    cpu = last_value("faster_cpu")
+    if cpu:
+        first.append(f"switched to a {cpu.upper()} core")
+    trims = [TRIMS[k] for k in kinds if k in TRIMS]
     text = f"{ex['evaluated']:,} designs evaluated. The agent " + ", ".join(first)
     if trims:
-        text += f", then made {trims} trims to the SRAM, buffers and array"
+        parts = list(dict.fromkeys(trims))
+        what = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+        text += f", then made {len(trims)} trims to the {what}"
     return text + ", and stopped at the smallest design that still meets the target."
 
 
