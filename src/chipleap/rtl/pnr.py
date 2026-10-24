@@ -47,6 +47,8 @@ from chipleap.verify.pnr import (
     port_diodes,
     run_librelane,
     signoff,
+    sram_output_buffers,
+    with_eco_buffers,
     with_ihp_antenna,
 )
 from chipleap.verify.result import StepResult
@@ -335,7 +337,9 @@ def macro_config(project: Project, workdir: Path) -> dict[str, Any]:
     }
     if fp.no_pins:
         out["IO_EXCLUDE_PIN_REGION"] = place.pin_regions(fp)
-    return out
+    return with_eco_buffers(
+        out, sram_output_buffers((p, views[cell[p.instance]]) for p in fp.macros)
+    )
 
 
 def _finish(project: Project, workdir: Path, cfg: dict[str, Any]) -> dict[str, Any]:

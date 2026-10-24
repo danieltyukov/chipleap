@@ -59,6 +59,8 @@ from chipleap.verify import launch, librelane_pdk
 from chipleap.verify.pnr import (
     DEF_TO_ODB,
     DETAILED_ROUTING,
+    ECO_BUFFERS,
+    ECO_BUFFERS_AT,
     PnrError,
     PnrResult,
     begin_second_part,
@@ -91,6 +93,13 @@ REPAIR = "OpenROAD.ResizerTimingPostGRT"
 # repaired again after the timing repair (chipleap.verify.pnr.run_librelane). An ECO writes
 # its own step list instead.
 ROUTED_META = with_late_antenna_repair({"RUN_POST_GRT_RESIZER_TIMING": True})["meta"]
+# A project with the PDK's SRAMs adds buffers beside their outputs (chipleap.verify.pnr.
+# with_eco_buffers), which the state an ECO resumes from already holds: its step is not
+# among those the ECO repeats, and their list is not passed on.
+BUFFERED_META = {
+    **ROUTED_META,
+    "substituting_steps": {**ROUTED_META["substituting_steps"], ECO_BUFFERS_AT: ECO_BUFFERS},
+}
 STEP_ID_RE = re.compile(r"[A-Z][A-Za-z]*\.[A-Z][A-Za-z0-9]*")
 # The LibreLane variables ChipLeap's place and route writes (chipleap.rtl.pnr.config,
 # chipleap.verify.pnr.signoff and for_librelane), by the kind of value each takes. An ECO resumes LibreLane
@@ -130,6 +139,7 @@ TEMPLATE_KEYS = {
     "FP_MACRO_VERTICAL_HALO": "number",
     "PL_MAX_DISPLACEMENT_Y": "number",
     "MACROS": "macros",
+    "INSERT_ECO_BUFFERS": "eco_buffers",
     "PDN_CFG": "pdn",
     "RUN_POST_GRT_DESIGN_REPAIR": "bool",
     "DESIGN_REPAIR_MAX_WIRE_LENGTH": "number",
@@ -424,11 +434,12 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
     """The routed run's configuration as an ECO passes it on: only ``TEMPLATE_KEYS`` and
     the project's own numeric or boolean ``pnr.librelane`` settings, each with a plain
     value, and every file it names one the run recorded beside it, unchanged. Its flow
-    (``ROUTED_META``, the only one accepted) is left out for the ECO's own."""
+    (``ROUTED_META``, or ``BUFFERED_META`` with buffers beside a macro's outputs, the only
+    ones accepted) is left out for the ECO's own, and so are the buffers."""
     out = dict(cfg)
     for key, value in cfg.items():
         if key == "meta":
-            if value != ROUTED_META:
+            if value not in (ROUTED_META, BUFFERED_META):
                 raise EcoError(
                     f"the routed run's configuration sets meta to {value!r}, not the flow "
                     "ChipLeap's place and route writes; run the pnr step again"
@@ -438,6 +449,11 @@ def _settings(project: Project, cfg: dict[str, Any], sealed: Sealed) -> dict[str
         kind = TEMPLATE_KEYS.get(key)
         if kind == "macros":
             _macros(value, sealed)
+            continue
+        if kind == "eco_buffers":
+            if not isinstance(value, list) or not all(isinstance(b, dict) for b in value):
+                raise EcoError(f"the routed run's {key} is not a list of buffers")
+            del out[key]
             continue
         if kind == "drc_defines":
             # ChipLeap's own (``chipleap.verify.pnr.for_librelane``), which the ECO's

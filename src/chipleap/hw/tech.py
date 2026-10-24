@@ -139,26 +139,30 @@ ACCEL_SIGNOFF_FACTOR = 1.981
 ACCEL_LANE_NS = 0.329
 ACCEL_PORT_NS = (9.087, 0.2169)
 # A GEMV engine whose buffers are IHP's SRAM macros (chipleap.gen.banks, routed with
-# LibreLane 3.0.14 at the slow corner, 100 MHz):
+# LibreLane 3.0.14 at the slow corner, 100 MHz, with a buffer beside each macro output,
+# chipleap.verify.pnr.SRAM_OUTPUT_BUFFER):
 # - It registers each bank word in the cycle after its read, so the macro's read time
 #   (chipleap.macro.sram.IHP_1P_READ_NS: 5.0 to 5.3 ns at 256 words, 7.0 to 7.3 ns at 1024, 8.8
-#   to 9.4 ns at 2048 and more) bounds its period, with what follows the read: the word's
-#   select and weight unpacking into the operand registers, and the wires from the macro
-#   rows. ACCEL_BANK_PATH_NS is the most that took after the liberty's read time in a
-#   one-lane build whose worst path is the read: 3.80 ns in the GEMV 1 x 4 with 256 x 32
-#   macros, 3.95 ns in the 1 x 8 with 1024 x 64 and 4.03 ns in the 1 x 8 with 2048 x 64,
-#   whose read path (8.99 + 4.03 ns) set its clock at 76.8 MHz. On 3.0.0.dev44 it took 2.36
-#   to 2.64 ns. 3.0.14 applies the PDK's 5 % derate, which dev44 did not, the macro's read
-#   included: in the layouts the read alone took 5.46 ns at 256 words where the liberty has
-#   5.15, and 9.59 ns at 2048 where it has 8.99.
+#   to 9.4 ns at 2048 and more) bounds its period, with what follows the read: the output
+#   buffer, the word's select and weight unpacking into the operand registers, and the
+#   wires from the macro rows. ACCEL_BANK_PATH_NS is the most that took after the liberty's
+#   read time in a one-lane build whose worst path is the read: 3.91 ns in the GEMV 1 x 4
+#   with 256 x 32 macros, 4.09 ns in the 1 x 8 with 1024 x 64 and 4.14 ns in the 1 x 8 with
+#   2048 x 64, whose read path (8.99 + 4.14 ns) set its clock at 76.1 MHz. The output
+#   buffers took 0.11 to 0.14 ns of that: the same layouts routed without them took 3.80,
+#   3.95 and 4.03 ns. On 3.0.0.dev44, without them, it took 2.36 to 2.64 ns. 3.0.14 applies
+#   the PDK's 5 % derate, which dev44 did not, the macro's read included: in the layouts the
+#   read alone took 5.46 ns at 256 words where the liberty has 5.15, and 9.59 ns at 2048
+#   where it has 8.99.
 # - Its logic is spread along the rows of macros, across a die several times the flop
 #   build's, and can route slower than the flop build: the 1 x 8 with 256 x 64 macros at
-#   9.85 ns, where the model has 9.30 ns for its flop build, and the 2 x 8 with six
-#   256 x 64 macros at 10.63 ns, on its macros' read (5.48 ns after it, its six macros and
+#   9.84 ns, where the model has 9.30 ns for its flop build, and the 2 x 8 with six
+#   256 x 64 macros at 10.78 ns, on its macros' read (5.63 ns after it, its six macros and
 #   two lanes spreading further than the one-lane builds), where the model has 9.63 ns.
-#   ACCEL_BANK_NS is added to the flop build's period and bounds both.
-ACCEL_BANK_PATH_NS = 4.03
-ACCEL_BANK_NS = 0.998
+#   ACCEL_BANK_NS is added to the flop build's period and bounds both (0.998 ns without the
+#   output buffers, when the 2 x 8 took 10.63 ns).
+ACCEL_BANK_PATH_NS = 4.142
+ACCEL_BANK_NS = 1.15
 
 
 def accel_delay_ns(dataflow: str, cols: int, ports: int) -> float:
