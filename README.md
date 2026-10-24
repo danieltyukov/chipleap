@@ -128,7 +128,7 @@ Every tool is optional. `chipleap doctor` lists what it found, and `chipleap ver
 
 <img src="docs/img/layout.jpg" alt="The routed layout of the 4 x 8 GEMV engine with two read ports on IHP SG13G2, drawn from its GDS: signal wires on four metal layers under the power grid" width="300" align="right">
 
-`chipleap verify out --steps all` adds place and route with LibreLane 3.0.14, the release Tiny Tapeout's GDS action uses for its IHP shuttles, on the IHP-Open-PDK commit of your PDK checkout. The picture is the GDS it wrote for the SmolLM2 chip's 4 x 8 GEMV engine with two read ports: a 1.47 mm² core with clean DRC, LVS and antenna checks that meets its 50 MHz clock at the slow corner, with room to spare (about 69 MHz, and 86 MHz at the typical one). Its buffers are 16-word flop buffers there, since its two read ports write more than one word a cycle, which the layout's SRAM banks do not take.
+`chipleap verify out --steps all` adds place and route with LibreLane 3.0.14, the release Tiny Tapeout's GDS action uses for its IHP shuttles, on the IHP-Open-PDK commit of your PDK checkout. The picture is the GDS it wrote for the SmolLM2 chip's 4 x 8 GEMV engine with two read ports: a 1.47 mm² core with clean DRC, LVS and antenna checks. Routed for its 50 MHz clock, it meets timing with 5.6 ns to spare at the slow corner (hold +0.093 ns). Its buffers are 16-word flop buffers there, since its two read ports write more than one word a cycle, which the layout's SRAM banks do not take.
 
 The accelerator model is the same tile schedule the RTL runs, so it is checked against it:
 

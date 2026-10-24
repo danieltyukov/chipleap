@@ -433,14 +433,17 @@ def stats_html(rows: list[dict[str, Any]]) -> str:
         ),
     ]
     pr = next((r for r in rows if r["step"] == "pnr" and r["status"] == "pass"), {})
-    if pr.get("fmax_worst_mhz"):
+    if pr.get("clock_mhz") and pr.get("setup_slack_ns") is not None:
+        # The slack, not the clock it implies: repair stops once the clock asked for is met,
+        # so that clock is no limit of the design.
         items.append(
             (
-                float(pr["fmax_worst_mhz"]),
-                0,
+                float(pr["setup_slack_ns"]),
+                1,
                 "",
-                "MHz",
-                "clock the routed accelerator reaches on IHP SG13G2 at the slow corner",
+                "ns",
+                f"setup slack of the routed accelerator at its {pr['clock_mhz']:g} MHz clock, "
+                "slow corner, IHP SG13G2",
             )
         )
     elif synth.get("fmax_mhz_estimate"):
@@ -596,11 +599,12 @@ def layout_html(rows: list[dict[str, Any]], label: str) -> str:
             "Its buffers are SRAM macros in silicon, cut to "
             f"{pr.get('buffer_words', 16)} words here."
         )
+    clock = f"{pr['clock_mhz']:g}"
     facts = [
         ("Standard cells", f"{pr['cells']:,}", ""),
         ("Core area", f"{pr['core_um2'] / 1e6:.2f}", "mm²"),
-        ("Typical corner", f"{pr['fmax_mhz']:.0f}", "MHz"),
-        ("Slow corner, 125 °C", f"{pr['fmax_worst_mhz']:.0f}", "MHz"),
+        (f"Setup slack at {clock} MHz, slow corner", f"{pr['setup_slack_ns']:+.1f}", "ns"),
+        ("Hold slack, worst corner", f"{pr['hold_slack_ns']:+.3f}", "ns"),
     ]
     dl = "".join(
         f"<div><dt>{k}</dt><dd>{v}{f'<small>{u}</small>' if u else ''}</dd></div>"
@@ -613,8 +617,10 @@ def layout_html(rows: list[dict[str, Any]], label: str) -> str:
         'four metal layers under the power grid"></picture>'
         "<div><h3>And then it is placed and routed</h3>"
         "<p>The same accelerator, through LibreLane on IHP SG13G2: placement, clock tree, "
-        f"routing, timing at every corner, {checks}. This is the GDS it wrote, drawn in the "
-        f"PDK's layer colours. {buffers}"
+        f"routing, timing at every corner, {checks}. Routed for its {clock} MHz clock, it meets "
+        f"timing with {pr['setup_slack_ns']:.1f} ns to spare at the slow corner (hold "
+        f"{pr['hold_slack_ns']:+.3f} ns). This is the GDS it wrote, drawn in the PDK's layer "
+        f"colours. {buffers}"
         f"</p><dl>{dl}</dl></div></div>"
     )
 
