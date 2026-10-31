@@ -35,7 +35,7 @@ classifiers = [
 dependencies = ["pyyaml>=6.0.3", "mcp>=1.10", "tomli>=2.5.0; python_version < '3.11'"]
 
 [project.optional-dependencies]
-xheep = ["hjson>=3.1.0", "mako>=1.2"]
+xheep = ["hjson>=3.1.0", "mako>=1.4.3"]
 rtl = ["cocotb>=2.0"]
 dev = [
   "pytest>=9.2.0",
@@ -44,7 +44,7 @@ dev = [
   "mypy>=2.4.0",
   "types-PyYAML",
   "hjson>=3.1.0",
-  "mako>=1.2",
+  "mako>=1.4.3",
   "cocotb>=2.0",
   "tomli>=2.5.0",
   "jsonschema>=4",
