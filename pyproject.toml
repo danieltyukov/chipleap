@@ -47,7 +47,7 @@ dev = [
   "mako>=1.4.3",
   "cocotb>=2.1.0",
   "tomli>=2.5.0",
-  "jsonschema>=4",
+  "jsonschema>=4.26.0",
 ]
 site = ["pillow>=12.3.0"]
 
