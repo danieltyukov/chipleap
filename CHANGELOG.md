@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-21
+
 ### Added
 
 - The accelerator's direct read path to external memory. In X-HEEP an external master reaches only the system crossbar, and the external slave window is served by ports X-HEEP splits off before it for its own masters, so the accelerator could not read weights from external memory, which the model assumed it did. With external memory on X-HEEP (`Design.direct_memory`), `chipleap_accel` gets `EXT_DIRECT`: a DMA transfer whose source lies in X-HEEP's external window goes out on direct read ports (`ext_*`, one per read port) through the same address generators and queues, with as many reads in flight as the memory's latency needs at the accelerator's clock (16 on IHP SG13G2). `chipleap_mem` (`rtl/chipleap_mem.sv`) puts X-HEEP's external slave ports (round robin among them) and the accelerator's first direct port (round robin with them) on the memory controller's first port, the other direct ports on ports of their own; requests wait stable for their grant and responses come back in order. On its own clock the accelerator's memory ports run on that clock and X-HEEP's side crosses into it. The SoC top wires it all and has one memory port per read port in place of X-HEEP's three external slave ports. The bundle carries it, the consistency, lint, sim, cdc, synth and pnr steps cover it, and a new testbench streams weights from a memory that keeps requests in flight while X-HEEP's ports read and write beside them (`tb_chipleap_mem.cpp`): bit-exact, cycle-exact against the model with X-HEEP idle, every X-HEEP access right. The model takes the external stream at the accelerator's clock without a crossing and prices the path (1.24 kGE per port, 1.47 kGE of arbiters, 2.44 kGE for X-HEEP's crossing on the accelerator's own clock). SmolLM2 at the routed SoC's 35 MHz: 1.10 token/s on the SoC's clock, 1.67 with the accelerator at 90 MHz, bound by the memory; X-HEEP's DMA alone could give 0.21. docs/xheep.md states what the memory controller, which is not ChipLeap's, must do.
@@ -160,7 +162,8 @@ First release.
 - MCP server with ten tools, a `design_chip` prompt and a spec reference, run logs and `chipleap replay`.
 - Website with a Blender render of a generated die and the agent's decisions animated to scale.
 
-[Unreleased]: https://github.com/danieltyukov/chipleap/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/danieltyukov/chipleap/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/danieltyukov/chipleap/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/danieltyukov/chipleap/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/danieltyukov/chipleap/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/danieltyukov/chipleap/releases/tag/v0.1.0
