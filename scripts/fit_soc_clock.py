@@ -90,9 +90,10 @@ def terms(
             rest = p.needed_ns - IHP_1P_READ_NS[banks[inst]]
             if read is None or rest > read[0]:
                 read = (rest, p)
-        elif not (_inside(p.start, ACCEL_INST) and _inside(p.end, ACCEL_INST)):
-            if bus is None or p.needed_ns > bus.needed_ns:
-                bus = p
+        elif not (_inside(p.start, ACCEL_INST) and _inside(p.end, ACCEL_INST)) and (
+            bus is None or p.needed_ns > bus.needed_ns
+        ):
+            bus = p
     return read, bus
 
 
